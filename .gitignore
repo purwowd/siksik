@@ -1,0 +1,84 @@
+# --- Python ---
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# --- Node / frontend ---
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Env & secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+
+# --- SADT data / runtime ---
+data/
+backend/data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Staging / reports / dumps
+**/staging/
+**/reports/
+**/synthetic/
+*.zip
+!frontend/public/**/*.zip
+
+# Model weights / caches (GPU stack)
+models/
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.safetensors
+.cache/
+hf_cache/
+torch_cache/
+whisper_cache/
+
+# --- OS / IDE ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- Logs / temp ---
+*.log
+tmp/
+temp/
+.TemporaryItems/
+.AppleDouble/
+
+# --- Docker / local overrides ---
+docker-compose.override.yml

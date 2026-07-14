@@ -1,0 +1,35 @@
+# GPU server extras — moderation stack
+#
+# Install (CUDA 12.4 contoh):
+#   pip install -r requirements.txt -r requirements-gpu.txt
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#
+# Run:
+#   python run.py --reload --host 127.0.0.1 --port 8000 --gpu
+#
+# Weights (opsional, unduh terpisah):
+#   SADT_GPU_SAFEWATCH_MODEL=/path/to/safewatch
+#   SADT_GPU_ICM_MODEL=zhaoyuzhi/ICM-LLaVA-v1.5-7B
+#   SADT_GPU_QWEN_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
+
+# Vision / torch base
+torch>=2.1.0
+
+# OCR
+paddlepaddle-gpu>=2.5.0; platform_system != "Darwin"
+paddleocr>=2.7.0
+easyocr>=1.7.0
+
+# Audio / lyrics
+openai-whisper>=20231117
+
+# Qwen2.5-VL (transformers stack)
+transformers>=4.45.0
+accelerate>=0.33.0
+qwen-vl-utils>=0.0.8
+
+# Catatan:
+# - SafeWatch & ICM-Assistant: install dari repo resmi + checkpoint lokal
+#   https://github.com/BillChan226/SafeWatch
+#   https://github.com/zhaoyuzhi/icm-assistant
+# - Di macOS tanpa CUDA: Whisper/OCR bisa CPU; MLLM guardrail butuh server NVIDIA
