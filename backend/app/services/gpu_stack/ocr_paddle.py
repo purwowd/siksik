@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 
 from app.core.config import settings
@@ -64,10 +63,11 @@ def extract_text(image_path: Path) -> str:
 
 
 def moderate_image(path: Path) -> list[ModerationHit]:
-    """OCR text → risk keyword findings."""
+    """OCR text → risk keyword findings (word-boundary)."""
     if not settings.gpu_stack_enabled:
         return []
-    # Prefer dedicated paddle path; fall back to existing ocr module if paddle missing
+    from app.services.lexicon import category_for_keyword, match_keywords
+
     text = ""
     if status()["available"]:
         text = extract_text(path)
@@ -75,25 +75,22 @@ def moderate_image(path: Path) -> list[ModerationHit]:
         try:
             from app.services import ocr as ocr_mod
 
-            if settings.ocr_enabled:
+            if settings.ocr_enabled or settings.media_text_enabled:
                 result = ocr_mod.run_ocr(path)
                 text = result.text if result else ""
         except Exception:
             text = ""
     if not text.strip():
         return []
-    norm = re.sub(r"\s+", " ", text.lower())
-    hits: list[ModerationHit] = []
-    for kw in settings.risk_keywords:
-        if kw.lower() in norm:
-            hits.append(
-                ModerationHit(
-                    category="konten_teks",
-                    label=f"OCR indikasi: {kw}",
-                    confidence=0.78,
-                    layer_origin=Layer.L3.value,
-                    evidence=text[:280],
-                    backend="paddleocr",
-                )
-            )
-    return hits
+    kws = match_keywords(text)
+    return [
+        ModerationHit(
+            category=category_for_keyword(kw),
+            label=f"OCR indikasi: {kw}",
+            confidence=0.78,
+            layer_origin=Layer.L3.value,
+            evidence=text[:280],
+            backend="paddleocr",
+        )
+        for kw in kws[:5]
+    ]

@@ -48,14 +48,20 @@ async def test_session_tidak_lulus_has_findings(client: AsyncClient):
     sid = res.json()["id"]
     final = await wait_session(client, sid)
     assert final["status"] == "completed"
-    assert final["recommendation"] == "TIDAK LULUS"
     assert final["progress"]["findings_count"] > 0
+    # Ada temuan pending → belum lulus, menunggu verifikasi analis
+    assert final["recommendation"] == "MENUNGGU REVIEW"
     assert final["timing"]["t_total_ms"] > 0
 
     findings = (await client.get(f"/api/v1/sessions/{sid}/findings?page_size=500")).json()
     assert findings["total"] == final["progress"]["findings_count"]
     assert all("confidence" in f for f in findings["items"])
 
+    fid = findings["items"][0]["id"]
+    patched = await client.patch(f"/api/v1/findings/{fid}", json={"review_status": "confirmed"})
+    assert patched.status_code == 200
+    after = (await client.get(f"/api/v1/sessions/{sid}")).json()
+    assert after["recommendation"] == "TIDAK LULUS"
 
 @pytest.mark.api
 @pytest.mark.acceptance
@@ -146,7 +152,15 @@ async def test_review_finding(client: AsyncClient):
     )
     assert patched.status_code == 200
     assert patched.json()["review_status"] == "confirmed"
-
+    after = (await client.get(f"/api/v1/sessions/{sid}")).json()
+    assert after["recommendation"] == "TIDAK LULUS"
+    # Reject confirmed → MENUNGGU REVIEW jika masih ada pending, else LULUS
+    await client.patch(f"/api/v1/findings/{fid}", json={"review_status": "rejected"})
+    again = (await client.get(f"/api/v1/sessions/{sid}")).json()
+    if findings["total"] > 1:
+        assert again["recommendation"] == "MENUNGGU REVIEW"
+    else:
+        assert again["recommendation"] == "LULUS"
 
 @pytest.mark.api
 async def test_dashboard_aggregates(client: AsyncClient):
@@ -196,3 +210,35 @@ async def test_session_report(client: AsyncClient):
     html = await client.get(f"/api/v1/sessions/{sid}/report?format=html")
     assert html.status_code == 200
     assert "SADT" in html.text
+
+
+@pytest.mark.api
+async def test_recompute_recommendations_migrates_pending(client: AsyncClient):
+    """Admin endpoint: LULUS lama + temuan pending → MENUNGGU REVIEW."""
+    from app.core.db import db
+
+    res = await client.post(
+        "/api/v1/sessions",
+        json={
+            "device_id": "sim-android-01",
+            "device_type": "android",
+            "mode": "quick",
+            "scenario": "tidak_lulus",
+            "file_count": 120,
+            "label": "Recompute migrate",
+            "force_simulated": True,
+        },
+    )
+    sid = res.json()["id"]
+    final = await wait_session(client, sid)
+    assert final["recommendation"] == "MENUNGGU REVIEW"
+    # Simulasikan data lama (pre-migration) yang sempat tertulis LULUS
+    await db.execute(
+        "UPDATE sessions SET recommendation = 'LULUS' WHERE id = ?",
+        (sid,),
+    )
+    out = (await client.post("/api/v1/admin/recompute-recommendations")).json()
+    assert out["scanned"] >= 1
+    assert any(c["session_id"] == sid and c["to"] == "MENUNGGU REVIEW" for c in out["changes"])
+    after = (await client.get(f"/api/v1/sessions/{sid}")).json()
+    assert after["recommendation"] == "MENUNGGU REVIEW"

@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS findings (
     evidence TEXT NOT NULL,
     review_status TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    media_year INTEGER,
+    media_captured_at TEXT,
     FOREIGN KEY(session_id) REFERENCES sessions(id)
 );
 
@@ -91,6 +93,16 @@ class Database:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA)
         await self._conn.commit()
+        await self._migrate()
+
+    async def _migrate(self) -> None:
+        """Additive migrations for existing DBs."""
+        cols = await self.fetchall("PRAGMA table_info(findings)")
+        names = {r["name"] for r in cols}
+        if "media_year" not in names:
+            await self.execute("ALTER TABLE findings ADD COLUMN media_year INTEGER")
+        if "media_captured_at" not in names:
+            await self.execute("ALTER TABLE findings ADD COLUMN media_captured_at TEXT")
 
     async def close(self) -> None:
         if self._conn:

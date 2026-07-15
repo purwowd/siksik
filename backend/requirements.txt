@@ -4,5 +4,8 @@ pydantic>=2.11.0
 pydantic-settings>=2.8.0
 aiosqlite>=0.21.0
 python-multipart>=0.0.20
-Pillow>=10.0.0
+easyocr>=1.7.0; platform_system=="Darwin"
 bcrypt>=4.2.0
+# CLIP tokoh/presiden (foto) — opsional tapi disarankan di lab:
+#   pip install transformers
+transformers>=4.40.0

@@ -11,12 +11,39 @@ from app.services.analysis import analyze_image_meta_l3, analyze_text_l1_l2
 
 
 @pytest.mark.unit
-def test_l1_detects_keyword():
-    text = "Pesan rahasia terkait anti pemerintah di grup."
-    findings = analyze_text_l1_l2(text, settings.risk_keywords)
-    assert findings
-    assert any("anti pemerintah" in f["label"] for f in findings)
-    assert all(0 < f["confidence"] <= 0.99 for f in findings)
+def test_jpeg_binary_noise_does_not_trigger_l1_bom(tmp_path, monkeypatch):
+    """Byte JPEG sering membentuk token 'bom' bila di-decode UTF-8 — jangan scan binary."""
+    from pathlib import Path
+
+    from app.services.analysis import analyze_content, read_preview
+    import asyncio
+
+    # Minimal JPEG-like bytes containing standalone "bom" as decoded junk would
+    junk = b"\xff\xd8\xff\xe0" + b"xxxx bom yyyy" + b"\x00\x01\x02" * 200 + b"\xff\xd9"
+    img = tmp_path / "id-11134207-7r991-llk54ugij23069.jpeg"
+    img.write_bytes(junk)
+
+    text = asyncio.run(read_preview(img, "image/jpeg"))
+    assert text == ""
+
+    # vision path may add findings; stub it so we only test L1 binary scan removal
+    monkeypatch.setattr(
+        "app.services.vision.analyze_image_file",
+        lambda _p: [],
+    )
+    findings = analyze_content(img, "image/jpeg", "documents", text, settings.risk_keywords)
+    assert not any("Indikasi: bom" in f["label"] for f in findings)
+    assert not any(f["label"].startswith("Indikasi:") for f in findings)
+
+
+@pytest.mark.unit
+def test_real_text_file_still_detects_bom(tmp_path):
+    from app.services.analysis import analyze_content
+
+    note = tmp_path / "note.txt"
+    note.write_text("rencana bom di malam ini", encoding="utf-8")
+    findings = analyze_content(note, "text/plain", "documents", note.read_text(), settings.risk_keywords)
+    assert any("bom" in f["label"].lower() for f in findings)
 
 
 @pytest.mark.unit

@@ -22,11 +22,39 @@ from app.models.schemas import (
     TimingBreakdown,
 )
 
-TEXT_EXT = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".log", ".vcard", ".vcf"}
+TEXT_EXT = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm", ".log", ".vcard", ".vcf"}
 DOC_EXT = {".pdf", ".doc", ".docx", ".rtf", ".odt"}
-IMG_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".bmp", ".imgmeta"}
-VID_EXT = {".mp4", ".mov", ".mkv", ".avi", ".3gp", ".webm"}
+IMG_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".bmp", ".imgmeta"}
+VID_EXT = {".mp4", ".mov", ".mkv", ".avi", ".3gp", ".webm", ".vidmeta"}
 CHAT_HINTS = ("whatsapp", "telegram", "wa-", "msgstore", "chat")
+
+# Junk Android / OS clutter — jangan di-pull / di-index
+_JUNK_BASENAMES = frozenset(
+    {
+        ".nomedia",
+        ".database_uuid",
+        ".ds_store",
+        "thumbs.db",
+        "desktop.ini",
+        ".thumbnails",
+    }
+)
+_MEDIA_EXT = IMG_EXT | VID_EXT | TEXT_EXT | DOC_EXT
+
+
+def _is_junk_media_path(path_str: str) -> bool:
+    """Skip hidden/junk yang sering ikut saat find pada Movies/Download."""
+    name = Path(path_str).name
+    low = name.lower()
+    if low in _JUNK_BASENAMES:
+        return True
+    if name.startswith("."):
+        return True
+    ext = Path(path_str).suffix.lower()
+    # PoC gallery-first: hanya media/dokumen relevan
+    if not ext or ext not in _MEDIA_EXT:
+        return True
+    return False
 
 
 async def _run(cmd: list[str], timeout: float = 30.0) -> tuple[int, str, str]:
@@ -312,6 +340,8 @@ async def _adb_list_files(device_id: str, remote_dirs: list[str], limit: int) ->
                     path = line
             if not path or path.endswith("/"):
                 continue
+            if _is_junk_media_path(path):
+                continue
             low = path.lower()
             bonus = 1_000_000.0 if any(low.endswith(ext) for ext in prefer) else 0.0
             # Gallery-first scoring (msgstore/DB diabaikan)
@@ -319,10 +349,15 @@ async def _adb_list_files(device_id: str, remote_dirs: list[str], limit: int) ->
                 bonus += 800_000.0
             if low.endswith((".db", ".sqlite")) or "msgstore" in low or "/databases/" in low:
                 continue  # skip chat DB entirely for now
+            # Video path boost — agar Movies/Download/*.mp4 tidak kalah dari foto massal
+            if any(low.endswith(e) for e in (".mp4", ".mov", ".3gp", ".mkv", ".webm")):
+                bonus += 500_000.0
+            if any(x in low for x in ("/movies/", "/video/", "whatsapp video", "telegram video")):
+                bonus += 350_000.0
             if any(x in low for x in ("whatsapp", "telegram")) and any(
-                low.endswith(e) for e in (".jpg", ".jpeg", ".png", ".webp", ".mp4")
+                low.endswith(e) for e in (".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".3gp")
             ):
-                bonus += 200_000.0  # foto chat tetap boleh, prioritas di bawah DCIM
+                bonus += 200_000.0  # foto/video chat, prioritas di bawah DCIM
             scored.append((mtime + bonus, path))
 
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -480,12 +515,9 @@ async def acquire_ios_libimobiledevice(
 
 def _zip_skip(name: str) -> bool:
     low = name.replace("\\", "/").lower()
-    base = Path(name).name.lower()
-    if base.startswith(".") or base in {".ds_store", "thumbs.db"}:
-        return True
     if "__macosx" in low.split("/"):
         return True
-    return False
+    return _is_junk_media_path(name)
 
 
 def _bucket_for_file(name: str) -> str:
@@ -642,16 +674,22 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
     paths = [
         p
         for p in staging.rglob("*")
-        if p.is_file() and not p.name.endswith(".risk") and "_backup" not in p.parts
+        if p.is_file()
+        and not p.name.endswith(".risk")
+        and "_backup" not in p.parts
+        and not _is_junk_media_path(str(p))
     ]
     total = len(paths)
     sem = asyncio.Semaphore(settings.worker_concurrency)
 
     async def one(p: Path) -> tuple:
         async with sem:
+            from app.services.media_dates import capture_meta
+
             rel = str(p.relative_to(staging))
             source = Path(rel).parts[0] if Path(rel).parts else "other"
             digest = await hash_file(p)
+            meta = {"ext": p.suffix.lower(), **capture_meta(p)}
             return (
                 str(uuid.uuid4()),
                 session_id,
@@ -662,7 +700,7 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                 digest,
                 "pulled",
                 0,
-                json.dumps({"ext": p.suffix.lower()}),
+                json.dumps(meta),
             )
 
     wave = 64

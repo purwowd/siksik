@@ -4,7 +4,8 @@ import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from pathlib import Path
 
 from app.core.config import settings
 from app.core.db import db, utcnow
@@ -23,9 +24,12 @@ from app.models.schemas import (
     PaginatedSessions,
     ReviewRequest,
     ReviewStatus,
+    RiskTimeline,
     SessionSummary,
     StartSessionRequest,
+    YearRiskBucket,
 )
+from app.services.timeline import build_risk_timeline
 from app.services.acquisition import detect_devices, toolchain_status
 from app.services.auth import (
     PERMISSIONS,
@@ -107,6 +111,15 @@ async def health(user: Annotated[AuthUser, Depends(require_perm("health"))]) -> 
     extras: dict = {
         "focus_scope": settings.focus_scope,
         "image_cap_quick": settings.image_cap_quick,
+        "image_cap_full": settings.image_cap_full,
+        "zip_enabled": settings.zip_enabled,
+        "zip_max_mb": settings.zip_max_mb,
+        "ocr_full_gallery": settings.ocr_full_gallery,
+        "ocr_max_edge_px": settings.ocr_max_edge_px,
+        "video_cap_quick": settings.video_cap_quick,
+        "video_cap_full": settings.video_cap_full,
+        "video_whisper_max_duration_s": settings.video_whisper_max_duration_s,
+        "analysis_engine": __import__("app.services.hash_cache", fromlist=["engine_fingerprint"]).engine_fingerprint(),
         "worker_concurrency": settings.worker_concurrency,
         "lab_demo_mode": settings.lab_demo_mode,
         "toolchain": tools,
@@ -312,6 +325,48 @@ async def session_findings(
     )
 
 
+@router.get("/sessions/{session_id}/media")
+async def session_media(
+    session_id: str,
+    _: Annotated[AuthUser, Depends(require_perm("findings:read"))],
+    path: str = Query(..., min_length=1, max_length=1024, description="Relative path dalam staging"),
+):
+    """Serve image/video preview dari staging sesi (path traversal aman)."""
+    row = await db.fetchone("SELECT id FROM sessions WHERE id = ?", (session_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    # Normalisasi relative path
+    rel = path.replace("\\", "/").lstrip("/")
+    if ".." in Path(rel).parts:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    staging = (settings.staging_dir / session_id).resolve()
+    target = (staging / rel).resolve()
+    try:
+        target.relative_to(staging)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Path di luar staging") from exc
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File tidak ditemukan")
+    # Batasi jenis media untuk UI preview
+    ext = target.suffix.lower()
+    if ext not in {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".webp",
+        ".bmp",
+        ".mp4",
+        ".mov",
+        ".webm",
+        ".mkv",
+        ".3gp",
+        ".avi",
+    }:
+        raise HTTPException(status_code=415, detail="Tipe media tidak didukung preview")
+    return FileResponse(target, filename=target.name)
+
+
 @router.get("/sessions/{session_id}/report")
 async def session_report(
     session_id: str,
@@ -389,12 +444,69 @@ async def review_finding(
         "UPDATE findings SET review_status = ? WHERE id = ?",
         (body.review_status.value, finding_id),
     )
+    from app.services.recommendation import apply_recommendation
+
+    await apply_recommendation(str(row["session_id"]))
     row = await db.fetchone("SELECT * FROM findings WHERE id = ?", (finding_id,))
     return FindingOut.model_validate(dict(row))
 
 
+@router.get("/sessions/{session_id}/risk-timeline", response_model=RiskTimeline)
+async def session_risk_timeline(
+    session_id: str,
+    _: Annotated[AuthUser, Depends(require_perm("findings:read"))],
+    years_back: int = Query(5, ge=1, le=15),
+) -> RiskTimeline:
+    row = await db.fetchone("SELECT id FROM sessions WHERE id = ?", (session_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    finding_rows = await db.fetchall(
+        "SELECT media_year, category, review_status FROM findings WHERE session_id = ?",
+        (session_id,),
+    )
+    data = build_risk_timeline([dict(r) for r in finding_rows], years_back=years_back)
+    return RiskTimeline(
+        years_back=data["years_back"],
+        year_from=data["year_from"],
+        year_to=data["year_to"],
+        series=[YearRiskBucket(**s) for s in data["series"]],
+        older_than_window=data["older_than_window"],
+        unknown_date=data["unknown_date"],
+        trend=data["trend"],
+        insight=data["insight"],
+        peak_year=data["peak_year"],
+        peak_count=data["peak_count"],
+        current_year_count=data["current_year_count"],
+        prior_avg=data["prior_avg"],
+    )
+
+
+@router.post("/admin/clear-hash-cache")
+async def clear_hash_cache_endpoint(
+    _: Annotated[AuthUser, Depends(require_perm("users:manage"))],
+) -> dict:
+    """Invalidate cache enrichment — wajib setelah pasang/nyalakan OCR atau Whisper."""
+    from app.services.hash_cache import clear_hash_cache, engine_fingerprint
+
+    n = await clear_hash_cache()
+    return {"cleared": n, "engine": engine_fingerprint()}
+
+
+@router.post("/admin/recompute-recommendations")
+async def recompute_recommendations_endpoint(
+    _: Annotated[AuthUser, Depends(require_perm("users:manage"))],
+) -> dict:
+    """Hitung ulang LULUS / MENUNGGU REVIEW / TIDAK LULUS untuk semua sesi completed."""
+    from app.services.recommendation import recompute_all_recommendations
+
+    return await recompute_all_recommendations()
+
+
 @router.get("/dashboard", response_model=DashboardStats)
-async def dashboard(_: Annotated[AuthUser, Depends(require_perm("dashboard"))]) -> DashboardStats:
+async def dashboard(
+    _: Annotated[AuthUser, Depends(require_perm("dashboard"))],
+    session_id: str | None = Query(None, description="Fokus timeline risiko ke sesi ini"),
+) -> DashboardStats:
     total = await db.fetchone("SELECT COUNT(*) AS c FROM sessions")
     completed = await db.fetchone("SELECT COUNT(*) AS c FROM sessions WHERE status = 'completed'")
     failed = await db.fetchone("SELECT COUNT(*) AS c FROM sessions WHERE status = 'failed'")
@@ -415,6 +527,9 @@ async def dashboard(_: Annotated[AuthUser, Depends(require_perm("dashboard"))]) 
     lulus = await db.fetchone("SELECT COUNT(*) AS c FROM sessions WHERE recommendation = 'LULUS'")
     tidak = await db.fetchone(
         "SELECT COUNT(*) AS c FROM sessions WHERE recommendation = 'TIDAK LULUS'"
+    )
+    menunggu = await db.fetchone(
+        "SELECT COUNT(*) AS c FROM sessions WHERE recommendation = 'MENUNGGU REVIEW'"
     )
 
     timing_rows = await db.fetchall(
@@ -445,6 +560,47 @@ async def dashboard(_: Annotated[AuthUser, Depends(require_perm("dashboard"))]) 
     n = max(len(totals), 1)
     tools = await toolchain_status()
 
+    # Timeline 5 tahun — prefer session_id query, else sesi completed terbaru yang punya findings
+    timeline: RiskTimeline | None = None
+    tl_sid: str | None = None
+    tl_label: str | None = None
+    focus = session_id
+    if not focus:
+        latest = await db.fetchone(
+            """
+            SELECT s.id, s.label FROM sessions s
+            WHERE s.status = 'completed'
+            ORDER BY s.updated_at DESC LIMIT 1
+            """
+        )
+        if latest:
+            focus = latest["id"]
+            tl_label = latest["label"]
+    if focus:
+        srow = await db.fetchone("SELECT id, label FROM sessions WHERE id = ?", (focus,))
+        if srow:
+            tl_sid = srow["id"]
+            tl_label = srow["label"]
+            frows = await db.fetchall(
+                "SELECT media_year, category FROM findings WHERE session_id = ?",
+                (focus,),
+            )
+            data = build_risk_timeline([dict(r) for r in frows], years_back=5)
+            timeline = RiskTimeline(
+                years_back=data["years_back"],
+                year_from=data["year_from"],
+                year_to=data["year_to"],
+                series=[YearRiskBucket(**s) for s in data["series"]],
+                older_than_window=data["older_than_window"],
+                unknown_date=data["unknown_date"],
+                trend=data["trend"],
+                insight=data["insight"],
+                peak_year=data["peak_year"],
+                peak_count=data["peak_count"],
+                current_year_count=data["current_year_count"],
+                prior_avg=data["prior_avg"],
+            )
+
     return DashboardStats(
         total_sessions=total["c"] if total else 0,
         completed_sessions=completed["c"] if completed else 0,
@@ -456,6 +612,7 @@ async def dashboard(_: Annotated[AuthUser, Depends(require_perm("dashboard"))]) 
         rejected_findings=rejected["c"] if rejected else 0,
         lulus_count=lulus["c"] if lulus else 0,
         tidak_lulus_count=tidak["c"] if tidak else 0,
+        menunggu_review_count=menunggu["c"] if menunggu else 0,
         avg_total_ms=round(sum(totals) / n, 1) if totals else 0,
         avg_acquire_ms=round(sum(acqs) / n, 1) if acqs else 0,
         avg_analyze_ms=round(sum(anas) / n, 1) if anas else 0,
@@ -467,4 +624,7 @@ async def dashboard(_: Annotated[AuthUser, Depends(require_perm("dashboard"))]) 
         acquisition_methods=[NamedCount(name=k, count=v) for k, v in methods.items()],
         toolchain=tools,
         gpu_available=_gpu_available(),
+        risk_timeline=timeline,
+        timeline_session_id=tl_sid,
+        timeline_session_label=tl_label,
     )

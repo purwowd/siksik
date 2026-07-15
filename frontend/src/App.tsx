@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState, useTransition, type FormEvent } from "react";
-import { DEFAULT_PAGE_SIZE, Pagination } from "./Pagination";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { DEFAULT_PAGE_SIZE } from "./Pagination";
 import {
   api,
   can,
   loadAuth,
-  ms,
   saveAuth,
   type AcquisitionMode,
   type AuthSession,
@@ -12,67 +12,257 @@ import {
   type DeviceInfo,
   type Finding,
   type Paginated,
+  type ReviewStatus,
   type SessionSummary,
+  type VisionHealth,
 } from "./api";
-import { DistBars } from "./components/DistBars";
+import { Breadcrumb } from "./components/Breadcrumb";
 import { LoginScreen } from "./components/LoginScreen";
-import { PipelineTrack } from "./components/PipelineTrack";
-import { StatusPill } from "./components/StatusPill";
-import { ACTIVE, TAB_PERMS } from "./constants";
+import { ToastStack, TOAST_MAX_VISIBLE, type ToastItem, type ToastTone } from "./components/Toast";
+import { TopLoadingBar } from "./components/TopLoadingBar";
+import { ACTIVE, preferredLandingTab, TAB_DEFS, TAB_PERMS } from "./constants";
+
+const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+import { DashboardPage } from "./pages/DashboardPage";
+import { FindingsPage } from "./pages/FindingsPage";
+import { OperatorPage } from "./pages/OperatorPage";
+import { ReportPage } from "./pages/ReportPage";
+import {
+  buildTabUrl,
+  parseTabSearch,
+  pathFromTab,
+  resolveSessionId,
+  tabFromPath,
+  type ReviewFilterParam,
+} from "./routes";
 import type { Tab } from "./types";
+
+const QUICK_VIDEO_CAP = 80;
+const SESSION_STORAGE_KEY = "sadt_active_session_id";
+
+type ReviewSummary = {
+  pending: number;
+  confirmed: number;
+  rejected: number;
+  total: number;
+};
 
 export default function App() {
   const [auth, setAuth] = useState<AuthSession | null>(() => loadAuth());
   const [loginUser, setLoginUser] = useState("operator");
   const [loginPass, setLoginPass] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
-  const [tab, setTab] = useState<Tab>("operator");
+  const navigate = useNavigate();
+  const location = useLocation();
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [selected, setSelected] = useState<DeviceInfo | null>(null);
   const [mode, setMode] = useState<AcquisitionMode>("quick");
   const [fileCount] = useState(1200);
   const [acqSource, setAcqSource] = useState<"live" | "zip">("live");
   const [zipFile, setZipFile] = useState<File | null>(null);
+  const [zipMaxMb, setZipMaxMb] = useState(512);
+  const [zipEnabled, setZipEnabled] = useState(true);
+  const [uploadPct, setUploadPct] = useState<number | null>(null);
+  const [authorizeNote, setAuthorizeNote] = useState("");
   const [session, setSession] = useState<SessionSummary | null>(null);
+  const [sessionList, setSessionList] = useState<SessionSummary[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
   const [dash, setDash] = useState<DashboardStats | null>(null);
+  const [dashLoading, setDashLoading] = useState(false);
   const [findingsData, setFindingsData] = useState<Paginated<Finding> | null>(null);
+  const [findingsLoading, setFindingsLoading] = useState(false);
   const [findingsPage, setFindingsPage] = useState(1);
+  const [reviewFilter, setReviewFilter] = useState<"all" | ReviewStatus>("all");
   const [reportFindings, setReportFindings] = useState<Paginated<Finding> | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
   const [reportPage, setReportPage] = useState(1);
+  const [reviewSummary, setReviewSummary] = useState<ReviewSummary | null>(null);
   const [dashSessions, setDashSessions] = useState<Paginated<SessionSummary> | null>(null);
   const [dashSessionsPage, setDashSessionsPage] = useState(1);
   const [dashFindings, setDashFindings] = useState<Paginated<Finding> | null>(null);
   const [dashFindingsPage, setDashFindingsPage] = useState(1);
   const [error, setError] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [globalPending, setGlobalPending] = useState(0);
   const [gpu, setGpu] = useState(false);
   const [toolchain, setToolchain] = useState<Record<string, boolean>>({});
-  const [vision, setVision] = useState<Record<string, unknown>>({});
+  const [vision, setVision] = useState<VisionHealth>({});
+  const [imageCapQuick, setImageCapQuick] = useState(800);
+  const [imageCapFull, setImageCapFull] = useState(3000);
   const [busy, setBusy] = useState(false);
-  const [, startTransition] = useTransition();
+  const [reviewBusyId, setReviewBusyId] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [expandedEvidence, setExpandedEvidence] = useState<string | null>(null);
+  const [focusedFindingId, setFocusedFindingId] = useState<string | null>(null);
   const teleRef = useRef<HTMLElement | null>(null);
+  const defaultSessionTried = useRef(false);
+  const sessionIdRef = useRef<string | null>(null);
+  const prevSessionStatusRef = useRef<string | null>(null);
+  const completionToastIds = useRef<Set<string>>(new Set());
+  const pollEpochRef = useRef(0);
+  const toastTimers = useRef<Map<string, number>>(new Map());
+  const intendedPathRef = useRef<string | null>(null);
+  const urlFilterApplied = useRef(false);
 
-  const allowedTabs = useMemo(() => {
-    const all: { id: Tab; label: string }[] = [
-      { id: "operator", label: "Operator" },
-      { id: "dashboard", label: "Dasbor" },
-      { id: "findings", label: "Temuan" },
-      { id: "report", label: "Laporan" },
-    ];
-    return all.filter((t) => can(auth, TAB_PERMS[t.id]));
-  }, [auth]);
+  const tab = tabFromPath(location.pathname);
+
+  const dismissToast = useCallback((id: string) => {
+    const timer = toastTimers.current.get(id);
+    if (timer) {
+      window.clearTimeout(timer);
+      toastTimers.current.delete(id);
+    }
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const pushToast = useCallback(
+    (
+      message: string,
+      tone: ToastTone = "info",
+      opts?: { action?: ToastItem["action"]; ttlMs?: number; dedupe?: boolean },
+    ) => {
+      const id = crypto.randomUUID();
+      const ttl = opts?.ttlMs ?? 4500;
+      setToasts((prev) => {
+        let next = opts?.dedupe ? prev.filter((t) => t.message !== message) : prev;
+        next = [...next, { id, message, tone, action: opts?.action }];
+        if (next.length > TOAST_MAX_VISIBLE + 2) {
+          next = next.slice(-(TOAST_MAX_VISIBLE + 2));
+        }
+        return next;
+      });
+      const timer = window.setTimeout(() => dismissToast(id), ttl);
+      toastTimers.current.set(id, timer);
+    },
+    [dismissToast],
+  );
+
+  useEffect(() => {
+    sessionIdRef.current = session?.id ?? null;
+  }, [session?.id]);
+
+  // Reset tracking saat ganti sesi (hindari toast beruntun & status macet)
+  useEffect(() => {
+    prevSessionStatusRef.current = null;
+    pollEpochRef.current += 1;
+  }, [session?.id]);
+
+  useEffect(() => {
+    if (!auth && location.pathname !== "/") {
+      intendedPathRef.current = location.pathname + location.search;
+    }
+  }, [auth, location.pathname, location.search]);
+
+  const allowedTabs = useMemo(
+    () => TAB_DEFS.filter((t) => can(auth, TAB_PERMS[t.id])),
+    [auth],
+  );
+
+  const landingTab = useMemo((): Tab => {
+    if (!auth || allowedTabs.length === 0) return "operator";
+    return preferredLandingTab(auth, allowedTabs) ?? allowedTabs[0].id;
+  }, [auth, allowedTabs]);
+
+  const goToTab = useCallback(
+    (next: Tab, opts?: { sesi?: string | null; filter?: ReviewFilterParam | null }) => {
+      navigate(
+        buildTabUrl(next, {
+          sesi: opts?.sesi ?? session?.id ?? null,
+          filter: opts?.filter ?? (next === "findings" ? reviewFilter : null),
+        }),
+      );
+    },
+    [navigate, session?.id, reviewFilter],
+  );
 
   useEffect(() => {
     if (!auth || allowedTabs.length === 0) return;
-    if (!allowedTabs.some((t) => t.id === tab)) {
-      setTab(allowedTabs[0].id);
+    if (location.pathname === "/") return;
+    const current = tabFromPath(location.pathname);
+    if (!current || !allowedTabs.some((t) => t.id === current)) {
+      navigate(pathFromTab(landingTab), { replace: true });
     }
-  }, [auth, allowedTabs, tab]);
+  }, [auth, allowedTabs, landingTab, location.pathname, navigate]);
+
+  useEffect(() => {
+    if (!auth) return;
+    if (!urlFilterApplied.current) {
+      if (can(auth, "findings:review")) setReviewFilter("pending");
+      urlFilterApplied.current = true;
+    }
+    const { filter } = parseTabSearch(location.search);
+    if (tab === "findings" && filter) setReviewFilter(filter);
+  }, [auth, location.search, tab]);
+
+  useEffect(() => {
+    if (!auth || !tab) return;
+    if (tab !== "findings" && tab !== "report" && tab !== "dashboard") return;
+    const url = buildTabUrl(tab, {
+      sesi: session?.id ?? null,
+      filter: tab === "findings" ? reviewFilter : null,
+    });
+    const current = `${location.pathname}${location.search}`;
+    if (current !== url) navigate(url, { replace: true });
+  }, [auth, tab, session?.id, reviewFilter, location.pathname, location.search, navigate]);
+
+  const refreshSessionList = useCallback(async (opts?: { soft?: boolean }) => {
+    if (!opts?.soft) setSessionsLoading(true);
+    try {
+      const res = await api.sessions(1, 50);
+      setSessionList(res.items);
+      return res.items;
+    } finally {
+      if (!opts?.soft) setSessionsLoading(false);
+    }
+  }, []);
+
+  const refreshReviewSummary = useCallback(async (sessionId: string) => {
+    const [pending, confirmed, rejected] = await Promise.all([
+      api.findings(sessionId, 1, 1, { review_status: "pending" }),
+      api.findings(sessionId, 1, 1, { review_status: "confirmed" }),
+      api.findings(sessionId, 1, 1, { review_status: "rejected" }),
+    ]);
+    setReviewSummary({
+      pending: pending.total,
+      confirmed: confirmed.total,
+      rejected: rejected.total,
+      total: pending.total + confirmed.total + rejected.total,
+    });
+  }, []);
+
+  const refreshGlobalPending = useCallback(async () => {
+    if (!auth || !can(auth, "findings:read")) return;
+    try {
+      const d = await api.dashboard(session?.id);
+      setGlobalPending(d.pending_reviews ?? 0);
+    } catch {
+      /* optional */
+    }
+  }, [auth, session?.id]);
+
+  const selectSessionById = useCallback(async (id: string) => {
+    const s = await api.session(id);
+    setSession(s);
+    setFindingsPage(1);
+    setReportPage(1);
+    try {
+      localStorage.setItem(SESSION_STORAGE_KEY, id);
+    } catch {
+      /* ignore */
+    }
+    void refreshReviewSummary(id);
+    return s;
+  }, [refreshReviewSummary]);
 
   async function refreshDevices() {
     const [h, d] = await Promise.all([api.health(), api.devices()]);
     setGpu(h.gpu_available);
     setToolchain(h.extras?.toolchain || {});
-    setVision((h.extras as { vision?: Record<string, unknown> })?.vision || {});
+    setVision(h.extras?.vision || {});
+    if (typeof h.extras?.image_cap_quick === "number") setImageCapQuick(h.extras.image_cap_quick);
+    if (typeof h.extras?.image_cap_full === "number") setImageCapFull(h.extras.image_cap_full);
+    if (typeof h.extras?.zip_max_mb === "number") setZipMaxMb(h.extras.zip_max_mb);
+    if (typeof h.extras?.zip_enabled === "boolean") setZipEnabled(h.extras.zip_enabled);
     const live = d.filter((x) => !x.simulated);
     setDevices(live);
     setSelected((prev) => live.find((x) => x.device_id === prev?.device_id) ?? live[0] ?? null);
@@ -80,6 +270,8 @@ export default function App() {
 
   useEffect(() => {
     if (!auth) return;
+    defaultSessionTried.current = false;
+    void refreshGlobalPending();
     refreshDevices().catch((e) => {
       const msg = e instanceof Error ? e.message : "Gagal memuat API";
       setError(msg);
@@ -88,80 +280,256 @@ export default function App() {
         setAuth(null);
       }
     });
-  }, [auth]);
+    refreshSessionList()
+      .then(async (items) => {
+        if (defaultSessionTried.current) return;
+        defaultSessionTried.current = true;
+        if (sessionIdRef.current) return;
+
+        const { sesi } = parseTabSearch(location.search);
+        const fromUrl = sesi ? resolveSessionId(sesi, items) : null;
+        let preferId: string | null = fromUrl;
+        if (!preferId) {
+          try {
+            preferId = localStorage.getItem(SESSION_STORAGE_KEY);
+          } catch {
+            preferId = null;
+          }
+        }
+        const fromStorage = preferId ? items.find((s) => s.id === preferId) : null;
+        const preferred =
+          fromStorage ||
+          items.find((s) => s.status === "completed") ||
+          items.find((s) => s.recommendation) ||
+          items[0];
+        if (preferred) {
+          try {
+            await selectSessionById(preferred.id);
+          } catch {
+            /* ignore bootstrap */
+          }
+        }
+      })
+      .catch(() => {
+        /* list optional on first paint */
+      });
+  }, [auth, refreshSessionList, selectSessionById, refreshGlobalPending, location.search]);
+
+  useEffect(() => {
+    if (!auth || sessionList.length === 0) return;
+    const { sesi } = parseTabSearch(location.search);
+    if (!sesi) return;
+    const resolved = resolveSessionId(sesi, sessionList);
+    if (resolved && resolved !== session?.id) {
+      void selectSessionById(resolved).catch(() => {
+        setError("Sesi dari URL tidak ditemukan");
+      });
+    }
+  }, [auth, location.search, sessionList, session?.id, selectSessionById]);
+
+  useEffect(() => {
+    if (!session) {
+      prevSessionStatusRef.current = null;
+      return;
+    }
+    const prev = prevSessionStatusRef.current;
+    prevSessionStatusRef.current = session.status;
+    if (
+      prev &&
+      ACTIVE.has(prev) &&
+      session.status === "completed" &&
+      !completionToastIds.current.has(session.id)
+    ) {
+      completionToastIds.current.add(session.id);
+      const n = session.progress?.findings_count ?? 0;
+      if (n > 0) {
+        pushToast(`Analisa selesai · ${n} temuan`, "info", {
+          ttlMs: 6000,
+          action: {
+            label: "Buka review",
+            onClick: () => goToTab("findings", { sesi: session.id, filter: "pending" }),
+          },
+        });
+        if (can(auth, "findings:read")) {
+          goToTab("findings", { sesi: session.id, filter: "pending" });
+        }
+      } else {
+        pushToast("Analisa selesai · tidak ada temuan", "ok", { ttlMs: 4000 });
+      }
+      void refreshGlobalPending();
+    }
+  }, [session, auth, pushToast, goToTab, refreshGlobalPending]);
 
   useEffect(() => {
     if (!session || !ACTIVE.has(session.status)) return;
-    const t = setInterval(async () => {
+    const sessionId = session.id;
+    const epoch = ++pollEpochRef.current;
+    let stopped = false;
+    let inFlight = false;
+
+    const applyPolled = (s: SessionSummary) => {
+      setSession((curr) => {
+        if (!curr || curr.id !== s.id) return curr;
+        if (TERMINAL.has(curr.status) && ACTIVE.has(s.status)) return curr;
+        return s;
+      });
+    };
+
+    const tick = async () => {
+      if (stopped || pollEpochRef.current !== epoch || inFlight) return;
+      inFlight = true;
       try {
-        const s = await api.session(session.id);
-        startTransition(() => setSession(s));
+        const s = await api.session(sessionId);
+        if (stopped || pollEpochRef.current !== epoch) return;
+        applyPolled(s);
         if (!ACTIVE.has(s.status)) {
-          const f = await api.findings(s.id, 1, DEFAULT_PAGE_SIZE);
+          stopped = true;
+          const f = await api.findings(
+            s.id,
+            1,
+            DEFAULT_PAGE_SIZE,
+            reviewFilter === "all" ? undefined : { review_status: reviewFilter },
+          );
+          if (pollEpochRef.current !== epoch) return;
           setFindingsData(f);
           setFindingsPage(1);
+          void refreshSessionList({ soft: true });
+          void refreshReviewSummary(s.id);
+          void refreshGlobalPending();
         }
       } catch {
-        /* ignore */
+        if (!stopped) {
+          setError("Koneksi telemetri terputus — coba muat ulang atau pilih sesi ulang");
+        }
+      } finally {
+        inFlight = false;
       }
-    }, 400);
-    return () => clearInterval(t);
-  }, [session?.id, session?.status]);
+    };
+
+    const t = window.setInterval(() => void tick(), 500);
+    return () => {
+      stopped = true;
+      window.clearInterval(t);
+      if (pollEpochRef.current === epoch) {
+        pollEpochRef.current += 1;
+      }
+    };
+  }, [session?.id, session?.status, reviewFilter, refreshSessionList, refreshReviewSummary, refreshGlobalPending]);
 
   useEffect(() => {
     if (tab !== "dashboard") return;
-    setDash(null);
+    let cancelled = false;
+    setDashLoading(true);
     Promise.all([
-      api.dashboard(),
+      api.dashboard(session?.id),
       api.sessions(dashSessionsPage, DEFAULT_PAGE_SIZE),
       api.findings(undefined, dashFindingsPage, DEFAULT_PAGE_SIZE),
     ])
       .then(([d, sessionsRes, findingsRes]) => {
-        setError(null);
+        if (cancelled) return;
         setDash(d);
         setDashSessions(sessionsRes);
         setDashFindings(findingsRes);
+        setGlobalPending(d.pending_reviews ?? 0);
+        setSessionList((prev) => {
+          const map = new Map(prev.map((s) => [s.id, s]));
+          for (const s of sessionsRes.items) map.set(s.id, s);
+          return Array.from(map.values());
+        });
       })
       .catch((e) => {
-        setDash(null);
-        setDashSessions(null);
-        setDashFindings(null);
-        setError(String(e.message || e));
+        if (!cancelled) setError(String(e.message || e));
+      })
+      .finally(() => {
+        if (!cancelled) setDashLoading(false);
       });
-  }, [tab, dashSessionsPage, dashFindingsPage]);
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, dashSessionsPage, dashFindingsPage, session?.id]);
+
+  useEffect(() => {
+    if (tab !== "dashboard") return;
+    void refreshSessionList({ soft: true });
+  }, [tab, refreshSessionList]);
+
+  useEffect(() => {
+    if (tab !== "findings" && tab !== "report") return;
+    if (sessionList.length === 0) void refreshSessionList();
+  }, [tab, sessionList.length, refreshSessionList]);
+
+  useEffect(() => {
+    if (!session?.id) {
+      setReviewSummary(null);
+      return;
+    }
+    void refreshReviewSummary(session.id);
+  }, [session?.id, session?.recommendation, refreshReviewSummary]);
+
+  useEffect(() => {
+    setReportPage((p) => (p === 1 ? p : 1));
+  }, [session?.id]);
 
   useEffect(() => {
     if (tab !== "findings") return;
+    if (!session?.id) {
+      setFindingsData(null);
+      setFindingsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setFindingsLoading(true);
+
     api
-      .findings(session?.id, findingsPage, DEFAULT_PAGE_SIZE)
+      .findings(
+        session.id,
+        findingsPage,
+        DEFAULT_PAGE_SIZE,
+        reviewFilter === "all" ? undefined : { review_status: reviewFilter },
+      )
       .then((data) => {
+        if (cancelled) return;
         setFindingsData(data);
-        setFindingsPage(data.page);
       })
-      .catch((e) => setError(String(e.message || e)));
-  }, [tab, session?.id, findingsPage]);
+      .catch((e) => {
+        if (!cancelled) setError(String(e.message || e));
+      })
+      .finally(() => {
+        if (!cancelled) setFindingsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, session?.id, findingsPage, reviewFilter]);
+
+  // Ganti sesi → buang list lama supaya tidak flash data sesi lain
+  useEffect(() => {
+    setFindingsData(null);
+    setReportFindings(null);
+  }, [session?.id]);
 
   useEffect(() => {
     if (tab !== "report" || !session?.id) return;
+    let cancelled = false;
+    setReportLoading(true);
+
     api
       .findings(session.id, reportPage, DEFAULT_PAGE_SIZE)
       .then((data) => {
+        if (cancelled) return;
         setReportFindings(data);
-        setReportPage(data.page);
       })
-      .catch((e) => setError(String(e.message || e)));
+      .catch((e) => {
+        if (!cancelled) setError(String(e.message || e));
+      })
+      .finally(() => {
+        if (!cancelled) setReportLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [tab, session?.id, reportPage]);
 
-  useEffect(() => {
-    setFindingsPage(1);
-  }, [session?.id]);
-
-  useEffect(() => {
-    setReportPage(1);
-  }, [session?.id]);
-
-  const progress = session?.progress;
-  const timing = session?.timing;
   const liveDevices = devices.filter((d) => !d.simulated);
   const canStartLive = useMemo(
     () =>
@@ -181,6 +549,40 @@ export default function App() {
     [acqSource, zipFile, busy, session],
   );
 
+  const modeHint =
+    mode === "quick"
+      ? `≤${imageCapQuick} foto galeri · ≤${QUICK_VIDEO_CAP} video · OCR selektif (screenshot/dokumen/edge)`
+      : `≤${imageCapFull} foto · semua video · OCR penuh gallery/documents (jika engine ada) · lebih lambat`;
+
+  const mediaTextOn = !!vision.media_text?.enabled;
+  const ocrEngineOn = !!(vision.ocr?.enabled && vision.ocr?.available);
+  const whisperOn = !!(vision.media_text?.whisper || vision.gpu_stack?.backends?.whisper?.available);
+  const gpuStackOn = !!vision.gpu_stack?.enabled;
+
+  const changeReviewFilter = useCallback((next: "all" | ReviewStatus) => {
+    setReviewFilter(next);
+    setFindingsPage(1);
+  }, []);
+
+  async function onPickSession(id: string) {
+    try {
+      setError(null);
+      await selectSessionById(id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Gagal memuat sesi");
+    }
+  }
+
+  async function openSession(id: string, nextTab: Tab) {
+    try {
+      setError(null);
+      await selectSessionById(id);
+      goToTab(nextTab, { sesi: id, filter: nextTab === "findings" ? reviewFilter : null });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Gagal memuat sesi");
+    }
+  }
+
   async function start() {
     if (!selected || selected.simulated) return;
     setError(null);
@@ -196,11 +598,17 @@ export default function App() {
         force_simulated: false,
       });
       setSession(s);
+      try {
+        localStorage.setItem(SESSION_STORAGE_KEY, s.id);
+      } catch {
+        /* ignore */
+      }
       setFindingsData(null);
       setFindingsPage(1);
       setReportFindings(null);
       setReportPage(1);
-      setTab("operator");
+      goToTab("operator", { sesi: s.id });
+      void refreshSessionList();
       requestAnimationFrame(() => {
         teleRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
       });
@@ -213,19 +621,34 @@ export default function App() {
 
   async function startZip() {
     if (!zipFile) return;
+    const maxBytes = zipMaxMb * 1024 * 1024;
+    if (zipFile.size > maxBytes) {
+      setError(
+        `ZIP ${(zipFile.size / (1024 * 1024)).toFixed(1)} MB melebihi batas server ${zipMaxMb} MB`,
+      );
+      return;
+    }
     setError(null);
     setBusy(true);
+    setUploadPct(0);
     try {
       const s = await api.startSessionFromZip(zipFile, {
         mode,
         label: `ZIP · ${zipFile.name}`,
+        onUploadProgress: (pct) => setUploadPct(pct),
       });
       setSession(s);
+      try {
+        localStorage.setItem(SESSION_STORAGE_KEY, s.id);
+      } catch {
+        /* ignore */
+      }
       setFindingsData(null);
       setFindingsPage(1);
       setReportFindings(null);
       setReportPage(1);
-      setTab("operator");
+      goToTab("operator", { sesi: s.id });
+      void refreshSessionList();
       requestAnimationFrame(() => {
         teleRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
       });
@@ -233,6 +656,7 @@ export default function App() {
       setError(e instanceof Error ? e.message : "Gagal analisa ZIP");
     } finally {
       setBusy(false);
+      setUploadPct(null);
     }
   }
 
@@ -241,6 +665,7 @@ export default function App() {
     setBusy(true);
     try {
       setSession(await api.cancelSession(session.id));
+      void refreshSessionList();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Gagal membatalkan");
     } finally {
@@ -249,17 +674,87 @@ export default function App() {
   }
 
   async function review(id: string, review_status: "confirmed" | "rejected") {
-    await api.reviewFinding(id, review_status);
-    const patch = (prev: Paginated<Finding> | null) =>
-      prev
-        ? {
-            ...prev,
-            items: prev.items.map((f) => (f.id === id ? { ...f, review_status } : f)),
-          }
-        : prev;
-    setFindingsData(patch);
-    setReportFindings(patch);
-    setDashFindings(patch);
+    if (reviewBusyId || bulkBusy) return;
+    setReviewBusyId(id);
+    try {
+      await api.reviewFinding(id, review_status);
+      const patch = (prev: Paginated<Finding> | null) =>
+        prev
+          ? {
+              ...prev,
+              items: prev.items.map((f) => (f.id === id ? { ...f, review_status } : f)),
+            }
+          : prev;
+      if (reviewFilter === "pending") {
+        setFindingsData((prev) =>
+          prev
+            ? {
+                ...prev,
+                items: prev.items.filter((f) => f.id !== id),
+                total: Math.max(0, prev.total - 1),
+              }
+            : prev,
+        );
+      } else {
+        setFindingsData(patch);
+      }
+      setReportFindings(patch);
+      setDashFindings(patch);
+      if (session?.id) {
+        const refreshed = await api.session(session.id);
+        setSession(refreshed);
+        void refreshReviewSummary(session.id);
+        void refreshSessionList({ soft: true });
+        void refreshGlobalPending();
+        pushToast(
+          review_status === "confirmed" ? "Temuan dikonfirmasi" : "Temuan ditolak",
+          review_status === "confirmed" ? "warn" : "ok",
+          { ttlMs: 2200, dedupe: true },
+        );
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Gagal menyimpan verifikasi");
+    } finally {
+      setReviewBusyId(null);
+    }
+  }
+
+  async function bulkReview(review_status: "confirmed" | "rejected") {
+    if (!session?.id || !reviewSummary?.pending) return;
+    const verb = review_status === "confirmed" ? "konfirmasi" : "tolak";
+    if (!window.confirm(`Yakin ingin ${verb} semua ${reviewSummary.pending} temuan pending?`)) {
+      return;
+    }
+    setBulkBusy(true);
+    try {
+      const pending = await api.findings(session.id, 1, 500, { review_status: "pending" });
+      for (const f of pending.items) {
+        await api.reviewFinding(f.id, review_status);
+      }
+      const refreshed = await api.session(session.id);
+      setSession(refreshed);
+      setFindingsPage(1);
+      void refreshReviewSummary(session.id);
+      void refreshSessionList({ soft: true });
+      void refreshGlobalPending();
+      pushToast(`${pending.items.length} temuan di-${verb}`, review_status === "confirmed" ? "warn" : "ok", {
+        ttlMs: 4000,
+        dedupe: true,
+      });
+      if (tab === "findings") {
+        const data = await api.findings(
+          session.id,
+          1,
+          DEFAULT_PAGE_SIZE,
+          reviewFilter === "all" ? undefined : { review_status: reviewFilter },
+        );
+        setFindingsData(data);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Gagal bulk review");
+    } finally {
+      setBulkBusy(false);
+    }
   }
 
   async function doLogin(e?: FormEvent) {
@@ -270,6 +765,16 @@ export default function App() {
       const sessionAuth = await api.login(loginUser, loginPass);
       saveAuth(sessionAuth);
       setAuth(sessionAuth);
+      urlFilterApplied.current = false;
+      const dest = intendedPathRef.current;
+      intendedPathRef.current = null;
+      if (dest) {
+        navigate(dest, { replace: true });
+      } else {
+        const allowed = TAB_DEFS.filter((t) => can(sessionAuth, TAB_PERMS[t.id]));
+        const land = preferredLandingTab(sessionAuth, allowed) ?? allowed[0]?.id ?? "operator";
+        navigate(pathFromTab(land));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login gagal");
     } finally {
@@ -288,42 +793,54 @@ export default function App() {
     setSession(null);
     setFindingsData(null);
     setReportFindings(null);
-    setDash(null);
+    setReviewSummary(null);
+    setError(null);
+    navigate("/");
   }
 
   if (!auth) {
     return (
-      <LoginScreen
-        loginUser={loginUser}
-        loginPass={loginPass}
-        loginBusy={loginBusy}
-        error={error}
-        onUserChange={setLoginUser}
-        onPassChange={setLoginPass}
-        onPickDemo={(user, pass) => {
-          setLoginUser(user);
-          setLoginPass(pass);
-        }}
-        onSubmit={doLogin}
-      />
+      <>
+        <TopLoadingBar active={loginBusy} />
+        <LoginScreen
+          loginUser={loginUser}
+          loginPass={loginPass}
+          loginBusy={loginBusy}
+          error={error}
+          onUserChange={setLoginUser}
+          onPassChange={setLoginPass}
+          onPickDemo={(user, pass) => {
+            setLoginUser(user);
+            setLoginPass(pass);
+          }}
+          onSubmit={doLogin}
+        />
+      </>
     );
   }
 
-  const ocrOn =
-    !!(vision.ocr as { enabled?: boolean } | undefined)?.enabled &&
-    !!(vision.ocr as { available?: boolean } | undefined)?.available;
+  const topBarActive =
+    findingsLoading ||
+    reportLoading ||
+    dashLoading ||
+    busy ||
+    bulkBusy ||
+    !!reviewBusyId ||
+    (sessionsLoading && sessionList.length === 0) ||
+    (!!session && ACTIVE.has(session.status));
 
   return (
     <div className="app-shell wide">
-      <div className="classify-rail">
-        <span>Restriksi internal · Defense &amp; Intel</span>
-        <span>Galeri · PoC</span>
+      <TopLoadingBar active={topBarActive} />
+      <div className="classify-rail slim">
+        <span>Internal · gallery focus</span>
+        <span>PoC</span>
       </div>
 
       <header className="ops-topbar">
         <div className="ops-brand">
+          <p className="brand-kicker">Sistem Analisis Digital Terpadu</p>
           <strong>SADT // OPS</strong>
-          <span>Sistem Analisis Digital Terpadu</span>
         </div>
         <div className="user-chip compact">
           <div>
@@ -332,590 +849,167 @@ export default function App() {
               {auth.username} · {auth.role}
             </span>
           </div>
-          <button className="btn btn-ghost" type="button" onClick={doLogout}>
-            Logout
+          <button className="btn btn-ghost" type="button" onClick={() => void doLogout()}>
+            Keluar
           </button>
         </div>
       </header>
 
-      <nav className="tabs">
-        {allowedTabs.map((t) => (
-          <button key={t.id} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
-            {t.label}
-          </button>
-        ))}
-      </nav>
-
-      {error && <div className="error-banner">{error}</div>}
-
-      {tab === "operator" && can(auth, "sessions:start") && (
-        <div className="grid-2">
-          <section className="panel">
-            <div className="panel-title">
-              <h2>Akuisisi target</h2>
-              <span className="code">MOD-ACQ-01</span>
-            </div>
-            <div className="form-grid">
-              <div className="field">
-                <label>Sumber analisa</label>
-                <select
-                  value={acqSource}
-                  onChange={(e) => setAcqSource(e.target.value as "live" | "zip")}
-                >
-                  <option value="live">Perangkat live (ADB / iOS)</option>
-                  <option value="zip">Upload ZIP hasil ADB (tanpa akuisisi)</option>
-                </select>
-              </div>
-
-              {acqSource === "live" && (
-                <div className="field">
-                  <label>Perangkat live</label>
-                  <div className="actions" style={{ marginTop: 0, marginBottom: 10 }}>
-                    <button
-                      className="btn btn-ghost"
-                      type="button"
-                      onClick={() => refreshDevices().catch(console.error)}
-                    >
-                      Rescan USB
-                    </button>
-                  </div>
-                  <div className="device-list">
-                    {liveDevices.length === 0 && (
-                      <div className="empty" style={{ padding: 14 }}>
-                        Tidak ada HP terdeteksi — sambungkan Android (USB debug) atau iPhone
-                      </div>
-                    )}
-                    {liveDevices.map((d) => (
-                      <div
-                        key={d.device_id}
-                        className={`device-item ${selected?.device_id === d.device_id ? "selected" : ""}`}
-                        onClick={() => setSelected(d)}
-                      >
-                        <div>
-                          <strong>{d.label}</strong>
-                          <br />
-                          <small>
-                            {d.device_type} · OS {d.os_version || "?"} · LIVE ·{" "}
-                            {d.device_type === "android" ? "ADB pull" : "idevicebackup2"}
-                          </small>
-                        </div>
-                        <span className="pill ok">LIVE</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+      <div className="nav-context">
+        <nav className="tabs" role="tablist" aria-label="Navigasi konsol">
+          {allowedTabs.map((t) => (
+            <NavLink
+              key={t.id}
+              to={buildTabUrl(t.id, {
+                sesi: session?.id,
+                filter: t.id === "findings" ? reviewFilter : null,
+              })}
+              role="tab"
+              aria-selected={tab === t.id}
+              className={({ isActive }) => (isActive ? "active" : "")}
+            >
+              {t.label}
+              {t.id === "findings" && globalPending > 0 && (
+                <span className="tab-badge" aria-label={`${globalPending} temuan pending`}>
+                  {globalPending}
+                </span>
               )}
+            </NavLink>
+          ))}
+        </nav>
+        <Breadcrumb pathname={location.pathname} session={session} />
+      </div>
 
-              {acqSource === "zip" && (
-                <div className="field">
-                  <label>Arsip ZIP (hasil adb pull / dump media)</label>
-                  <input
-                    type="file"
-                    accept=".zip,application/zip"
-                    onChange={(e) => setZipFile(e.target.files?.[0] ?? null)}
-                  />
-                  {zipFile && (
-                    <small style={{ display: "block", marginTop: 8, opacity: 0.75 }}>
-                      {zipFile.name} · {(zipFile.size / (1024 * 1024)).toFixed(1)} MB
-                    </small>
-                  )}
-                  <p className="login-hint" style={{ marginTop: 8 }}>
-                    Struktur bebas: folder DCIM/Pictures/Download, atau flat file media. Maks sesuai
-                    server (default 512 MB).
-                  </p>
-                </div>
-              )}
-
-              <div className="field">
-                <label>Mode analisa</label>
-                <select value={mode} onChange={(e) => setMode(e.target.value as AcquisitionMode)}>
-                  <option value="quick">QUICK — sampling lebih cepat</option>
-                  <option value="full">FULL — cakupan lebih luas</option>
-                </select>
-              </div>
-
-              <div className="actions">
-                {acqSource === "live" ? (
-                  <button className="btn btn-primary" disabled={!canStartLive} onClick={start}>
-                    {busy ? "Memulai…" : "Jalankan akuisisi"}
-                  </button>
-                ) : (
-                  <button className="btn btn-primary" disabled={!canStartZip} onClick={startZip}>
-                    {busy ? "Mengunggah…" : "Analisa ZIP"}
-                  </button>
-                )}
-                {session && ACTIVE.has(session.status) && (
-                  <button className="btn btn-danger" onClick={cancel} disabled={busy}>
-                    Batalkan
-                  </button>
-                )}
-              </div>
-            </div>
-          </section>
-
-          <section
-            ref={teleRef}
-            className={`panel${session?.recommendation === "TIDAK LULUS" ? " threat" : ""}`}
+      {error && (
+        <div className="error-banner dismissible" role="alert">
+          <span>{error}</span>
+          <button
+            type="button"
+            className="error-dismiss"
+            onClick={() => setError(null)}
+            aria-label="Tutup"
           >
-            <div className="panel-title">
-              <h2>Telemetry sesi</h2>
-              <span className="code">MOD-TEL-02</span>
-            </div>
-            {!session ? (
-              <div className="standby">
-                <p className="standby-title">Pipeline siap</p>
-                <p className="standby-copy">
-                  Pilih perangkat, lalu jalankan sesi. Alur: Detect → Acquire → Index → Analyze →
-                  Findings.
-                </p>
-                <PipelineTrack />
-              </div>
-            ) : (
-              <>
-                <PipelineTrack status={session.status} />
-                <div className="tel-live">
-                  <StatusPill status={session.status} recommendation={session.recommendation} />
-                  <span className="pill muted">{session.mode}</span>
-                  <span className="pill muted">{progress?.acquisition_method || "…"}</span>
-                  <span className="pill muted">{session.device_id}</span>
-                </div>
-
-                {session.error && <div className="error-banner" style={{ marginTop: 12 }}>{session.error}</div>}
-
-                <div className="progress-wrap">
-                  <div className="progress-meta">
-                    <span>{progress?.message}</span>
-                    <strong>{progress?.percent?.toFixed(0) ?? 0}%</strong>
-                  </div>
-                  <div className={`bar ${session && ACTIVE.has(session.status) ? "active" : ""}`}>
-                    <span style={{ width: `${progress?.percent ?? 0}%` }} />
-                  </div>
-                </div>
-
-                <div className="timing">
-                  <div>
-                    Ingest
-                    <strong>
-                      {progress?.files_pulled ?? 0}
-                      {progress?.files_listed ? ` / ${progress.files_listed}` : ""}
-                    </strong>
-                  </div>
-                  <div>
-                    Analyzed
-                    <strong>{progress?.files_analyzed ?? 0}</strong>
-                  </div>
-                  <div>
-                    Hits
-                    <strong>{progress?.findings_count ?? 0}</strong>
-                  </div>
-                  <div>
-                    Throughput
-                    <strong>{progress?.throughput_files_per_sec ?? 0} f/s</strong>
-                  </div>
-                </div>
-
-                <h3 style={{ marginTop: 18 }}>Time breakdown</h3>
-                <div className="timing">
-                  <div>
-                    Detect
-                    <strong>{ms(timing?.t_detect_ms ?? 0)}</strong>
-                  </div>
-                  <div>
-                    Acquire
-                    <strong>{ms(timing?.t_acquire_ms ?? 0)}</strong>
-                  </div>
-                  <div>
-                    Index
-                    <strong>{ms(timing?.t_index_ms ?? 0)}</strong>
-                  </div>
-                  <div>
-                    Analyze
-                    <strong>{ms(timing?.t_analyze_ms ?? 0)}</strong>
-                  </div>
-                  <div>
-                    Total
-                    <strong>{ms(timing?.t_total_ms ?? 0)}</strong>
-                  </div>
-                </div>
-
-                {session.status === "completed" && (
-                  <div className="actions" style={{ marginTop: 16 }}>
-                    <button className="btn btn-ghost" onClick={() => setTab("findings")}>
-                      Open findings
-                    </button>
-                    <button className="btn btn-ghost" onClick={() => setTab("report")}>
-                      Open report
-                    </button>
-                    <button className="btn btn-ghost" onClick={() => setTab("dashboard")}>
-                      Open dasbor
-                    </button>
-                  </div>
-                )}
-              </>
-            )}
-          </section>
+            Tutup
+          </button>
         </div>
       )}
 
-      {tab === "dashboard" && can(auth, "dashboard") && (
-        <section className="panel">
-            <div className="panel-title">
-              <h2>Dasbor operasional</h2>
-              <span className="code">MOD-DASH-03</span>
-            </div>
-          {!dash ? (
-            <div className="empty">SYNC…</div>
-          ) : (
-            <>
-              <div className="grid-stats">
-                <div className="stat">
-                  <div className="label">Sesi</div>
-                  <div className="value">
-                    {dash.completed_sessions ?? 0}/{dash.total_sessions ?? 0}
-                  </div>
-                </div>
-                <div className="stat threat">
-                  <div className="label">TIDAK LULUS</div>
-                  <div className="value">{dash.tidak_lulus_count ?? 0}</div>
-                </div>
-                <div className="stat">
-                  <div className="label">LULUS</div>
-                  <div className="value">{dash.lulus_count ?? 0}</div>
-                </div>
-                <div className="stat threat">
-                  <div className="label">Temuan</div>
-                  <div className="value">{dash.total_findings ?? 0}</div>
-                </div>
-                <div className="stat">
-                  <div className="label">Pending review</div>
-                  <div className="value">{dash.pending_reviews ?? 0}</div>
-                </div>
-                <div className="stat">
-                  <div className="label">Confirmed</div>
-                  <div className="value">{dash.confirmed_findings ?? 0}</div>
-                </div>
-                <div className="stat">
-                  <div className="label">Avg total</div>
-                  <div className="value">{ms(dash.avg_total_ms ?? 0)}</div>
-                </div>
-                <div className="stat">
-                  <div className="label">Peak f/s</div>
-                  <div className="value">{(dash.throughput_peak_fps ?? 0).toFixed(0)}</div>
-                </div>
-              </div>
+      <ToastStack items={toasts} onDismiss={dismissToast} />
 
-              <div className="timing" style={{ marginBottom: 18 }}>
-                <div>
-                  Avg acquire
-                  <strong>{ms(dash.avg_acquire_ms ?? 0)}</strong>
-                </div>
-                <div>
-                  Avg index
-                  <strong>{ms(dash.avg_index_ms ?? 0)}</strong>
-                </div>
-                <div>
-                  Avg analyze
-                  <strong>{ms(dash.avg_analyze_ms ?? 0)}</strong>
-                </div>
-                <div>
-                  Failed / Active
-                  <strong>
-                    {dash.failed_sessions ?? 0} / {dash.active_sessions ?? 0}
-                  </strong>
-                </div>
-              </div>
+      <Routes>
+        <Route path="/" element={<Navigate to={pathFromTab(landingTab)} replace />} />
 
-              <div className="grid-3">
-                <DistBars title="Temuan / kategori" items={dash.findings_by_category} />
-                <DistBars title="Temuan / layer AI" items={dash.findings_by_layer} />
-                <DistBars title="Temuan / sumber" items={dash.findings_by_source} />
-              </div>
-
-              <div className="grid-3" style={{ marginTop: 14 }}>
-                <DistBars title="Metode akuisisi" items={dash.acquisition_methods} />
-                <div className="dist-card">
-                  <h3>Toolchain</h3>
-                  <div className="tool-pills" style={{ flexDirection: "column", alignItems: "flex-start" }}>
-                    <span className={`pill ${dash.toolchain?.adb ? "ok" : "muted"}`}>
-                      ADB {dash.toolchain?.adb ? "READY" : "MISSING"}
-                    </span>
-                    <span className={`pill ${dash.toolchain?.idevice_id ? "ok" : "muted"}`}>
-                      idevice_id {dash.toolchain?.idevice_id ? "READY" : "MISSING"}
-                    </span>
-                    <span className={`pill ${dash.toolchain?.idevicebackup2 ? "ok" : "muted"}`}>
-                      idevicebackup2 {dash.toolchain?.idevicebackup2 ? "READY" : "MISSING"}
-                    </span>
-                    <span className={`pill ${dash.gpu_available ? "ok" : "muted"}`}>
-                      GPU {dash.gpu_available ? "READY" : "CPU MODE"}
-                    </span>
-                  </div>
-                </div>
-                <div className="dist-card">
-                  <h3>Temuan terbaru</h3>
-                  {!dashFindings || dashFindings.total === 0 ? (
-                    <div className="empty" style={{ padding: 12 }}>
-                      —
-                    </div>
-                  ) : (
-                    <>
-                      <div className="recent-list">
-                        {dashFindings.items.map((f) => (
-                          <div key={f.id} className="recent-item">
-                            <strong>{f.label}</strong>
-                            <span>
-                              {f.source} · {(f.confidence * 100).toFixed(0)}% · {f.layer_origin}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                      <Pagination
-                        page={dashFindings.page}
-                        pages={dashFindings.pages}
-                        total={dashFindings.total}
-                        page_size={dashFindings.page_size}
-                        onPage={setDashFindingsPage}
-                        label="Temuan"
-                      />
-                    </>
-                  )}
-                </div>
-              </div>
-
-              <h3 style={{ marginTop: 18 }}>Sesi terakhir</h3>
-              {!dashSessions || dashSessions.total === 0 ? (
-                <div className="empty">Belum ada sesi</div>
-              ) : (
-                <>
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th>Perangkat</th>
-                        <th>Status</th>
-                        <th>Method</th>
-                        <th>Mode</th>
-                        <th>Total</th>
-                        <th>Hits</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {dashSessions.items.map((s) => (
-                        <tr key={s.id}>
-                          <td>
-                            {s.label}
-                            <div className="evidence">{s.device_id}</div>
-                          </td>
-                          <td>
-                            <StatusPill status={s.status} recommendation={s.recommendation} />
-                          </td>
-                          <td>{s.progress?.acquisition_method || "—"}</td>
-                          <td>{s.mode}</td>
-                          <td>{ms(s.timing?.t_total_ms ?? 0)}</td>
-                          <td>{s.progress?.findings_count ?? 0}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <Pagination
-                    page={dashSessions.page}
-                    pages={dashSessions.pages}
-                    total={dashSessions.total}
-                    page_size={dashSessions.page_size}
-                    onPage={setDashSessionsPage}
-                    label="Sesi"
-                  />
-                </>
-              )}
-            </>
-          )}
-        </section>
-      )}
-
-      {tab === "findings" && can(auth, "findings:read") && (
-        <section className={`panel${(findingsData?.total ?? 0) > 0 ? " threat" : ""}`}>
-          <div className="panel-title">
-            <h2>Daftar temuan</h2>
-            <span className="code">MOD-HIT-04</span>
-          </div>
-          {!findingsData || findingsData.total === 0 ? (
-            <div className="empty">Belum ada temuan</div>
-          ) : (
-            <>
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Label</th>
-                    <th>Sumber</th>
-                    <th>Layer</th>
-                    <th>Confidence</th>
-                    <th>Evidence</th>
-                    <th>Verifikasi</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {findingsData.items.map((f) => (
-                    <tr key={f.id} className="hit-row">
-                      <td>
-                        <strong>{f.label}</strong>
-                        <div className="evidence">{f.category}</div>
-                      </td>
-                      <td>
-                        {f.source}
-                        <div className="evidence">{f.path}</div>
-                      </td>
-                      <td>
-                        <span className="pill muted">{f.layer_origin}</span>
-                      </td>
-                      <td>{(f.confidence * 100).toFixed(0)}%</td>
-                      <td className="evidence">{f.evidence}</td>
-                      <td>
-                        {f.review_status === "pending" ? (
-                          can(auth, "findings:review") ? (
-                            <div className="row-actions">
-                              <button onClick={() => review(f.id, "confirmed")}>Confirm</button>
-                              <button onClick={() => review(f.id, "rejected")}>Reject</button>
-                            </div>
-                          ) : (
-                            <span className="pill warn">pending</span>
-                          )
-                        ) : (
-                          <span className={`pill ${f.review_status === "confirmed" ? "bad" : "muted"}`}>
-                            {f.review_status}
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <Pagination
-                page={findingsData.page}
-                pages={findingsData.pages}
-                total={findingsData.total}
-                page_size={findingsData.page_size}
-                onPage={setFindingsPage}
+        {can(auth, "sessions:start") && (
+          <Route
+            path="/operator"
+            element={
+              <OperatorPage
+                teleRef={teleRef}
+                acqSource={acqSource}
+                setAcqSource={setAcqSource}
+                zipEnabled={zipEnabled}
+                zipFile={zipFile}
+                setZipFile={setZipFile}
+                zipMaxMb={zipMaxMb}
+                uploadPct={uploadPct}
+                liveDevices={liveDevices}
+                selected={selected}
+                setSelected={setSelected}
+                refreshDevices={refreshDevices}
+                mode={mode}
+                setMode={setMode}
+                modeHint={modeHint}
+                canStartLive={canStartLive}
+                canStartZip={canStartZip}
+                busy={busy}
+                session={session}
+                start={() => void start()}
+                startZip={() => void startZip()}
+                cancel={() => void cancel()}
+                onNavigateTab={goToTab}
+                canDashboard={can(auth, "dashboard")}
               />
-            </>
-          )}
-        </section>
-      )}
+            }
+          />
+        )}
 
-      {tab === "report" && can(auth, "report:read") && (
-        <section className={`panel${session?.recommendation === "TIDAK LULUS" ? " threat" : ""}`}>
-          <div className="panel-title">
-            <h2>Laporan sesi</h2>
-            <span className="code">MOD-RPT-05</span>
-          </div>
-          {!session ? (
-            <div className="empty">Jalankan sesi terlebih dahulu</div>
-          ) : (
-            <>
-              {session.recommendation === "TIDAK LULUS" && (
-                <div className="verdict fail">Rekomendasi akhir · Tidak Lulus</div>
-              )}
-              {session.recommendation === "LULUS" && (
-                <div className="verdict">Rekomendasi akhir · Lulus</div>
-              )}
-              <div className="timing" style={{ marginBottom: 14, marginTop: 14 }}>
-                <div>
-                  Session
-                  <strong>{session.id.slice(0, 8)}…</strong>
-                </div>
-                <div>
-                  Rekomendasi
-                  <strong>{session.recommendation || "—"}</strong>
-                </div>
-                <div>
-                  Method
-                  <strong>{progress?.acquisition_method || "—"}</strong>
-                </div>
-                <div>
-                  Hits
-                  <strong>{progress?.findings_count ?? reportFindings?.total ?? 0}</strong>
-                </div>
-              </div>
-              <div className="actions">
-                <button
-                  className="btn btn-primary"
-                  type="button"
-                  onClick={() =>
-                    api.openReport(session.id, "html").catch((e) =>
-                      setError(e instanceof Error ? e.message : "Gagal buka laporan"),
-                    )
-                  }
-                >
-                  Buka laporan HTML
-                </button>
-                <button
-                  className="btn btn-ghost"
-                  type="button"
-                  onClick={() =>
-                    api.openReport(session.id, "json").catch((e) =>
-                      setError(e instanceof Error ? e.message : "Gagal unduh JSON"),
-                    )
-                  }
-                >
-                  Unduh JSON
-                </button>
-                {can(auth, "report:authorize") && session.status === "completed" && (
-                  <button
-                    className="btn btn-primary"
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        await api.authorizeSession(session.id, "Disahkan pimpinan (PoC)");
-                        setSession(await api.session(session.id));
-                      } catch (e) {
-                        setError(e instanceof Error ? e.message : "Gagal authorize");
-                      }
-                    }}
-                  >
-                    Sahkan rekomendasi
-                  </button>
-                )}
-              </div>
-              {progress?.authorized_by && (
-                <div className="pill ok" style={{ marginTop: 12 }}>
-                  Authorized by {progress.authorized_by}
-                </div>
-              )}
-              <h3 style={{ marginTop: 18 }}>Ringkasan temuan</h3>
-              {!reportFindings || reportFindings.total === 0 ? (
-                <div className="empty">Tidak ada temuan</div>
-              ) : (
-                <>
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th>Label</th>
-                        <th>Layer</th>
-                        <th>Conf</th>
-                        <th>Path</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {reportFindings.items.map((f) => (
-                        <tr key={f.id} className="hit-row">
-                          <td>{f.label}</td>
-                          <td>{f.layer_origin}</td>
-                          <td>{(f.confidence * 100).toFixed(0)}%</td>
-                          <td className="evidence">{f.path}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <Pagination
-                    page={reportFindings.page}
-                    pages={reportFindings.pages}
-                    total={reportFindings.total}
-                    page_size={reportFindings.page_size}
-                    onPage={setReportPage}
-                  />
-                </>
-              )}
-            </>
-          )}
-        </section>
-      )}
+        {can(auth, "dashboard") && (
+          <Route
+            path="/dasbor"
+            element={
+              <DashboardPage
+                session={session}
+                sessionList={sessionList}
+                sessionsLoading={sessionsLoading && sessionList.length === 0}
+                onPickSession={(id) => void onPickSession(id)}
+                dash={dash}
+                dashSessions={dashSessions}
+                dashFindings={dashFindings}
+                setDashSessionsPage={setDashSessionsPage}
+                setDashFindingsPage={setDashFindingsPage}
+                openSession={(id, t) => void openSession(id, t)}
+              />
+            }
+          />
+        )}
+
+        {can(auth, "findings:read") && (
+          <Route
+            path="/temuan"
+            element={
+              <FindingsPage
+                auth={auth}
+                session={session}
+                sessionList={sessionList}
+                sessionsLoading={sessionsLoading && sessionList.length === 0}
+                findingsLoading={findingsLoading}
+                reviewSummary={reviewSummary}
+                onPickSession={(id) => void onPickSession(id)}
+                refreshSessionList={() => void refreshSessionList()}
+                reviewFilter={reviewFilter}
+                setReviewFilter={changeReviewFilter}
+                findingsData={findingsData}
+                expandedEvidence={expandedEvidence}
+                setExpandedEvidence={setExpandedEvidence}
+                reviewBusyId={reviewBusyId}
+                bulkBusy={bulkBusy}
+                onReview={(id, st) => void review(id, st)}
+                onBulkReview={(st) => void bulkReview(st)}
+                onPage={setFindingsPage}
+                focusedFindingId={focusedFindingId}
+                setFocusedFindingId={setFocusedFindingId}
+              />
+            }
+          />
+        )}
+
+        {can(auth, "report:read") && (
+          <Route
+            path="/laporan"
+            element={
+              <ReportPage
+                auth={auth}
+                session={session}
+                sessionList={sessionList}
+                sessionsLoading={sessionsLoading && sessionList.length === 0}
+                onPickSession={(id) => void onPickSession(id)}
+                reportFindings={reportFindings}
+                reportLoading={reportLoading}
+                reviewSummary={reviewSummary}
+                setReportPage={setReportPage}
+                authorizeNote={authorizeNote}
+                setAuthorizeNote={setAuthorizeNote}
+                setSession={setSession}
+                refreshSessionList={() => void refreshSessionList()}
+                setError={setError}
+                onToast={(msg, tone) => pushToast(msg, tone ?? "ok", { ttlMs: 4000, dedupe: true })}
+              />
+            }
+          />
+        )}
+
+        <Route path="*" element={<Navigate to={pathFromTab(landingTab)} replace />} />
+      </Routes>
 
       <footer className="ops-footer">
         <div className="ops-footer-left">
@@ -933,10 +1027,21 @@ export default function App() {
             <span className={`pill ${vision.pillow ? "ok" : "muted"}`}>
               CV {vision.pillow ? "OK" : "N/A"}
             </span>
-            <span className={`pill ${ocrOn ? "ok" : "muted"}`}>OCR {ocrOn ? "ON" : "OFF"}</span>
+            <span className={`pill ${mediaTextOn ? "ok" : "muted"}`}>
+              Media-teks {mediaTextOn ? "ON" : "OFF"}
+            </span>
+            <span className={`pill ${ocrEngineOn ? "ok" : "muted"}`}>
+              OCR {ocrEngineOn ? "ON" : "OFF"}
+            </span>
+            <span className={`pill ${whisperOn ? "ok" : "muted"}`}>
+              Whisper {whisperOn ? "ON" : "OFF"}
+            </span>
+            <span className={`pill ${gpuStackOn ? "ok" : "muted"}`}>
+              GPU-stack {gpuStackOn ? "ON" : "OFF"}
+            </span>
           </div>
         </div>
-        <span className="ops-footer-right">SADT · gallery focus · PoC</span>
+        <span className="ops-footer-right">SADT · fokus galeri · PoC</span>
       </footer>
     </div>
   );

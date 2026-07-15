@@ -77,7 +77,7 @@ def test_ocr_status_keys():
 
 @pytest.mark.unit
 def test_vision_pipelines_ocr_when_injected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Vision L3 should include OCR findings when analyze_image_ocr returns hits."""
+    """Vision L3 should include OCR findings when extract returns risk text."""
     from app.services import vision as vis
 
     pytest.importorskip("PIL")
@@ -86,17 +86,12 @@ def test_vision_pipelines_ocr_when_injected(tmp_path: Path, monkeypatch: pytest.
     img = tmp_path / "neutral.jpg"
     Image.new("RGB", (100, 100), (120, 120, 120)).save(img)
 
+    monkeypatch.setattr(config.settings, "ocr_enabled", True)
+    monkeypatch.setattr(config.settings, "clip_tokoh_enabled", False)
+    monkeypatch.setattr(config.settings, "media_text_enabled", False)
     monkeypatch.setattr(
-        "app.services.ocr.analyze_image_ocr",
-        lambda path, backend=None: [
-            {
-                "category": "anti_pemerintah",
-                "label": "OCR: anti pemerintah",
-                "confidence": 0.9,
-                "layer_origin": "L3",
-                "evidence": "mock",
-            }
-        ],
+        "app.services.ocr.extract_image_text",
+        lambda path, backend=None: ("banner anti pemerintah demo", "fake"),
     )
     findings = vis.analyze_image_file(img)
     assert any(f["label"].startswith("OCR:") for f in findings)

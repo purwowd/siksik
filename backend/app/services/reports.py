@@ -107,7 +107,13 @@ def report_to_html(report: dict) -> str:
         or "<li>-</li>"
     )
     rec = s["recommendation"] or "-"
-    bad_class = "bad" if s["recommendation"] == "TIDAK LULUS" else ""
+    if s["recommendation"] == "TIDAK LULUS":
+        rec_class = "bad"
+    elif s["recommendation"] == "MENUNGGU REVIEW":
+        rec_class = "warn"
+    else:
+        rec_class = ""
+    rec_badge = f'<span class="badge {rec_class}">{_esc(rec)}</span>'
     return f"""<!DOCTYPE html>
 <html lang="id"><head><meta charset="utf-8"/>
 <title>SADT Report — {_esc(s['id'][:8])}</title>
@@ -119,15 +125,14 @@ table{{width:100%;border-collapse:collapse;font-size:13px}}
 th,td{{border-bottom:1px solid rgba(0,229,200,.15);padding:8px;text-align:left;vertical-align:top}}
 .badge{{display:inline-block;padding:4px 8px;border:1px solid #00e5c8;color:#00e5c8}}
 .bad{{border-color:#ff4d5a;color:#ff4d5a}}
+.warn{{border-color:#e6a23c;color:#e6a23c}}
 </style></head><body>
 <h1>SADT // OPS REPORT</h1>
 <div class="box">
   <div>Session: <code>{_esc(s['id'])}</code></div>
   <div>Device: {_esc(s['label'])} / {_esc(s['device_id'])} ({_esc(s['device_type'])})</div>
   <div>Mode: {_esc(s['mode'])} · Method: {_esc(s['acquisition_method'])}</div>
-  <div>Recommendation:
-    <span class="badge {bad_class}">{_esc(rec)}</span>
-  </div>
+  <div>Recommendation: {rec_badge}</div>
 </div>
 <div class="box">
   <h2>Metrics</h2>

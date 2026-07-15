@@ -32,11 +32,14 @@ async def test_session_from_zip(client: AsyncClient):
     assert final["status"] == "completed"
     assert final["progress"]["acquisition_method"] == "zip_upload"
     assert final["progress"]["files_pulled"] >= 2
-    # "makar" in note.txt → TIDAK LULUS
-    assert final["recommendation"] == "TIDAK LULUS"
     findings = (await client.get(f"/api/v1/sessions/{sid}/findings")).json()
     assert findings["total"] >= 1
-
+    # "makar" in note.txt → finding pending, belum lulus
+    assert final["recommendation"] == "MENUNGGU REVIEW"
+    fid = findings["items"][0]["id"]
+    await client.patch(f"/api/v1/findings/{fid}", json={"review_status": "confirmed"})
+    after = (await client.get(f"/api/v1/sessions/{sid}")).json()
+    assert after["recommendation"] == "TIDAK LULUS"
 
 @pytest.mark.api
 async def test_zip_rejects_non_zip(client: AsyncClient):

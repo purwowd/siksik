@@ -46,3 +46,41 @@ def test_whisper_skips_without_enable(monkeypatch: pytest.MonkeyPatch, tmp_path:
     fake = tmp_path / "a.mp4"
     fake.write_bytes(b"not-a-real-video")
     assert audio_whisper.moderate(fake) == []
+
+
+@pytest.mark.unit
+def test_safewatch_plugin_wiring(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from app.services.gpu_stack import video_safewatch
+
+    adapter = tmp_path / "sadt_adapter.py"
+    adapter.write_text(
+        "def moderate(path):\n"
+        "    return [{'category':'anti_pemerintah','label':'plugin hit',"
+        "'confidence':0.9,'layer_origin':'L4','evidence':str(path),'backend':'test'}]\n"
+    )
+    monkeypatch.setattr(config.settings, "gpu_stack_enabled", True)
+    monkeypatch.setattr(config.settings, "gpu_safewatch_enabled", True)
+    monkeypatch.setattr(config.settings, "gpu_safewatch_model", str(tmp_path))
+    monkeypatch.setattr(config.settings, "gpu_safewatch_plugin", "")
+    vid = tmp_path / "clip.mp4"
+    vid.write_bytes(b"ftyp")
+    hits = video_safewatch.moderate(vid)
+    assert len(hits) == 1
+    assert hits[0].label == "plugin hit"
+    assert hits[0].backend == "test"
+
+
+@pytest.mark.unit
+def test_safewatch_bridge_on_path_keyword(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from app.services.gpu_stack import video_safewatch
+
+    monkeypatch.setattr(config.settings, "gpu_stack_enabled", True)
+    monkeypatch.setattr(config.settings, "gpu_safewatch_enabled", True)
+    monkeypatch.setattr(config.settings, "gpu_safewatch_model", "")
+    monkeypatch.setattr(config.settings, "gpu_safewatch_plugin", "")
+    # Bridge must not go silent when checkpoint "available" either
+    vid = tmp_path / "video_makar_demo.mp4"
+    vid.write_bytes(b"ftyp")
+    hits = video_safewatch.moderate(vid)
+    assert hits
+    assert "makar" in hits[0].label.lower() or "makar" in hits[0].evidence.lower()

@@ -13,7 +13,6 @@ from app.models.schemas import Layer
 
 # Visual risk cues (PoC — extendable lexicon)
 VISUAL_RISK_TAGS = (
-    "anti",
     "provokasi",
     "demo",
     "unjuk",
@@ -28,7 +27,9 @@ VISUAL_RISK_TAGS = (
     "pornografi",
     "kudeta",
     "hasut",
+    "gulingkan",
 )
+# Note: "anti" sengaja dihapus — terlalu pendek & substring FP (anti⊂ganti)
 
 
 def _filename_norm(name: str) -> str:
@@ -36,20 +37,22 @@ def _filename_norm(name: str) -> str:
 
 
 def _risk_lexicon() -> list[str]:
-    """Gabungan tag visual + keyword settings (frasa + token ≥4 huruf)."""
-    tags = list(VISUAL_RISK_TAGS)
-    for kw in settings.risk_keywords:
-        low = kw.lower().strip()
-        if low:
-            tags.append(low)
-        for tok in re.findall(r"[a-z0-9]{4,}", low):
-            tags.append(tok)
+    """Gabungan tag visual + keyword settings + video tags."""
+    from app.services.lexicon import video_keyword_corpus
+
+    tags = list(VISUAL_RISK_TAGS) + video_keyword_corpus()
     seen: set[str] = set()
     out: list[str] = []
     for t in tags:
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
+        low = t.lower().strip()
+        if not low or low in seen:
+            continue
+        seen.add(low)
+        out.append(low)
+        for tok in re.findall(r"[a-z0-9]{4,}", low):
+            if tok not in seen:
+                seen.add(tok)
+                out.append(tok)
     return out
 
 
@@ -97,7 +100,9 @@ def _analyze_pil_image(path: Path) -> list[dict]:
                 pass
 
             hay = f"{exif_blob} {_filename_norm(path.name)}"
-            hit_tags = [t for t in _risk_lexicon() if t in hay]
+            from app.services.lexicon import contains_phrase
+
+            hit_tags = [t for t in _risk_lexicon() if contains_phrase(hay, t)]
             score = 0.0
             reasons: list[str] = []
             if red_ratio > 1.35 and edge_mean > 18:
@@ -133,33 +138,115 @@ def _optional_torch_warmup() -> dict:
 
 
 def analyze_image_file(path: Path) -> list[dict]:
-    from app.services import ocr as ocr_mod
+    from app.services import clip_tokoh
     from app.services import gpu_stack
+    from app.services import media_text
+    from app.services import ocr as ocr_mod
 
     findings = _analyze_pil_image(path)
-    findings.extend(ocr_mod.analyze_image_ocr(path))
+
+    # Satu pass OCR → teks untuk lexicon + fusi meme/tokoh
+    ocr_text = ""
+    ocr_backend: str | None = None
+    ocr_findings: list[dict] = []
+    if settings.ocr_enabled or settings.media_text_enabled:
+        # Legacy path when OCR flag on
+        if settings.ocr_enabled:
+            ocr_text, ocr_backend = ocr_mod.extract_image_text(path)
+            if ocr_text:
+                ocr_findings = ocr_mod.ocr_findings_from_text(ocr_text, backend=ocr_backend or "ocr")
+        else:
+            # media_text best-effort (EasyOCR/Paddle tanpa SADT_OCR_ENABLED)
+            mt = media_text.ocr_image_best_effort(path)
+            ocr_findings.extend(mt)
+            # Ambil cuplikan teks dari evidence jika ada
+            for f in mt:
+                ev = str(f.get("evidence") or "")
+                if ev and not ocr_text:
+                    # evidence sering: "[easyocr] teks…"
+                    ocr_text = ev.split("] ", 1)[-1] if "] " in ev else ev
+                    ocr_backend = "media_text"
+
+    tokoh_findings = clip_tokoh.analyze_image_tokoh(path)
+    findings.extend(
+        ocr_mod.consolidate_image_findings(
+            ocr_mod.fuse_tokoh_and_text(
+                path=path,
+                ocr_text=ocr_text,
+                ocr_backend=ocr_backend,
+                tokoh_findings=tokoh_findings,
+                ocr_findings=ocr_findings,
+            )
+        )
+    )
+
     findings.extend(gpu_stack.analyze_image_gpu(path))
     if findings and gpu_device_name():
         for f in findings:
             f["evidence"] = (f["evidence"] + f" | gpu={gpu_device_name()}")[:320]
-    return findings
+    return _dedupe_findings(findings)
+
+
+def _dedupe_findings(findings: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for f in findings:
+        key = f"{f.get('label')}|{str(f.get('evidence', ''))[:60]}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    return out
+
+
+def video_duration_s(path: Path) -> float | None:
+    """Durasi media via ffprobe (detik). None jika tidak bisa dibaca."""
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        r = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return float(r.stdout.strip())
+    except Exception:
+        return None
+    return None
 
 
 def extract_video_keyframes(path: Path, max_frames: int = 3) -> list[Path]:
-    """Extract representative frames via ffmpeg (prefer fps=1 over 1/10)."""
+    """Extract representative frames via ffmpeg (spread across duration on long clips)."""
     if not shutil.which("ffmpeg"):
         return []
     out_dir = Path(tempfile.mkdtemp(prefix="sadt_kf_"))
     pattern = str(out_dir / "kf_%02d.jpg")
+    dur = video_duration_s(path)
+    if dur and dur > 30 and max_frames > 0:
+        interval = max(1, int(dur / max_frames))
+        vf = f"fps=1/{interval}"
+    else:
+        vf = "fps=1"
     probes = [
-        # 1 fps — lebih cocok video pendek daripada fps=1/10
         [
             "ffmpeg",
             "-y",
             "-i",
             str(path),
             "-vf",
-            "fps=1",
+            vf,
             "-frames:v",
             str(max_frames),
             pattern,
@@ -189,11 +276,14 @@ def extract_video_keyframes(path: Path, max_frames: int = 3) -> list[Path]:
 
 def analyze_video_file(path: Path) -> list[dict]:
     from app.services import gpu_stack
+    from app.services import media_text
 
     findings: list[dict] = []
     # filename / path cues against full risk lexicon
     hay = _filename_norm(f"{path.parent.name} {path.name}")
-    hits = [t for t in _risk_lexicon() if t in hay]
+    from app.services.lexicon import contains_phrase
+
+    hits = [t for t in _risk_lexicon() if contains_phrase(hay, t)]
     if hits:
         findings.append(
             {
@@ -206,31 +296,18 @@ def analyze_video_file(path: Path) -> list[dict]:
         )
 
     if gpu_stack.stack_enabled():
-        # Full GPU path: SafeWatch + Whisper + ICM/OCR/Qwen on keyframes
         findings.extend(gpu_stack.analyze_video_gpu(path))
-        return findings
+        return _dedupe_findings(findings)
 
-    frames = extract_video_keyframes(path, max_frames=3)
-    for fr in frames:
-        for f in analyze_image_file(fr):
-            f["label"] = f"Video keyframe: {f['label']}"
-            f["layer_origin"] = Layer.L4.value
-            findings.append(f)
-        try:
-            fr.unlink(missing_ok=True)
-        except OSError:
-            pass
-    if frames:
-        try:
-            frames[0].parent.rmdir()
-        except OSError:
-            pass
-    return findings
+    # ASR (Whisper) + keyframe visual + on-screen OCR — satu pass
+    findings.extend(media_text.analyze_video_enrichment(path))
+    return _dedupe_findings(findings)
 
 
 def vision_status() -> dict:
     from app.services.ocr import ocr_status
     from app.services import gpu_stack
+    from app.core.config import settings as cfg
 
     pil_ok = False
     try:
@@ -245,6 +322,28 @@ def vision_status() -> dict:
     info["max_side"] = 512
     info["image_cap_quick"] = settings.image_cap_quick
     info["ocr"] = ocr_status()
+    info["media_text"] = {
+        "enabled": bool(cfg.media_text_enabled),
+        "video_overlay_keyframes": cfg.video_overlay_keyframes,
+        "video_whisper_max_duration_s": cfg.video_whisper_max_duration_s,
+        "video_whisper_transcribe_first_s": cfg.video_whisper_transcribe_first_s,
+        "whisper": bool(cfg.gpu_whisper_enabled),
+    }
+    info["tuning"] = {
+        "ocr_max_edge_px": cfg.ocr_max_edge_px,
+        "ocr_sharpen": cfg.ocr_sharpen,
+        "video_cap_quick": cfg.video_cap_quick,
+        "video_cap_full": cfg.video_cap_full,
+        "worker_concurrency": cfg.worker_concurrency,
+        "cv_batch_size": cfg.cv_batch_size,
+        "clip_tokoh": cfg.clip_tokoh_enabled,
+    }
+    try:
+        from app.services import clip_tokoh
+
+        info["clip_tokoh"] = clip_tokoh.status()
+    except Exception:
+        info["clip_tokoh"] = {"available": False}
     st = gpu_stack.get_stack_status()
     info["gpu_stack"] = {
         "enabled": st.enabled,

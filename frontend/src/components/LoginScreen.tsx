@@ -24,9 +24,9 @@ export function LoginScreen({
 }: Props) {
   return (
     <div className="app-shell wide login-shell">
-      <div className="classify-rail">
-        <span>Restriksi internal · Defense &amp; Intel</span>
-        <span>RBAC · lab offline</span>
+      <div className="classify-rail slim">
+        <span>Internal · lab offline</span>
+        <span>PoC</span>
       </div>
       <div className="login-hero">
         <section className="login-brand">
@@ -90,9 +90,9 @@ export function LoginScreen({
           </p>
         </section>
       </div>
-      <div className="classify-rail bottom">
-        <span>SADT · forensic pipeline · gallery scope</span>
-        <span>PoC build</span>
+      <div className="classify-rail bottom slim">
+        <span>SADT · fokus galeri</span>
+        <span>PoC</span>
       </div>
     </div>
   );

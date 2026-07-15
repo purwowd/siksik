@@ -280,7 +280,10 @@ class SessionManager:
             )
 
             t_total = (time.perf_counter() - wall0) * 1000
-            recommendation = "TIDAK LULUS" if findings_count > 0 else "LULUS"
+            from app.services.recommendation import apply_recommendation
+
+            # Temuan pending → MENUNGGU REVIEW; TIDAK LULUS hanya setelah confirm
+            recommendation = await apply_recommendation(session_id)
             await self._update(
                 session_id,
                 status=SessionStatus.COMPLETED,
@@ -364,7 +367,9 @@ class SessionManager:
             )
 
             t_total = (time.perf_counter() - wall0) * 1000
-            recommendation = "TIDAK LULUS" if findings_count > 0 else "LULUS"
+            from app.services.recommendation import apply_recommendation
+
+            recommendation = await apply_recommendation(session_id)
             await self._update(
                 session_id,
                 status=SessionStatus.COMPLETED,
