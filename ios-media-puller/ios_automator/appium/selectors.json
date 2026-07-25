@@ -1,0 +1,142 @@
+{
+  "instagram": {
+    "bundle_id": "com.burbn.instagram",
+    "launch_wait_sec": 1.0,
+    "profile_tab_wait_sec": 10.0,
+    "profile_tab_poll_sec": 0.25,
+    "settings_menu_wait_sec": 45.0,
+    "settings_menu_poll_sec": 1.5,
+    "home_marker": {
+      "strategies": [
+        {"using": "accessibility id", "value": "mainfeed-tab"},
+        {"using": "accessibility id", "value": "feed-tab"},
+        {"using": "accessibility id", "value": "mainfeed-tab-bar-home"},
+        {"using": "name", "value": "Main feed"},
+        {"using": "name", "value": "Home"},
+        {"using": "name", "value": "Beranda"},
+        {"using": "label", "value": "Main feed"},
+        {"using": "label", "value": "Home"},
+        {"using": "label", "value": "Beranda"}
+      ],
+      "optional": true
+    },
+    "profile_tab": {
+      "strategies": [
+        {"using": "accessibility id", "value": "profile-tab"},
+        {"using": "accessibility id", "value": "mainfeed-tab-bar-profile"},
+        {"using": "name", "value": "Profile"},
+        {"using": "name", "value": "Profil"},
+        {"using": "label", "value": "Profile"},
+        {"using": "label", "value": "Profil"}
+      ],
+      "fallback_xy": {"x_ratio": 0.9, "y_ratio": 0.96}
+    },
+    "profile_name": {
+      "strategies": [
+        {"using": "accessibility id", "value": "user-profile-header-username"},
+        {"using": "xpath", "value": "//XCUIElementTypeStaticText[contains(@name,'_')]"},
+        {"using": "xpath", "value": "//XCUIElementTypeButton[contains(@name,'_')]"},
+        {"using": "xpath", "value": "//XCUIElementTypeNavigationBar//XCUIElementTypeStaticText"}
+      ],
+      "attribute": "name",
+      "notes": "IG handle tanpa @ di tree, contoh denirwan_08. Display name: Denirwan."
+    },
+    "menu_button": {
+      "strategies": [
+        {"using": "accessibility id", "value": "profile-more-button"},
+        {"using": "accessibility id", "value": "settings"},
+        {"using": "name", "value": "Options"},
+        {"using": "name", "value": "Opsi"},
+        {"using": "name", "value": "Menu"},
+        {"using": "name", "value": "Pengaturan dan aktivitas"},
+        {"using": "name", "value": "Settings"}
+      ],
+      "fallback_xy": {"x_ratio": 0.94, "y_ratio": 0.08}
+    },
+    "archive_item": {
+      "strategies": [
+        {"using": "accessibility id", "value": "Archive"},
+        {"using": "name", "value": "Archive"},
+        {"using": "name", "value": "Arsip"},
+        {"using": "label", "value": "Archive"},
+        {"using": "label", "value": "Arsip"}
+      ]
+    },
+    "archive_calendar_tab": {
+      "strategies": [
+        {"using": "name", "value": "Calendar"},
+        {"using": "label", "value": "Calendar"},
+        {"using": "name", "value": "Kalender"},
+        {"using": "label", "value": "Kalender"},
+        {"using": "xpath", "value": "//XCUIElementTypeButton[contains(@label,'Calendar') or contains(@label,'Kalender') or contains(@name,'calendar')]"},
+        {"using": "xpath", "value": "//XCUIElementTypeCell[contains(@label,'Calendar') or contains(@name,'calendar')]"}
+      ],
+      "fallback_xy": {"x_ratio": 0.62, "y_ratio": 0.14}
+    },
+    "archive_grid_tab": {
+      "strategies": [
+        {"using": "name", "value": "Grid"},
+        {"using": "label", "value": "Grid"},
+        {"using": "xpath", "value": "//XCUIElementTypeButton[contains(@label,'Grid') or contains(@name,'grid') or contains(@name,'story')]"},
+        {"using": "xpath", "value": "//XCUIElementTypeCell[@name='Grid' or @label='Grid']"}
+      ],
+      "fallback_xy": {"x_ratio": 0.12, "y_ratio": 0.14}
+    },
+    "archive_load_timeout_sec": 25.0,
+    "archive_load_poll_sec": 0.5,
+    "archive_stable_sec": 1.0
+  },
+  "facebook": {
+    "bundle_id": "com.facebook.Facebook",
+    "launch_wait_sec": 2.0,
+    "profile_tab_wait_sec": 10.0,
+    "profile_tab_poll_sec": 0.25,
+    "profile_settle_sec": 1.5,
+    "profile_tab_labels": [
+      "Your profile",
+      "Profil Anda",
+      "Profil kamu",
+      "Profile",
+      "Profil"
+    ],
+    "profile_tab": {
+      "strategies": [
+        {"using": "xpath", "value": "//XCUIElementTypeButton[@label='Your profile']"},
+        {"using": "xpath", "value": "//XCUIElementTypeButton[contains(@label,'Your profile') or contains(@label,'Profil Anda')]"},
+        {"using": "label", "value": "Your profile"},
+        {"using": "name", "value": "Your profile"},
+        {"using": "xpath", "value": "//XCUIElementTypeButton[@label='Profile' or @label='Profil']"}
+      ],
+      "fallback_xy": {"x_ratio": 0.92, "y_ratio": 0.935}
+    }
+  },
+  "x": {
+    "bundle_id": "com.atebits.Tweetie2",
+    "launch_wait_sec": 0.8,
+    "profile_tab_wait_sec": 6.0,
+    "profile_tab_poll_sec": 0.15,
+    "profile_settle_sec": 0.5,
+    "drawer_settle_sec": 0.35,
+    "account_menu": {
+      "strategies": [
+        {"using": "accessibility id", "value": "NavigationBarDashButton"},
+        {"using": "name", "value": "NavigationBarDashButton"},
+        {"using": "label", "value": "Account Menu"},
+        {"using": "xpath", "value": "//XCUIElementTypeButton[@name='NavigationBarDashButton' or @label='Account Menu']"}
+      ],
+      "fallback_xy": {"x_ratio": 0.085, "y_ratio": 0.089}
+    },
+    "drawer_profile": {
+      "strategies": [
+        {"using": "accessibility id", "value": "Profile"},
+        {"using": "name", "value": "Profile"},
+        {"using": "label", "value": "Profile"},
+        {"using": "name", "value": "Profil"},
+        {"using": "label", "value": "Profil"},
+        {"using": "xpath", "value": "//XCUIElementTypeButton[@label='Profile' or @label='Profil' or @name='Profile']"},
+        {"using": "xpath", "value": "//XCUIElementTypeCell[@label='Profile' or @label='Profil' or @name='Profile']"}
+      ],
+      "fallback_xy": {"x_ratio": 0.22, "y_ratio": 0.28}
+    }
+  }
+}
