@@ -107,11 +107,8 @@ temp_crawl/
 .TemporaryItems/
 .AppleDouble/
 
-# --- iOS media puller (in-repo tooling; keep source, ignore runtime) ---
-ios-media-puller/.venv/
-ios-media-puller/output/
-ios-media-puller/.env
-ios-media-puller/**/__pycache__/
+# --- iOS media puller (separate repo / local tool — do not embed) ---
+ios-media-puller/
 
 # --- Docker / local overrides ---
 docker-compose.override.yml
