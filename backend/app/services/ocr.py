@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import lru_cache
@@ -23,12 +24,24 @@ from app.core.config import settings
 
 log = logging.getLogger(__name__)
 
+# EasyOCR/torch: one Reader + one in-flight extract. Parallel CPU workers OOM Mac labs
+# (session 2e5f8be3: "Using CPU" × worker_concurrency → uvicorn Killed:9).
+_OCR_EXTRACT_LOCK = threading.RLock()
+_SHARED_BACKENDS: dict[str, object] = {}
+_SHARED_BACKENDS_LOCK = threading.Lock()
 
-def prepare_ocr_path(image_path: Path) -> tuple[Path, Path | None]:
+
+def prepare_ocr_path(
+    image_path: Path,
+    *,
+    max_edge_px: int | None = None,
+    min_edge_px: int | None = None,
+    sharpen: bool | None = None,
+) -> tuple[Path, Path | None]:
     """EXIF + upscale foto kecil + downscale besar + contraste/sharpen sebelum OCR."""
-    max_edge = int(settings.ocr_max_edge_px or 0)
-    min_edge = int(settings.ocr_min_edge_px or 0)
-    do_sharpen = bool(settings.ocr_sharpen)
+    max_edge = int(settings.ocr_max_edge_px if max_edge_px is None else max_edge_px)
+    min_edge = int(settings.ocr_min_edge_px if min_edge_px is None else min_edge_px)
+    do_sharpen = bool(settings.ocr_sharpen if sharpen is None else sharpen)
     try:
         from PIL import Image, ImageFilter, ImageOps
 
@@ -129,11 +142,61 @@ def _easyocr_lines(rows: list, *, paragraph: bool, min_conf: float) -> tuple[str
 
 
 @dataclass
+class OcrRegion:
+    text: str
+    left: int
+    top: int
+    right: int
+    bottom: int
+    confidence: float | None = None
+
+
+@dataclass
 class OcrResult:
     text: str
     backend: str
     confidence: float | None = None
     device: str | None = None
+    regions: tuple[OcrRegion, ...] = ()
+
+
+def _easyocr_regions(rows: list, *, min_conf: float) -> tuple[OcrRegion, ...]:
+    output: list[OcrRegion] = []
+    for row in rows:
+        if not row or len(row) < 2:
+            continue
+        bbox = row[0]
+        text = str(row[1]).strip()
+        confidence = (
+            float(row[2])
+            if len(row) >= 3 and isinstance(row[2], (int, float))
+            else 1.0
+        )
+        if (
+            not text
+            or (confidence < min_conf and len(text) < 12)
+            or confidence < max(0.08, min_conf * 0.5)
+        ):
+            continue
+        try:
+            xs = [float(point[0]) for point in bbox]
+            ys = [float(point[1]) for point in bbox]
+        except (TypeError, ValueError, IndexError):
+            continue
+        if not xs or not ys:
+            continue
+        output.append(
+            OcrRegion(
+                text=text,
+                left=max(0, int(min(xs))),
+                top=max(0, int(min(ys))),
+                right=max(0, int(max(xs))),
+                bottom=max(0, int(max(ys))),
+                confidence=confidence,
+            )
+        )
+    output.sort(key=lambda value: (value.top, value.left))
+    return tuple(output)
 
 
 class OcrBackend(ABC):
@@ -181,24 +244,33 @@ class EasyOCRBackend(OcrBackend):
             )
         return self._reader
 
-    def extract(self, image_path: Path) -> OcrResult:
+    def extract(
+        self,
+        image_path: Path,
+        *,
+        mag_ratio: float | None = None,
+    ) -> OcrResult:
         reader = self._get_reader()
         paragraph = bool(settings.ocr_paragraph)
         min_conf = float(settings.ocr_min_confidence)
-        mag = float(settings.ocr_mag_ratio or 1.5)
-        rows = reader.readtext(
-            str(image_path),
-            detail=1,
-            paragraph=paragraph,
-            mag_ratio=mag,
-            canvas_size=3200,
-        )
+        mag = float(mag_ratio if mag_ratio is not None else settings.ocr_mag_ratio or 1.5)
+        # CPU: smaller canvas — default 3200 spikes RAM on archive grids.
+        canvas = 3200 if settings.ocr_gpu else 1600
+        with _OCR_EXTRACT_LOCK:
+            rows = reader.readtext(
+                str(image_path),
+                detail=1,
+                paragraph=paragraph,
+                mag_ratio=mag,
+                canvas_size=canvas,
+            )
         text, avg = _easyocr_lines(rows, paragraph=paragraph, min_conf=min_conf)
         return OcrResult(
             text=text,
             backend=self.name,
             confidence=avg,
             device="cuda" if settings.ocr_gpu else "cpu",
+            regions=_easyocr_regions(rows, min_conf=min_conf),
         )
 
 
@@ -321,23 +393,36 @@ def ocr_status() -> dict:
     }
 
 
+def get_shared_backend(backend_name: str | None = None) -> OcrBackend | None:
+    """Process-wide OCR backend singleton (never construct a second EasyOCR Reader)."""
+    name = (backend_name or settings.ocr_backend or "easyocr").strip().lower()
+    with _SHARED_BACKENDS_LOCK:
+        existing = _SHARED_BACKENDS.get(name)
+        if existing is not None:
+            return existing
+        cls = _BACKENDS.get(name)
+        if not cls:
+            log.warning("Unknown OCR backend %s", name)
+            return None
+        backend = cls()
+        if not backend.available():
+            log.warning("OCR backend %s not installed", name)
+            return None
+        _SHARED_BACKENDS[name] = backend
+        return backend
+
+
 @lru_cache(maxsize=1)
 def get_backend() -> OcrBackend | None:
     if not settings.ocr_enabled:
         return None
-    cls = _BACKENDS.get(settings.ocr_backend)
-    if not cls:
-        log.warning("Unknown OCR backend %s", settings.ocr_backend)
-        return None
-    backend = cls()
-    if not backend.available():
-        log.warning("OCR backend %s not installed", settings.ocr_backend)
-        return None
-    return backend
+    return get_shared_backend(settings.ocr_backend)
 
 
 def reset_backend_cache() -> None:
     get_backend.cache_clear()
+    with _SHARED_BACKENDS_LOCK:
+        _SHARED_BACKENDS.clear()
 
 
 def ocr_keyword_corpus() -> list[str]:
@@ -493,12 +578,27 @@ def consolidate_image_findings(findings: list[dict]) -> list[dict]:
     return out
 
 
-def run_ocr(image_path: Path, *, backend: OcrBackend | None = None) -> OcrResult | None:
+def run_ocr(
+    image_path: Path,
+    *,
+    backend: OcrBackend | None = None,
+    max_edge_px: int | None = None,
+    min_edge_px: int | None = None,
+    sharpen: bool | None = None,
+    mag_ratio: float | None = None,
+) -> OcrResult | None:
     engine = backend if backend is not None else get_backend()
     if engine is None:
         return None
-    ocr_path, tmp = prepare_ocr_path(image_path)
+    ocr_path, tmp = prepare_ocr_path(
+        image_path,
+        max_edge_px=max_edge_px,
+        min_edge_px=min_edge_px,
+        sharpen=sharpen,
+    )
     try:
+        if isinstance(engine, EasyOCRBackend):
+            return engine.extract(ocr_path, mag_ratio=mag_ratio)
         return engine.extract(ocr_path)
     except Exception as exc:  # noqa: BLE001
         log.exception("OCR failed on %s: %s", image_path, exc)

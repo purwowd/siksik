@@ -12,6 +12,7 @@ _SKIP_SOLO_TOKENS = frozenset(
     {
         "anti",  # anti⊂ganti; pakai frasa "anti pemerintah" / "anti presiden"
         "ganti",  # terlalu umum; pakai frasa "ganti presiden"
+        "negara",  # terlalu umum; FP di username intel.negara — pakai "khianat/jual negara"
         "online",
         "anak",
         "ilegal",
@@ -25,7 +26,7 @@ def normalize_text(text: str) -> str:
 
 
 def contains_phrase(haystack: str, phrase: str) -> bool:
-    """True jika phrase muncul sebagai kata/frasa utuh (bukan substring)."""
+    """True jika phrase muncul sebagai kata/frasa utuh (bukan substring / bagian handle)."""
     hay = normalize_text(haystack)
     p = normalize_text(phrase)
     if not hay or not p:
@@ -33,9 +34,22 @@ def contains_phrase(haystack: str, phrase: str) -> bool:
     parts = [re.escape(w) for w in p.split() if w]
     if not parts:
         return False
-    body = r"[\s\-_/\.]+".join(parts)
-    pat = rf"(?<![a-z0-9]){body}(?![a-z0-9])"
+    # Dot/underscore keep handles like intel.negara from matching token "negara".
+    body = r"[\s\-/]+".join(parts)
+    pat = rf"(?<![a-z0-9._]){body}(?![a-z0-9._])"
     return bool(re.search(pat, hay))
+
+
+def keyword_match_terms(keyword: str, *, min_token_len: int = 4) -> list[str]:
+    normalized = normalize_text(keyword)
+    if not normalized:
+        return []
+    terms = [normalized]
+    for token in re.findall(r"[a-z0-9]+", normalized):
+        if token in terms or len(token) < min_token_len or token in _SKIP_SOLO_TOKENS:
+            continue
+        terms.append(token)
+    return terms
 
 
 def match_keywords(
@@ -50,19 +64,18 @@ def match_keywords(
     hits: list[str] = []
     seen: set[str] = set()
     for kw in kws:
-        low = kw.lower().strip()
-        if not low:
+        terms = keyword_match_terms(kw, min_token_len=min_token_len)
+        if not terms:
             continue
-        if contains_phrase(text, low):
-            if low not in seen:
-                seen.add(low)
+        phrase = terms[0]
+        if contains_phrase(text, phrase):
+            if phrase not in seen:
+                seen.add(phrase)
                 hits.append(kw)
             continue
         if not allow_token_fallback:
             continue
-        for tok in re.findall(r"[a-z0-9]+", low):
-            if len(tok) < min_token_len or tok in _SKIP_SOLO_TOKENS:
-                continue
+        for tok in terms[1:]:
             if contains_phrase(text, tok) and tok not in seen:
                 seen.add(tok)
                 hits.append(tok)
@@ -71,9 +84,10 @@ def match_keywords(
 
 
 def category_for_keyword(kw: str) -> str:
+    normalized = normalize_text(kw)
     return (
         "perilaku_menyimpang"
-        if kw in ("narkoba", "judi online", "pornografi anak")
+        if normalized in ("narkoba", "judi online", "pornografi anak")
         else "anti_pemerintah"
     )
 

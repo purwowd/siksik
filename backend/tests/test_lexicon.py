@@ -30,6 +30,18 @@ def test_no_false_positive_bom_substring():
 
 
 @pytest.mark.unit
+def test_no_false_positive_negara_inside_username():
+    text = "Instagram profile intel.negara Edit profile Share profile"
+    assert not contains_phrase(text, "negara")
+    hits = match_keywords(text)
+    assert "negara" not in [h.lower() for h in hits]
+    assert not any(h.lower() == "negara" for h in hits)
+    # Full risk phrases must still match.
+    assert contains_phrase("aktor jual negara di forum", "jual negara")
+    assert contains_phrase("tuduhan khianat negara", "khianat negara")
+
+
+@pytest.mark.unit
 def test_true_positive_phrase_and_token():
     assert contains_phrase("ajak makar terhadap negara", "makar")
     assert contains_phrase("spanduk anti pemerintah di jalan", "anti pemerintah")

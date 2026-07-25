@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,6 +61,110 @@ class Settings(BaseSettings):
     adb_pull_timeout_s: int = 120
     adb_max_files_quick: int = 800
     adb_max_files_full: int = 5000
+
+    # Android provider boundaries. Agent remains opt-in until its phase gates pass.
+    adb_path: str = "adb"
+    adb_command_timeout_s: float = 30.0
+    android_min_api: int = 26
+    android_agent_enabled: bool = True
+    # JALANKAN AKUISISI: always adb install -r agent APK (build + install otomatis).
+    android_agent_force_reinstall: bool = True
+    android_legacy_fallback: bool = True
+    android_agent_project_path: Path = ROOT.parent / "android-agent"
+    android_agent_apk_path: Path = (
+        ROOT.parent / "android-agent" / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+    )
+    android_agent_automation_apk_path: Path = (
+        ROOT.parent
+        / "android-agent"
+        / "automation"
+        / "build"
+        / "outputs"
+        / "apk"
+        / "debug"
+        / "automation-debug.apk"
+    )
+    android_agent_build_timeout_s: float = 600.0
+    android_java_home: Path | None = None
+    android_sdk_home: Path | None = None
+    android_agent_package: str = "com.siksik.agent"
+    android_agent_component: str = "com.siksik.agent/.session.BootstrapActivity"
+    android_agent_api_version: str = "1.0"
+    android_agent_device_port: int = 38471
+    android_agent_token_ttl_s: int = 3600
+    android_agent_request_timeout_s: float = 60.0
+    android_agent_request_attempts: int = 3
+    android_agent_reconnect_timeout_s: float = Field(default=90.0, ge=5.0, le=600.0)
+    android_agent_reconnect_poll_s: float = Field(default=0.5, ge=0.1, le=10.0)
+    android_agent_max_response_mb: int = Field(default=4, ge=1, le=16)
+    android_agent_install_timeout_s: float = 180.0
+    android_agent_inspection_timeout_s: float = 60.0
+    android_agent_min_device_storage_mb: int = 128
+    android_agent_access_timeout_s: float = 180.0
+    android_agent_access_poll_s: float = 1.0
+    android_agent_required_special_access: list[str] = []
+    android_agent_accessibility_component: str = (
+        "com.siksik.agent/com.siksik.agent.accessibility.CaptureAccessibilityService"
+    )
+    android_agent_notification_component: str = (
+        "com.siksik.agent/com.siksik.agent.notification.SessionNotificationListener"
+    )
+    android_agent_automation_package: str = "com.siksik.agent.automation"
+    android_agent_automation_runner: str = (
+        "com.siksik.agent.automation/androidx.test.runner.AndroidJUnitRunner"
+    )
+    android_agent_automation_test_class: str = (
+        "com.siksik.agent.automation.SocialCrawlInstrumentation"
+    )
+    android_agent_automation_install_timeout_s: float = 180.0
+    android_agent_automation_target_timeout_s: float = 180.0
+    android_agent_social_targets: list[str] = [
+        "com.instagram.android",
+        "com.twitter.android",
+        "com.facebook.katana",
+    ]
+    android_agent_social_quick_scrolls: int = 18
+    android_agent_social_full_scrolls: int = 40
+    android_agent_social_quick_screenshots: int = 24
+    android_agent_social_full_screenshots: int = 46
+    android_social_host_ocr_enabled: bool = True
+    android_social_ocr_max_edge_px: int = 1280
+    android_social_ocr_mag_ratio: float = 1.25
+    android_social_debug_snapshots: bool = True
+    # Debug social screenshots stay inside the siksik tree (not Product1 parent).
+    android_social_debug_dir: Path = ROOT.parent / "temp_crawl"
+
+    # iOS acquisition: AFC media/docs + selective SMS/contacts + WDA social (IG/X).
+    # Full idevicebackup2 remains opt-in (OOM-prone on lab Macs).
+    # QUICK = capped counts; FULL with 0 = uncapped (take all available).
+    ios_social_ui_enabled: bool = True
+    ios_afc_media_enabled: bool = True
+    ios_afc_docs_enabled: bool = True
+    ios_afc_quick_media_count: int = 40
+    ios_afc_full_media_count: int = 0
+    ios_afc_quick_docs_count: int = 30
+    ios_afc_full_docs_count: int = 0
+    ios_afc_timeout_s: float = 300.0
+    # Selective backup2 --only sms/contacts (not full device backup).
+    ios_sms_contacts_enabled: bool = True
+    ios_sms_quick_messages: int = 200
+    ios_sms_full_messages: int = 0
+    ios_contacts_quick: int = 200
+    ios_contacts_full: int = 0
+    ios_backup_comms_timeout_s: float = 600.0
+    ios_libimobiledevice_backup_enabled: bool = False
+    ios_media_puller_path: Path = ROOT.parent / "ios-media-puller"
+    ios_social_wda_url: str = "http://127.0.0.1:8100"
+    ios_social_wda_boot_timeout_s: float = 120.0
+    ios_social_flow_timeout_s: float = 300.0
+    ios_social_quick_archive_shots: int = 2
+    ios_social_full_archive_shots: int = 0
+    ios_social_quick_x_shots: int = 2
+    ios_social_full_x_shots: int = 0
+    ios_social_targets: list[str] = [
+        "com.instagram.android",
+        "com.twitter.android",
+    ]
 
     # Upload ZIP hasil ADB (analisa tanpa akuisisi live)
     zip_max_mb: int = 512

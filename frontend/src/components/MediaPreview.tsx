@@ -8,9 +8,11 @@ const VID_EXT = /\.(mp4|mov|webm|mkv|3gp|avi)$/i;
 export function MediaPreview({
   sessionId,
   path,
+  text,
 }: {
   sessionId: string;
   path: string;
+  text?: string | null;
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -18,6 +20,7 @@ export function MediaPreview({
   const isImg = IMG_EXT.test(path);
   const isVid = VID_EXT.test(path);
   const supported = isImg || isVid;
+  const previewText = (text || "").replace(/\s+/g, " ").trim().slice(0, 320);
 
   useEffect(() => {
     let revoke: string | null = null;
@@ -51,7 +54,11 @@ export function MediaPreview({
   }, [sessionId, path, supported]);
 
   if (!supported) {
-    return <div className="media-preview skeleton muted-preview">Teks / berkas</div>;
+    return (
+      <div className="media-preview skeleton muted-preview" title={previewText || "Berkas"}>
+        {previewText || "Berkas"}
+      </div>
+    );
   }
   if (loading) {
     return (
@@ -61,20 +68,29 @@ export function MediaPreview({
     );
   }
   if (failed) {
-    return <div className="media-preview skeleton muted-preview">Gagal muat</div>;
+    return (
+      <div className="media-preview skeleton muted-preview" title={previewText || "Gagal muat"}>
+        {previewText || "Gagal muat"}
+      </div>
+    );
   }
   if (!url) return <div className="media-preview skeleton" />;
 
   if (isImg) {
     return (
       <a className="media-preview" href={url} target="_blank" rel="noreferrer">
-        <img src={url} alt={`Pratinjau ${path.split("/").pop() || "media"}`} loading="lazy" />
+        <img
+          src={url}
+          alt={`Pratinjau ${path.split("/").pop() || "media"}`}
+          loading="lazy"
+          onError={() => setFailed(true)}
+        />
       </a>
     );
   }
   return (
     <div className="media-preview video">
-      <video src={url} controls preload="metadata" />
+      <video src={url} controls preload="metadata" onError={() => setFailed(true)} />
     </div>
   );
 }

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 import aiosqlite
 
@@ -32,6 +34,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     timing_json TEXT NOT NULL,
     recommendation TEXT,
     error TEXT,
+    created_by TEXT,
+    review_candidates INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -81,11 +85,423 @@ CREATE TABLE IF NOT EXISTS hash_cache (
 );
 """
 
+MigrationHandler = Callable[[aiosqlite.Connection], Awaitable[None]]
+
+
+async def _migration_finding_media_dates(conn: aiosqlite.Connection) -> None:
+    cursor = await conn.execute("PRAGMA table_info(findings)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "media_year" not in columns:
+        await conn.execute("ALTER TABLE findings ADD COLUMN media_year INTEGER")
+    if "media_captured_at" not in columns:
+        await conn.execute("ALTER TABLE findings ADD COLUMN media_captured_at TEXT")
+
+
+async def _migration_agent_runtimes(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_runtimes (
+            session_id TEXT PRIMARY KEY,
+            device_ref TEXT NOT NULL,
+            state TEXT NOT NULL,
+            api_version TEXT,
+            agent_version TEXT,
+            forward_host_port INTEGER,
+            token_expires_at TEXT,
+            token_fingerprint TEXT,
+            request_id TEXT,
+            error_category TEXT,
+            retryable INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_runtimes_state ON agent_runtimes(state)"
+    )
+
+
+async def _migration_agent_bootstrap_trace(conn: aiosqlite.Connection) -> None:
+    cursor = await conn.execute("PRAGMA table_info(agent_runtimes)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    additions = {
+        "agent_build_sha256": "TEXT",
+        "artifact_sha256": "TEXT",
+        "details_json": "TEXT NOT NULL DEFAULT '{}'",
+    }
+    for name, declaration in additions.items():
+        if name not in columns:
+            await conn.execute(f"ALTER TABLE agent_runtimes ADD COLUMN {name} {declaration}")
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_bootstrap_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            device_ref TEXT NOT NULL,
+            state TEXT NOT NULL,
+            percent REAL NOT NULL,
+            message_code TEXT NOT NULL,
+            details_json TEXT NOT NULL,
+            request_id TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_events_session ON agent_bootstrap_events(session_id, id)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_events_device ON agent_bootstrap_events(device_ref, id)"
+    )
+
+
+async def _migration_selection_review(conn: aiosqlite.Connection) -> None:
+    cursor = await conn.execute("PRAGMA table_info(sessions)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "created_by" not in columns:
+        await conn.execute("ALTER TABLE sessions ADD COLUMN created_by TEXT")
+    if "review_candidates" not in columns:
+        await conn.execute(
+            "ALTER TABLE sessions ADD COLUMN review_candidates INTEGER NOT NULL DEFAULT 0"
+        )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crawl_runs (
+            crawl_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            policy_fingerprint TEXT NOT NULL,
+            selection_revision INTEGER NOT NULL,
+            selection_fingerprint TEXT,
+            review_candidates INTEGER NOT NULL,
+            selection_confirmed INTEGER NOT NULL DEFAULT 0,
+            totals_json TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            frozen_at TEXT,
+            confirmed_at TEXT,
+            failure_reason TEXT,
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS selection_candidates (
+            crawl_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            record_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_app TEXT,
+            evidence_text TEXT,
+            score REAL NOT NULL,
+            threshold REAL NOT NULL,
+            auto_selected INTEGER NOT NULL,
+            selected INTEGER NOT NULL,
+            matched_keywords_json TEXT NOT NULL,
+            matched_rules_json TEXT NOT NULL,
+            model_signals_json TEXT NOT NULL,
+            reasons_json TEXT NOT NULL,
+            human_override TEXT NOT NULL,
+            operator_id TEXT,
+            decided_at TEXT NOT NULL,
+            duplicate_group_id TEXT,
+            representative_record_id TEXT,
+            size_bytes INTEGER,
+            thumbnail_available INTEGER NOT NULL,
+            PRIMARY KEY(crawl_id, record_id),
+            FOREIGN KEY(crawl_id) REFERENCES crawl_runs(crawl_id) ON DELETE CASCADE,
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_selection_candidates_browse "
+        "ON selection_candidates(session_id, score DESC, record_id)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_selection_candidates_source "
+        "ON selection_candidates(session_id, source_kind, selected)"
+    )
+
+
+async def _migration_direct_crawl_ingestion(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crawl_permissions (
+            crawl_id TEXT NOT NULL,
+            permission TEXT NOT NULL,
+            state TEXT NOT NULL,
+            reason TEXT,
+            observed_at TEXT NOT NULL,
+            PRIMARY KEY(crawl_id, permission),
+            FOREIGN KEY(crawl_id) REFERENCES crawl_runs(crawl_id) ON DELETE CASCADE
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crawl_records (
+            record_id TEXT NOT NULL,
+            crawl_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_app TEXT,
+            social_scope TEXT,
+            normalized_text TEXT,
+            content_sha256 TEXT,
+            selection_revision INTEGER NOT NULL,
+            selection_fingerprint TEXT NOT NULL,
+            canonical_json TEXT NOT NULL,
+            canonical_path TEXT NOT NULL,
+            ingested_at TEXT NOT NULL,
+            PRIMARY KEY(crawl_id, record_id),
+            FOREIGN KEY(crawl_id) REFERENCES crawl_runs(crawl_id) ON DELETE CASCADE,
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crawl_artifacts (
+            artifact_id TEXT PRIMARY KEY,
+            crawl_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            record_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            role TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            verified INTEGER NOT NULL,
+            ingested_at TEXT NOT NULL,
+            FOREIGN KEY(crawl_id) REFERENCES crawl_runs(crawl_id) ON DELETE CASCADE,
+            FOREIGN KEY(session_id) REFERENCES sessions(id),
+            FOREIGN KEY(crawl_id, record_id) REFERENCES crawl_records(crawl_id, record_id)
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crawl_transfers (
+            stage_id TEXT PRIMARY KEY,
+            crawl_id TEXT NOT NULL UNIQUE,
+            session_id TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL,
+            selection_revision INTEGER NOT NULL,
+            selection_fingerprint TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL,
+            record_count INTEGER NOT NULL,
+            artifact_count INTEGER NOT NULL,
+            total_bytes INTEGER NOT NULL,
+            receipt_id TEXT NOT NULL,
+            cleanup_receipt_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(crawl_id) REFERENCES crawl_runs(crawl_id) ON DELETE CASCADE,
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crawl_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            crawl_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            details_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(crawl_id) REFERENCES crawl_runs(crawl_id) ON DELETE CASCADE,
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_crawl_records_session_source "
+        "ON crawl_records(session_id, source_kind, record_id)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_crawl_records_scope "
+        "ON crawl_records(crawl_id, social_scope, record_id)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_crawl_records_hash "
+        "ON crawl_records(content_sha256)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_crawl_artifacts_record "
+        "ON crawl_artifacts(crawl_id, record_id, role)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_crawl_artifacts_hash "
+        "ON crawl_artifacts(sha256)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_crawl_transfers_state "
+        "ON crawl_transfers(state, updated_at)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_crawl_events_crawl "
+        "ON crawl_events(crawl_id, id)"
+    )
+
+
+async def _migration_direct_crawl_composite_identity(
+    conn: aiosqlite.Connection,
+) -> None:
+    cursor = await conn.execute("PRAGMA table_info(crawl_records)")
+    primary_key = {
+        row[1]: int(row[5])
+        for row in await cursor.fetchall()
+        if int(row[5]) > 0
+    }
+    if primary_key == {"crawl_id": 1, "record_id": 2}:
+        return
+    await conn.execute(
+        """
+        CREATE TABLE crawl_records_v2 (
+            record_id TEXT NOT NULL,
+            crawl_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_app TEXT,
+            social_scope TEXT,
+            normalized_text TEXT,
+            content_sha256 TEXT,
+            selection_revision INTEGER NOT NULL,
+            selection_fingerprint TEXT NOT NULL,
+            canonical_json TEXT NOT NULL,
+            canonical_path TEXT NOT NULL,
+            ingested_at TEXT NOT NULL,
+            PRIMARY KEY(crawl_id, record_id),
+            FOREIGN KEY(crawl_id) REFERENCES crawl_runs(crawl_id) ON DELETE CASCADE,
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
+        )
+        """
+    )
+    await conn.execute(
+        """
+        INSERT INTO crawl_records_v2 (
+            record_id, crawl_id, session_id, source_kind, source_app,
+            social_scope, normalized_text, content_sha256, selection_revision,
+            selection_fingerprint, canonical_json, canonical_path, ingested_at
+        )
+        SELECT
+            record_id, crawl_id, session_id, source_kind, source_app,
+            social_scope, normalized_text, content_sha256, selection_revision,
+            selection_fingerprint, canonical_json, canonical_path, ingested_at
+        FROM crawl_records
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE crawl_artifacts_v2 (
+            artifact_id TEXT PRIMARY KEY,
+            crawl_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            record_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            role TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            verified INTEGER NOT NULL,
+            ingested_at TEXT NOT NULL,
+            FOREIGN KEY(crawl_id) REFERENCES crawl_runs(crawl_id) ON DELETE CASCADE,
+            FOREIGN KEY(session_id) REFERENCES sessions(id),
+            FOREIGN KEY(crawl_id, record_id)
+                REFERENCES crawl_records_v2(crawl_id, record_id)
+        )
+        """
+    )
+    await conn.execute(
+        """
+        INSERT INTO crawl_artifacts_v2 (
+            artifact_id, crawl_id, session_id, record_id, source_kind, role,
+            mime_type, relative_path, size_bytes, sha256, verified, ingested_at
+        )
+        SELECT
+            artifact_id, crawl_id, session_id, record_id, source_kind, role,
+            mime_type, relative_path, size_bytes, sha256, verified, ingested_at
+        FROM crawl_artifacts
+        """
+    )
+    await conn.execute("DROP TABLE crawl_artifacts")
+    await conn.execute("DROP TABLE crawl_records")
+    await conn.execute("ALTER TABLE crawl_records_v2 RENAME TO crawl_records")
+    await conn.execute("ALTER TABLE crawl_artifacts_v2 RENAME TO crawl_artifacts")
+    await conn.execute(
+        "CREATE INDEX idx_crawl_records_session_source "
+        "ON crawl_records(session_id, source_kind, record_id)"
+    )
+    await conn.execute(
+        "CREATE INDEX idx_crawl_records_scope "
+        "ON crawl_records(crawl_id, social_scope, record_id)"
+    )
+    await conn.execute(
+        "CREATE INDEX idx_crawl_records_hash ON crawl_records(content_sha256)"
+    )
+    await conn.execute(
+        "CREATE INDEX idx_crawl_artifacts_record "
+        "ON crawl_artifacts(crawl_id, record_id, role)"
+    )
+    await conn.execute(
+        "CREATE INDEX idx_crawl_artifacts_hash ON crawl_artifacts(sha256)"
+    )
+
+
+async def _migration_social_snapshot_enrichment(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS social_snapshot_enrichments (
+            crawl_id TEXT NOT NULL,
+            record_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            source_app TEXT NOT NULL,
+            social_scope TEXT NOT NULL,
+            artifact_ids_json TEXT NOT NULL,
+            debug_paths_json TEXT NOT NULL,
+            ocr_text TEXT,
+            ocr_backend TEXT,
+            ocr_confidence REAL,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(crawl_id, record_id),
+            FOREIGN KEY(crawl_id, record_id)
+                REFERENCES crawl_records(crawl_id, record_id) ON DELETE CASCADE,
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_social_snapshot_session "
+        "ON social_snapshot_enrichments(session_id, source_app, social_scope, record_id)"
+    )
+
+
+MIGRATIONS: tuple[tuple[int, str, MigrationHandler], ...] = (
+    (1, "finding_media_dates", _migration_finding_media_dates),
+    (2, "agent_runtimes", _migration_agent_runtimes),
+    (3, "agent_bootstrap_trace", _migration_agent_bootstrap_trace),
+    (4, "selection_review", _migration_selection_review),
+    (5, "direct_crawl_ingestion", _migration_direct_crawl_ingestion),
+    (6, "direct_crawl_composite_identity", _migration_direct_crawl_composite_identity),
+    (7, "social_snapshot_enrichment", _migration_social_snapshot_enrichment),
+)
+
 
 class Database:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or settings.db_path
         self._conn: aiosqlite.Connection | None = None
+        self._operation_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,13 +512,30 @@ class Database:
         await self._migrate()
 
     async def _migrate(self) -> None:
-        """Additive migrations for existing DBs."""
-        cols = await self.fetchall("PRAGMA table_info(findings)")
-        names = {r["name"] for r in cols}
-        if "media_year" not in names:
-            await self.execute("ALTER TABLE findings ADD COLUMN media_year INTEGER")
-        if "media_captured_at" not in names:
-            await self.execute("ALTER TABLE findings ADD COLUMN media_captured_at TEXT")
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+        cursor = await self.conn.execute("SELECT version FROM schema_migrations")
+        applied = {int(row[0]) for row in await cursor.fetchall()}
+        try:
+            for version, name, handler in MIGRATIONS:
+                if version in applied:
+                    continue
+                await handler(self.conn)
+                await self.conn.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+                    (version, name, _utcnow()),
+                )
+            await self.conn.commit()
+        except Exception:
+            await self.conn.rollback()
+            raise
 
     async def close(self) -> None:
         if self._conn:
@@ -116,20 +549,42 @@ class Database:
         return self._conn
 
     async def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
-        await self.conn.execute(sql, params)
-        await self.conn.commit()
+        async with self._operation_lock:
+            await self.conn.execute(sql, params)
+            await self.conn.commit()
 
     async def executemany(self, sql: str, seq: list[tuple[Any, ...]]) -> None:
-        await self.conn.executemany(sql, seq)
-        await self.conn.commit()
+        async with self._operation_lock:
+            await self.conn.executemany(sql, seq)
+            await self.conn.commit()
+
+    @asynccontextmanager
+    async def transaction(self, *, immediate: bool = False) -> AsyncIterator[aiosqlite.Connection]:
+        async with self._operation_lock:
+            await self.conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            try:
+                yield self.conn
+            except BaseException:
+                await self.conn.rollback()
+                raise
+            else:
+                await self.conn.commit()
 
     async def fetchone(self, sql: str, params: tuple[Any, ...] = ()) -> aiosqlite.Row | None:
-        cur = await self.conn.execute(sql, params)
-        return await cur.fetchone()
+        async with self._operation_lock:
+            cur = await self.conn.execute(sql, params)
+            try:
+                return await cur.fetchone()
+            finally:
+                await cur.close()
 
     async def fetchall(self, sql: str, params: tuple[Any, ...] = ()) -> list[aiosqlite.Row]:
-        cur = await self.conn.execute(sql, params)
-        return await cur.fetchall()
+        async with self._operation_lock:
+            cur = await self.conn.execute(sql, params)
+            try:
+                return await cur.fetchall()
+            finally:
+                await cur.close()
 
 
 def row_to_session(row: aiosqlite.Row) -> dict[str, Any]:
@@ -144,6 +599,7 @@ def row_to_session(row: aiosqlite.Row) -> dict[str, Any]:
         "progress": json.loads(row["progress_json"]),
         "timing": json.loads(row["timing_json"]),
         "recommendation": row["recommendation"],
+        "review_candidates": bool(row["review_candidates"]),
         "error": row["error"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],

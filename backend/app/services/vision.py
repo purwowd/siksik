@@ -137,7 +137,12 @@ def _optional_torch_warmup() -> dict:
     return {"torch_cuda": bool(name), "device": name}
 
 
-def analyze_image_file(path: Path) -> list[dict]:
+def analyze_image_file(
+    path: Path,
+    *,
+    precomputed_ocr_text: str | None = None,
+    precomputed_ocr_backend: str | None = None,
+) -> list[dict]:
     from app.services import clip_tokoh
     from app.services import gpu_stack
     from app.services import media_text
@@ -146,10 +151,15 @@ def analyze_image_file(path: Path) -> list[dict]:
     findings = _analyze_pil_image(path)
 
     # Satu pass OCR → teks untuk lexicon + fusi meme/tokoh
-    ocr_text = ""
-    ocr_backend: str | None = None
+    ocr_text = precomputed_ocr_text or ""
+    ocr_backend: str | None = precomputed_ocr_backend
     ocr_findings: list[dict] = []
-    if settings.ocr_enabled or settings.media_text_enabled:
+    if ocr_text:
+        ocr_findings = ocr_mod.ocr_findings_from_text(
+            ocr_text,
+            backend=ocr_backend or "host_ocr",
+        )
+    elif settings.ocr_enabled or settings.media_text_enabled:
         # Legacy path when OCR flag on
         if settings.ocr_enabled:
             ocr_text, ocr_backend = ocr_mod.extract_image_text(path)

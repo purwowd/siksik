@@ -34,7 +34,10 @@ pnpm-debug.log*
 !.env.example
 *.pem
 *.key
+*.jks
+*.keystore
 credentials*.json
+local.properties
 
 # --- SADT data / runtime ---
 data/
@@ -52,8 +55,8 @@ backend/data/
 *.zip
 !frontend/public/**/*.zip
 
-# Model weights / caches (GPU stack)
-models/
+# Model weights / caches (GPU / host OCR stack — not on-device assets)
+/models/
 checkpoints/
 *.pt
 *.pth
@@ -63,6 +66,29 @@ checkpoints/
 hf_cache/
 torch_cache/
 whisper_cache/
+**/easyocr/
+.EasyOCR/
+
+# Keep on-device MediaPipe/TFLite assets under android-agent (shipped with APK)
+!android-agent/app/src/main/assets/models/**
+
+# --- Android / Gradle ---
+.gradle/
+**/.gradle/
+**/build/
+!android-agent/**/src/**/build/
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+captures/
+.externalNativeBuild/
+.cxx/
+*.iml
+*.hprof
+*.mapping
+*.log.gz
 
 # --- OS / IDE ---
 .DS_Store
@@ -77,8 +103,15 @@ Thumbs.db
 *.log
 tmp/
 temp/
+temp_crawl/
 .TemporaryItems/
 .AppleDouble/
+
+# --- iOS media puller (in-repo tooling; keep source, ignore runtime) ---
+ios-media-puller/.venv/
+ios-media-puller/output/
+ios-media-puller/.env
+ios-media-puller/**/__pycache__/
 
 # --- Docker / local overrides ---
 docker-compose.override.yml

@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "runtime": {
+    "name": "mediapipe-tasks-vision",
+    "version": "0.10.35"
+  },
+  "models": [
+    {
+      "id": "face_detector",
+      "name": "BlazeFace short-range",
+      "version": "float16-v1",
+      "asset": "models/blaze_face_short_range_float16_v1.tflite",
+      "sha256": "b4578f35940bf5a1a655214a1cce5cab13eba73c1297cd78e1a04c2380b0152f",
+      "input_width": 128,
+      "input_height": 128,
+      "input_channels": 3,
+      "output_vector_size": 0,
+      "output_contract": "face_detection_v1",
+      "license": "Apache-2.0",
+      "source": "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
+    },
+    {
+      "id": "face_embedder",
+      "name": "MobileNet V3 small image embedder",
+      "version": "float32-v1",
+      "asset": "models/mobilenet_v3_small_float32_v1.tflite",
+      "sha256": "bbbb4c51a55a53905af1daec995ca1aae355046f8839bb8c9f5ce9271394bc40",
+      "input_width": 224,
+      "input_height": 224,
+      "input_channels": 3,
+      "output_vector_size": 1024,
+      "output_contract": "normalized_float_embedding_v1",
+      "license": "Apache-2.0",
+      "source": "https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_small/float32/1/mobilenet_v3_small.tflite"
+    },
+    {
+      "id": "object_detector",
+      "name": "EfficientDet-Lite0",
+      "version": "int8-v1",
+      "asset": "models/efficientdet_lite0_int8_v1.tflite",
+      "sha256": "0720bf247bd76e6594ea28fa9c6f7c5242be774818997dbbeffc4da460c723bb",
+      "input_width": 320,
+      "input_height": 320,
+      "input_channels": 3,
+      "output_vector_size": 0,
+      "output_contract": "coco_detection_v1",
+      "license": "Apache-2.0",
+      "source": "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite"
+    }
+  ]
+}

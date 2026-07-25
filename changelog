@@ -1,0 +1,1277 @@
+# SIKSIK Flow Implementation Changelog
+
+- Work period: 2026-07-16 to 2026-07-25
+- Status: Unreleased local changes
+- Git baseline: `9f0d91c`
+- Android agent: `0.7.0`, API `1.0`
+- Primary project: `/Users/macbook/Documents/Product1/siksik`
+
+## 2026-07-25: FB missing — notification permission sheet (2c71ebbf)
+
+Session `2c71ebbf` (Infinix): IG+X OK; FB zero records. Mapping only launch shots;
+foreground=`permissioncontroller` with **Allow Facebook to send you notifications?**
+plus WhatsApp call heads-up → `fb:scope_navigation_failed` in ~2s.
+
+- Dismiss system permission / call heads-up during `waitVisible`/`waitStable` and FB
+  navigate (prefer Don’t allow).
+- Retry FG reclaim before each FB scope open.
+- Does not change IG/X crawl scopes.
+
+## 2026-07-25: Lab OCR OOM harden (backend stay-up)
+
+Infinix crawl acquire tetap device-bound (~11m). Backend mati setelah inventory:
+EasyOCR CPU × `worker_concurrency=4` + Reader dobel (social + analysis) →
+`uvicorn Killed:9`.
+
+- `ocr.py`: process-wide shared backend; serialize EasyOCR `readtext`; CPU
+  `canvas_size` 3200→1600.
+- `social_ocr.py`: pakai shared backend (bukan Reader baru).
+- `start_poc.sh`: bila `SADT_OCR_GPU!=1` default concurrency=1 + edge lebih
+  kecil; uvicorn auto-restart loop (Vite tetap hidup).
+- Automation/crawl scopes tidak diubah.
+
+## 2026-07-25: Fix X @null + archive OCR preview (report-safe)
+
+Session `2e5f8be3` (Infinix): X stored `profile_username="null"` from
+`user_name_container` JSON null via org.json `optString`; report showed `@null`
+while node `user_name` had `@Huihskowei`. IG archive a11y chrome-only → preview
+`-`; host EasyOCR existed in enrichments but noisy.
+
+- Agent: exact view-id leaf for username resources; skip JSON-null/`"null"` text.
+- Report/social_ocr: reject sentinel usernames; recover handle from nodes on
+  existing sessions (no re-crawl).
+- Archive preview: scrub embedded Stories-archive/time chrome from host OCR
+  lines — does not change crawl/automation scopes.
+- FB `@-` unchanged when UI has no vanity handle (display name only).
+
+## 2026-07-25: IG Settings Search early (session bdfcb21f)
+
+Session `bdfcb21f`: FB posts OK under Facebook (Azaheuq Jdjsjs / Pesta babi /
+dll). IG hanya own_profile — Archive + Comments gagal karena Settings list
+tersembunyi / Compose-invisible, bukan karena FB bocor ke IG.
+
+- Archive: Settings Search diprioritaskan setelah UiDevice/shell (tanpa scroll
+  DOWN).
+- Comments: fallback Settings Search untuk "Your activity" / "Aktivitas Anda".
+- Helper umum `clickInstagramLabelViaSettingsSearch`.
+
+## 2026-07-25: IG archive restore + comments filter sheet (session 4b42ad0f)
+
+Session `4b42ad0f`: Archive gagal `instagram_profile_restore_failed` (stuck on
+Your activity after Comments-first order). Comments scroll 2–4 opened
+**Filter by date** sheet (All dates chip). FB stored "Profile picture".
+
+- Restore Archive→Comments order; subpage restore backs 2→8 then fall through
+  to profile tab (no hard-fail on Your activity).
+- Comments swipe stays below filter chips; dismiss Filter-by-date sheet;
+  skip sheet viewports instead of storing them.
+- FB: reject "profile picture" / Add / Camera as display-name chrome.
+
+## 2026-07-25: IG comments scroll max 3 + distinct viewports
+
+Session `fc2c2ac4` already scrolled comments 3× (4 screenshots) but merged into
+**1** inventory row — a11y text is identical chrome (`Select`/`Comments`), so
+`content_hash` collided. Debug mapping stopped at 48 shots during Archive so
+comment stages were missing from `temp_crawl`.
+
+- Comments before Archive in IG scope order (budget + mapping headroom).
+- Cap additional comment scrolls at **3**; distinct hash per viewport.
+- List/Recycler swipe for comments; debug mapping cap 48→72.
+
+## 2026-07-25: FB marker picked composer bubble (session fc2c2ac4)
+
+Session `fc2c2ac4`: IG Archive 13 pages + Comments OK. FB mapping showed
+**Azaheuq Jdjsjs** + posts (Pesta babi / Prabowo / Makar) but inventory stored
+`Create note: What's on your mind?` → report `@on.your`; posts
+`facebook_own_content_not_visible` (wrong marker).
+
+- Reject composer/PYMK chrome (`on your mind`, `create note`, `:`/`?`).
+- Prefer short person-name shaped markers closest to Edit profile.
+- Report + inventory: drop mind/create-note display names and `on.your` OCR.
+
+## 2026-07-25: FB ViewGroup name + IG comments Settings scroll (session 39cc310f)
+
+Session `39cc310f`: FB profile stored empty (`@-`); posts
+`facebook_posts_marker_missing` despite mapping showing **Azaheuq Jdjsjs** +
+"Turunkan presiden". IG Archive scrolled (4 pages) but comments failed
+`instagram_activity_not_found` — Settings again at bottom (Log out).
+
+Root cause (live `uiautomator dump`): FB Compose exposes display names on
+`android.view.ViewGroup` text, not `TextView`. Marker scan only looked at
+TextView → always null.
+
+- FB: scan ViewGroup/Button for marker; infer author above relative time
+  (30m) under All posts; post body from ViewGroup; friends/posts_stat enrich.
+- IG comments: `ensureInstagramSettingsNearTop` before Your activity (same as
+  Archive).
+- IG Archive: raise scroll budget 3→12 (closer to archive-scroll-probe).
+
+## 2026-07-25: FB hilang dari laporan + IG Archive miss (session d2205c6c)
+
+Session `d2205c6c`: partial
+`fb:facebook_profile_content_missing` + `facebook_posts_marker_missing` →
+Facebook hilang dari laporan sosial; IG Archive gagal karena Settings terbuka
+sudah di-scroll ke bawah (Log out / Also from Meta) sementara Archive di atas.
+
+- FB: marker via `uiautomator dump` (Compose name "Azaheuq Jdjsjs"); soft-gate
+  profil jika Edit profile terlihat; shell-dump post rows; pre-scroll past PYMK
+  sebelum capture pertama (engine abort kalau initial store kosong).
+- IG: `ensureInstagramSettingsNearTop` + scroll-backward sebelum klik Archive
+  (pola yang sama dengan `archive-scroll-probe`).
+
+## 2026-07-25: FB clock-as-marker + report prefers on-device IG username
+
+Session `b045eaea`: IG inventory had `lutfizp` but report showed `@471.471followers`
+(OCR overrode structured username). FB marker became status-bar `5:33 PM` →
+posts `facebook_own_content_not_visible` → **0 findings** despite visible
+"Pesta babi".
+
+- FB: reject clock patterns; ignore status-bar band when resolving marker.
+- Report: prefer `metadata.profile_username`; reject metric usernames; strip
+  metric/chrome from bio; clean archive/comments preview chrome lines.
+- Agent: treat packed `471followers` contentDescription as metric, not bio.
+
+## 2026-07-25: Fix IG Archive click + FB marker/profile + IG OCR handle
+
+Evidence session `b6e46078`: Settings showed Archive but click missed; FB screen
+had Azaheuq/posts but inventory stored chrome; IG OCR preferred War.Radiohead.
+
+- FB: marker from TextView above Edit profile; profile capture prefers UiDevice
+  evidence over chrome a11y; refresh marker before posts.
+- IG: settle + `clickInstagramSettingsLabel(Archive)` retries; Activity click
+  retry; UiDevice username/metrics evidence on profile capture.
+- Report: prefer lowercase handles; do not join Title Case OCR into dotted
+  usernames (keeps `intel.negara` lowercase join).
+
+X login wall unchanged (device must be logged in).
+
+## 2026-07-25: Keep real bio profile links in report
+
+- Reverted TitleCase OCR-link rejection (was dropping real bio URLs).
+- Still filter Facebook chrome lines / fake username `Search.Facebook` only.
+- Live debug dumps already land under `temp_crawl/<session>/<crawl>/mapping/`.
+
+## 2026-07-25: Fix Facebook/Instagram social account report garbage
+
+- Latest session stored FB Home chrome as `own_profile` (nav tabs → fake bio/
+  username `Search.Facebook`); IG OCR invented link `Itfzp.blog`.
+- Root: FB profile had no chrome filter; viewId `(name removed)` matched
+  display_name resource `"name"`; report joined OCR words into dotted handles.
+- Agent: FB profile bounds + chrome noise; reject chrome-only capture;
+  stricter profile proof; fix display_name resource matching.
+- Report: chrome-line filter, reject `*.facebook` usernames / TitleCase bare
+  OCR links; strip chrome from structured bio/display_name.
+
+## 2026-07-25: Clamp social automationIssue reason ≤128
+
+- With IG+X+FB failures, `automationIssue` joined full package names into
+  `source_reason` >128 → InventoryPageV1 `string_too_long` killed the crawl.
+- Agent: short labels (`ig`/`x`/`fb`) + take(128); InventoryController clamp.
+- Backend: truncate oversize inventory reasons before validation.
+
+## 2026-07-25: Fix Android inventory source-list mismatch
+
+- iOS adapters (`ios_wda_visible_ui`, `ios_backup_*`) were added to
+  `INVENTORY_SOURCES`, so Android agent start failed with
+  "Daftar sumber inventory Android agent tidak lengkap."
+- Split: `ANDROID_INVENTORY_SOURCES` for agent inventory;
+  `IOS_INVENTORY_SOURCE_ADAPTERS` for iOS provenance only.
+
+## 2026-07-25: JALANKAN AKUISISI always installs latest Android agent
+
+- Default `android_agent_force_reinstall=True`: every live Android session builds
+  (or reuses) APK then always `adb install -r` — no skip when hash already matches.
+- Social automation APK was already reinstalled each crawl; agent app now matches.
+- Opt out: `SADT_ANDROID_AGENT_FORCE_REINSTALL=0`.
+
+## 2026-07-25: Facebook Android TEXT_ONLY (profile + posts + comments)
+
+- Mapping on SM_A736B → implement mirror of X: TEXT_ONLY, no screenshots.
+- Scopes: `own_profile`, `own_posts`, `own_comments` (archive out of default strategy).
+- Nav: Profile tab; posts under All filter; comments via More → Activity log →
+  Your Facebook activity → Comments and reactions → Comments.
+- Wired into default `android_agent_social_targets` + `TEXT_ONLY_SOCIAL_TARGETS`.
+
+## 2026-07-25: iOS analisa lag vs Android (HEIC EasyOCR)
+
+- Android analyse ~0.3s: sedikit JPEG + OCR sosial sudah di akuisisi.
+- iOS QUICK lagged: AFC dumps dozens of HEIC camera photos, analysed *before*
+  SMS/JSON, each through EasyOCR on CPU.
+- Fix: analyse inventory/text first; QUICK gallery skips EasyOCR unless
+  screenshot/chat path (FULL still OCRs gallery).
+
+## 2026-07-25: Label analisa + start_poc lab (OCR only, no AI appliance)
+
+- Progress phase label: "Analisis AI" → "Analisis" (bukan stack AI perangkat).
+- `start_poc.sh` defaults Mac lab: GPU stack / CLIP / Whisper / media_text OFF;
+  image-to-text via `SADT_OCR_ENABLED=1` only. Banner prints active flags.
+
+## 2026-07-25: iOS SMS/iMessage/contacts + FULL uncapped / QUICK capped
+
+- Selective `pymobiledevice3 backup2 --only sms --only contacts` (not full
+  device backup); Manifest paths resolved by relativePath for cross-iOS versions.
+- SMS + iMessage share `sms.db` (`service` distinguishes); contacts from
+  AddressBook.sqlitedb → inventory `sms` / `contact` records.
+- FULL defaults: AFC/media/docs/messages/contacts/social shots use `0` = uncapped;
+  QUICK keeps numeric caps.
+- Stuck INDEXING: analysis skipped heavy EasyOCR on `visible_ui` screenshots
+  (OOM/`Killed: 9` left sessions frozen after index completed).
+
+## 2026-07-25: iOS multi-source — AFC media/docs + social (not social-only)
+
+- IOSProvider now pulls AFC gallery/video + shared docs, selective
+  SMS/iMessage/contacts, then IG/X WDA social.
+- Full `idevicebackup2` stays opt-in (OOM); backup extract also accepts docs/text.
+
+## 2026-07-25: Stop iOS backup OOM killing API (telemetri putus)
+
+- Root cause: uvicorn `Killed: 9` during iOS `idevicebackup2` + social; Vite
+  then spammed `ECONNREFUSED :8000` ("Koneksi telemetri terputus").
+- Default `ios_libimobiledevice_backup_enabled=False` so lab sessions run
+  IG/X WDA only; opt-in backup via env when needed.
+
+## 2026-07-25: iOS empty backup no longer blocks social UI
+
+`idevicebackup2` often yields 0 classified media files. Acquisition now
+continues to IG/X WDA social when backup media is empty; fails only if both
+backup and social produce nothing.
+
+## 2026-07-25: Keep ios-media-puller + temp_crawl inside siksik
+
+- Moved `ios-media-puller` and `temp_crawl` under the siksik tree (no Product1
+  parent dependency for runtime paths).
+- Defaults: `ROOT.parent / "temp_crawl"` and `ROOT.parent / "ios-media-puller"`.
+- Lab scripts + `.env.example` no longer hardcode `/Users/.../Product1/...`.
+
+## 2026-07-25: iOS IG + X social UI (additive, Android untouched)
+
+- Wire `IOSProvider` to run in-repo `ios-media-puller` WDA flows for Instagram
+  and X after idevicebackup2 succeeds.
+- Map outputs to inventory `visible_ui` records using existing report package IDs
+  (`com.instagram.android` / `com.twitter.android`) and scopes
+  (`own_profile`, `own_story_archive`, `own_tweets`).
+- Fail-soft: backup still commits if WDA/social fails.
+- Extend provenance literals only (`ios_wda_visible_ui`, `ios_webdriveragent`).
+- No changes to `UiAutomatorDriver`, Android automation orchestration, or
+  Android social contracts.
+
+## 2026-07-23: Infinix profile load timeout without weakening Samsung proof
+
+- Local profile nav budget 15s → 28s (Samsung still exits on first Edit/Share).
+- Final proof after wait; dismiss song/coachmark tips; scroll back from
+  "Complete your profile" so archive is not skipped after posts scroll.
+
+## 2026-07-23: Repair truncated OCR profile links
+
+EasyOCR splits Spotify path (`open spotify com/user/31 gyit…`). Join path
+fragments after host repair so report keeps the full user id (UI still shows
+ellipsis; this recovers the OCR-visible remainder).
+
+## 2026-07-23: Fix IG username OCR noise + posts grid scroll
+
+### Diagnosis (`04d4caa8`, `d5710314`)
+- Crawl OK: archive×4 on `04d4caa8`; posts never scrolled (budget 0 with `VISIBLE_GRID=9`).
+- Report `@vibe_` / `@Just`: avatar prompt OCR (`Today's vibe_`, `Just curious_`) beaten real handle when EasyOCR split `intel.negara` → `intel negara`.
+- User paste with `own_story_archive: 0` was `d5710314` (archive miss), not the later good crawl.
+
+### Fix
+- Reject avatar-prompt username tokens; recover dotted handle / join `intel negara` → `intel.negara`.
+- `VISIBLE_GRID_POSTS=3` so 5 posts get grid scroll.
+- Report UI: profile metrics only (no scope counts).
+
+## 2026-07-23: Samsung apk_pull flake
+
+### Diagnosis
+- Samsung `RRCT900TEPH` session `d9768ce9`: bootstrap failed `agent_installed_apk_pull` (~1.5s) during inspect; manual pull works → flake/race.
+
+### Fix
+- `pull_installed_apk`: 3× retry + stage via `/data/local/tmp` + stderr in error.
+- (Options churn from this entry was reverted — see entry above.)
+
+## 2026-07-23: Fix Infinix hang + wrong IG/X report fields
+
+### Evidence (`7c96ca9d`)
+- Both apps `automation_timeout`; IG stuck after posts-start; X entered profile but 0 tweets.
+- IG UI showed `0 posts`; EasyOCR dropped `0` → report `posts: 471`.
+- X tweets visible in SS + `id/row`; extract used shell dump / missed `row`.
+
+### Fix
+- IG: empty-state short-circuit before probe/dump; post-count resource-id only (no hot-path dump).
+- X: extract via `id/row` UiDevice first; no shell dump on tweet hot path; sleep not waitForIdle.
+- X profile: UiDevice following/followers evidence; filter chrome from profile nodes/bio noise.
+- Host OCR/report: force `posts=0` when empty-state text present.
+
+## 2026-07-23: Infinix shell-dump hang → automation_timeout
+
+### Diagnosis
+
+- Crawl `05badec0`: IG+X both `automation_timeout` (~510s), UI looks “stuck” on profile/home.
+- Root: unbounded `uiautomator dump` on Infinix (idle never reached); hot-path dumps for post-count + X drawer.
+
+### Fix (minimal)
+
+- `readShellUiDump`: `timeout 2s` + join 2.8s + 20s cooldown after hang.
+- IG post count: empty-state UiDevice **before** shell dump.
+- X profile nav: UiDevice drawer/Profile only (no dump per attempt).
+- Options wait: UiDevice first; shell at most every 2.5s.
+
+## 2026-07-23: X stuck on Home — false Profile image clicks
+
+### Issue
+
+- X diam di Home/For you: selector `descContains("Profile")` ikut kena **tweet "Profile image"**, bukan navigation drawer.
+
+### Fix
+
+- Drawer dulu lewat exact `Show navigation drawer`.
+- Abaikan `Profile image`; Profile menu exact/text saja + shell dump.
+- Jangan Back thrash saat masih di Home timeline.
+
+## 2026-07-23: Options→Archive aligned to archive-scroll-probe
+
+### Issue
+
+- Stuck lama di profil, tidak masuk Archive (regresi heuristik Settings/Search).
+
+### Fix
+
+- Hapus false-positive `settings surface` (Search/Back di profil Compose).
+- Options klik = probe: top-band `desc(Options)`, tanpa syarat kanan layar.
+- Scroll balik header sebelum menu; wait Archive/Saved ≤12s; abort cepat jika masih di profil.
+- Archive entry: UiDevice → a11y → shell → Settings Search (urutan probe).
+
+## 2026-07-23: Multi-device Archive + Posts Count Scroll + X Text Inventory
+
+### Issue (Infinix `108842541U011796`, `@lutfizp` / X `@Huihskowei`)
+
+- Archive gagal: Options → Settings skeleton stuck → Back thrash → `instagram_options_not_found`.
+- Posts di-scroll walau post count 0/`null` (default ke `MAX_GRID_SCROLLS`).
+- Report “Postingan 1” dari scope capture empty-state, bukan metrik posts=0.
+- X tetap TEXT_ONLY, tapi tweet tidak inventory: reason `x_own_content_not_visible` — mapping SS menunjukkan tweet, a11y BFS tidak membawa body text.
+
+### Fix
+
+- Settings: longer skeleton wait, Settings surface open without Back, **Settings Search → Archive/Arsip**.
+- Posts scroll: resolve count via a11y/UiDevice/shell/empty-state; **&lt;3 posts → 0 scroll**; else page by `VISIBLE_GRID_POSTS`.
+- Empty posts: `ScopeCapture(true)` tanpa record “Postingan 1”.
+- X: keep `TEXT_ONLY` (no screenshots); extract rows via **UiDevice label walk + shell dump bands**; treat UNIQUE content_hash conflict as idempotent store success; inventory page limit 50.
+
+## 2026-07-23: Revert Aggressive Report Preview Cleaning
+
+### Issue
+
+- Session `a3c0f4b5-…`: bio/link kosong, preview archive “hilang”, posts tetap OCR onboarding — terasa lebih buruk dari sesi `53a02d29`.
+- Root: pembersihan preview archive + filter bio (spatial ≤280 / line >120) membuang host-OCR yang selama ini mengisi Compose profile kosong.
+
+### Fix
+
+- Revert cleaning archive/comments preview; `_social_preview` + merge OCR kembali seperti sebelumnya.
+- Bio lagi spatial-first lalu structured/OCR lines (tanpa filter panjang agresif).
+- Soft-repair link OCR `open spotify com/` → `open.spotify.com/`.
+- Catatan: a11y profile/posts di device masih sering kosong (Compose); report tetap mengandalkan host OCR. Comments=0 di sesi itu terpisah dari revert report.
+
+### Issue
+
+- Archive capture/scroll OK, but report preview mixed accessibility chrome (`Options`, `Stories archive`, `0:14`) with full-screen OCR noise (`1.06 0 XE…`).
+- Bio cleanup was separate and already good; this only touches content preview for archive/comments.
+
+### Fix
+
+- Scope-aware preview cleaning in `reports.py`: drop archive/comments chrome, durations, pager labels; keep caption-like OCR chunks.
+- When merging host OCR, skip chrome-only a11y text for `own_story_archive`.
+- No change to archive navigation/scroll or report HTML layout.
+
+### Session `53a02d29-…` (what worked / what didn’t)
+
+- Profile + posts + **Stories archive scroll×3** OK — left untouched.
+- Comments reached the list once but **no scroll** (`additionalCaptureCount=0`); Options opened twice on Settings skeleton (Back thrash) before succeeding.
+- OCR finding `negara` from handle `intel.negara` (token fallback + `.` treated as word boundary).
+- Report bio dumped full OCR chrome instead of structured `profile_bio`.
+
+### Fix (archive path unchanged)
+
+- Comments: 3 additional captures + list swipe; dismiss “Delete multiple comments” tip; UiDevice/shell for Your activity → Comments.
+- Options: skip if menu already open; accept Your activity/Saved as ready; extra settle on skeleton before Back; menu attempts 2.
+- Lexicon: skip solo `negara`; word boundary treats `.`/`_` as part of handles.
+- Reports: prefer structured bio; cap OCR/spatial bio fallback.
+
+### Root Cause (session `268b3915-…`)
+
+- Error: `Special access wajib belum didukung Android agent` with `special_access.accessibility=unavailable`.
+- Reinstall/`force-stop` dropped `com.siksik.agent` from `enabled_accessibility_services`, leaving only `mobile.parental2025/com.app.service.AccessService`.
+- Restore tried to rewrite the enabled list but `validate_component_name` requires class names under the declaring package. Parental class `com.app.service.AccessService` fails that check → restore returned `UNAVAILABLE` → hard fail (misleading “belum didukung”).
+
+### Fix
+
+- Preserve foreign enabled a11y components with soft coalesce during restore; still validate SIKSIK’s own component strictly.
+- If restore still returns `UNAVAILABLE` but a component is configured, fall through to Settings await instead of `DEVICE_UNSUPPORTED`.
+
+### Root Cause (session `7b4dc906-…`)
+
+- Profile proof via UiDevice worked, but posts still failed: `openInstagramOwnPost` re-checked a11y `instagramSurfaceProbe().ownProfile` (Compose miss) → `instagram_profile_not_verified`.
+- Options open used a11y walk + 300ms settle + immediate `pressBack` when Archive not in a11y tree. Coordinate fallback hit Settings skeleton (~33KB PNG), then Back → profile → retry → **Settings bolak-balik**.
+- Probe succeeded with `By.desc("Options")`, longer settle, shell-dump Archive click — agent had not fully ported that order.
+
+### Fix
+
+- Options: prefer UiDevice `Options`/`Opsi` top-band click; wait up to ~5s for Archive via UiDevice/shell dump before any Back.
+- Archive entry: UiDevice text/desc → a11y → shell-dump bounds (probe order).
+- Posts: gate only on `hasInstagramOwnProfileProof()`; grid tab UiDevice fallback; do not fail empty when Compose hides thumbs.
+- Header labels (Stories archive) also accept UiDevice/shell dump. Settings settle 1.2s; menu attempts 3.
+
+### Root Cause (session `32312336-…`)
+
+- Mapping showed **profile already on screen** (`Edit profile`, metrics, grid) but every scope failed with `instagram_profile_navigation_timeout`.
+- UiAutomation `rootInActiveWindow` does not reliably expose Compose profile header labels; shell `uiautomator dump` does (`Edit profile`, `Share profile`, metric resources).
+- Archive scroll fixes never ran because navigation never passed profile proof.
+
+### Fix
+
+- `instagramSurfaceProbe` merges shell-dump labels/resources when a11y is empty/thin (same technique as Archive click).
+- Accept “already on own profile” before tab click; raise profile budget to 15s; invalidate dump cache on navigation.
+- Reinstalled agent + automation on device.
+
+## 2026-07-23: Instagram Archive List Scroll Fix (from UiAutomator probe)
+
+### Root Cause
+
+- Archive/posts scrolling preferred unfiltered `ACTION_SCROLL_FORWARD` on the largest scrollable node. On Stories archive that node is `view_pager`, so accessibility scroll flipped Highlights/Calendar/Map tabs instead of advancing the story grid.
+- Settings → Archive often uses Compose; UiAutomation trees lack `Archive`/`Saved` text while shell `uiautomator dump` still exposes them, so menu entry clicks failed on some devices.
+- Short overlapping swipe (76%→46%) did not advance a full 3×3 archive page.
+
+### Fix (kept DB / report / other scopes wired)
+
+- Archive advance uses page-sized `android:id/list` swipe (`Direction.DOWN`, ~0.70 ≈ 9 cells) with longer settle; never ViewPager ACTION_SCROLL for archive.
+- Posts grid scroll still uses accessibility scroll but **excludes ViewPager** and prefers ListView/RecyclerView; gesture fallback lengthened to ~one grid page.
+- Archive menu open: shell-dump bounds click fallback for Archive/Arsip when Compose a11y is empty; companion labels accept Setelan/Pengaturan variants.
+- After each archive page scroll, re-select Stories list tab if Highlights/Map empty-state appears.
+- Metadata: `InventoryRecordJson.encode` now also runs `enrichSocialProfile` (same as `withPreprocessing`) so username/bio/links/metrics always ship on inventory + transfer paths. Report/OCR line parsers accept X `tweets`/`tweet` as the `posts` metric key. No report HTML/layout/style changes.
+
+### Unchanged
+
+- Scope set, capture store → preprocessing → direct transfer → `crawl_records` / `social_snapshot_enrichments` → `reports._social_report_data` field names.
+- X text-only tweets/replies, Facebook scopes, screenshot crop rules for profile/posts.
+
+## 2026-07-22: Instagram Crawl Timeout Regression Fix
+
+### Root Cause
+
+- Diagnosed session `0542f9e7-7522-4c32-b81d-cd450815201e` from physical-device logcat.
+- The Profile coordinate tap completed in 155 ms. The next `device.findObjects(By.pkg("com.instagram.android"))` call then enumerated Instagram's complete UiAutomator hierarchy and blocked until the 180-second host timeout terminated instrumentation.
+- No scope had completed its initial capture before the blocked query. Therefore the agent had no social screenshot record to transfer, and the backend had nothing to mirror into `temp_crawl` or expose in the report.
+
+### Physical Rerun Correction
+
+- Audited the next physical dashboard run, session `d8596cd5-bf5c-4963-b54f-db49aed16bfb` / crawl `crawl_cb5abbb5-f352-4106-875f-bb582d6f6de7`.
+- The complete-package hierarchy timeout was gone. The Profile coordinate tap completed in 162 ms, but the proof loop rejected the still-rendering profile after only three 350 ms probes.
+- All four Instagram scopes consequently failed with `instagram_profile_not_verified`. The committed transfer correctly contained zero records and zero artifacts; this confirmed that `temp_crawl` and report persistence were downstream symptoms, not the failing component.
+- Captured the physical Instagram hierarchy after render. It exposed exact own-account evidence through `Edit profile`, `Share profile`, `Your profile`, profile metrics, username resource, selected grid tab, grid items, and exact `Options`.
+- Changed `Edit profile`, `Share profile`, and `Your profile` into independent strong own-account proofs. Other-account Follow-state rejection remains active.
+- Replaced the three-probe 1.8-second failure window with adaptive 250 ms polling for at most six seconds. The flow exits immediately when proof appears and performs only two bounded recovery taps/Back actions.
+- Added content-free proof telemetry for signal score, metric-group count, and Edit/Share visibility.
+- Accepted a verified zero-post profile as a valid static Posts capture instead of reporting `instagram_own_posts_empty`.
+- Increased bounded Archive/menu render polling to four seconds. The current Instagram Settings and activity page is supported in addition to the older bottom-sheet presentation; both require exact Archive plus a known companion entry.
+- Verified the selection boundary: every configured own-account social scope is a required scope and is auto-selected for direct transfer even without a risk keyword. Social account data remains report data and is not converted into a finding.
+
+### Bounded Instagram State Machine
+
+- Removed complete-package UiAutomator enumeration from every Instagram path.
+- Replaced the blocking package query with a bounded `UiAutomation.rootInActiveWindow` snapshot capped by the existing visible-node contract.
+- Reduced UiAutomator idle and selector waits to bounded 250 ms and 500 ms values so animated Instagram surfaces cannot consume the default 10-second idle wait per query.
+- Read the foreground package from the active accessibility root before using the bounded UiDevice fallback.
+- Added content-free scope telemetry for scope start, initial capture, scroll capture, and failure reason.
+
+### Profile and Post Grid
+
+- Preserved the required Home-to-Profile action: tap the bottom-right Profile position first, then verify the own-account profile from bounded header, metric, username, Edit Profile, Share Profile, and grid signals.
+- Removed redundant screenshot-based surface signatures from the scroll loop.
+- Parsed the post count from exact post-count resources, inline count labels, or spatially adjacent count/Posts nodes.
+- Kept zero additional scrolls when the post count is three or fewer.
+- For larger profiles, calculated one overlapping grid scroll per additional row and captured every viewport after the initial profile/grid viewport.
+- Reduced Instagram swipe animation steps from 30 to 16 and the explicit post-swipe settle to 250 ms. The backend stable interval is 300 ms.
+- Added screenshot-digest duplicate detection using the screenshot already required by the flow. No additional comparison screenshot is taken.
+
+### Story Archive
+
+- Enforced the sequence Profile -> top-right hamburger coordinate -> verified options sheet -> exact `Archive`/`Arsip` row.
+- The options sheet is accepted only when exact Archive and a known companion entry are present in the same bounded snapshot.
+- Removed generic clickable/resource traversal from Archive navigation. Create, Highlight, post creation, and archive thumbnails are never candidate targets.
+- Verified the archive header after entry. Posts Archive and Live Archive are switched only through the exact header and exact `Stories archive`/`Arsip cerita` dropdown option.
+- Captured one initial Stories Archive viewport and at most three overlapping scroll viewports. A repeated screenshot digest stops the loop early at the bottom.
+
+### Capture Persistence and Limits
+
+- Kept each screenshot attached to a persisted `visible_ui` record immediately after capture. A later optional scope failure now returns a partial outcome without discarding earlier records.
+- Preserved the existing direct-transfer enrichment path. Transferred Instagram screenshots are atomically mirrored to `/Users/macbook/Documents/Product1/temp_crawl/<session_id>/<crawl_id>/` before optional host OCR runs, then joined into the existing report layout.
+- Raised the end-to-end automation-result screenshot limit from 16 to 48 consistently across instrumentation, Android API validation, Android storage, and backend validation.
+- Quick mode now allows 24 screenshots: one profile, up to 19 post-grid viewports, and four Story Archive viewports.
+- Full mode now allows 46 screenshots: one profile, up to 41 post-grid viewports, and four Story Archive viewports.
+
+### Validation
+
+- `tests/social_crawl_contract.py`: passed.
+- `tests/social_host_ocr_contract.py`: passed.
+- Targeted backend automation test: passed.
+- `tests/run_social_crawl_checks.sh`: passed, including Python compilation, both Android debug APK assemblies, TypeScript compilation, and Vite production build.
+- No current APK installation or dashboard/device crawl was executed; physical-device acceptance remains user-owned.
+
+Current debug artifacts:
+
+| Artifact | Size | SHA-256 |
+| --- | ---: | --- |
+| `app-debug.apk` | 108,848,420 bytes | `59bed70ab7f4a6600508dc83572c060e300fda74c77379bedd975f1231d59b83` |
+| `automation-debug.apk` | 1,942,486 bytes | `0f56b9f4fd56c287aee67d3725b79ce2be72bb6dcc7609b4cc7d795abfbb7df8` |
+
+## 2026-07-22: Host Social OCR and Instagram Profile/Archive Correction
+
+### Host OCR Boundary
+
+- Moved OCR for `visible_ui` social screenshots from the Android agent to the laptop backend.
+- Android still captures the scoped Instagram screenshot and runs perceptual hashing, face detection, and object detection. It emits the explicit `ocr_host_deferred` hand-off instead of running ML Kit OCR for the social screenshot.
+- Added one reusable host OCR backend per direct-transfer operation. EasyOCR receives bounded 1280-pixel input, a 1.25 magnification ratio, no forced upscaling, and no sharpening.
+- Added OCR bounding boxes to the backend OCR result contract. Instagram counts are paired with `posts`, `followers`, and `following` labels by bounded horizontal and vertical distance instead of OCR line order.
+- Reused the host OCR result during image analysis. Social screenshots are not OCR-processed twice.
+- Kept X/Twitter text-only. X does not create screenshots and does not enter the host screenshot OCR path.
+
+### Debug Snapshot Mirror
+
+- Added an atomic, best-effort debug mirror for transferred Instagram screenshots under `/Users/macbook/Documents/Product1/temp_crawl/<session_id>/<crawl_id>/`.
+- Debug filenames include platform, social scope, capture index, record ID, and artifact ID.
+- The debug mirror is outside canonical forensic staging. It does not change record hashes, manifests, transfer receipts, selection decisions, or evidence paths.
+- Added `SADT_ANDROID_SOCIAL_DEBUG_SNAPSHOTS` and `SADT_ANDROID_SOCIAL_DEBUG_DIR` configuration. Debug mirroring is enabled by default for the current local build.
+
+### Profile Metadata
+
+- Added exact Instagram profile evidence queries for `action_bar_title`, post count, follower count, following count, bio, and profile-link resources when the accessibility root contains only a window placeholder.
+- Prioritized resource-backed metadata before host OCR fallback. The report stores the canonical username without `@`; the existing frontend renders it as `@<username>`.
+- Added spatial host OCR fallback for profile username and metrics. Header-position selection prevents Instagram Notes text from replacing the account username.
+- Added `.blog` to bio-link recognition. Values such as `ltfzp.blog` are retained as profile links and rejected as username candidates.
+- Added report enrichment overlay for historical/canonical records without mutating their JSON files.
+
+### Story Archive Navigation
+
+- Removed the remaining unbounded `By.clickable(true)` fallback from the Instagram profile-menu selector.
+- The hamburger path now accepts only verified Options labels/resources, followed by the bounded top-right coordinate fallback.
+- Kept Create, Highlight, Threads, Settings, and professional controls on the exclusion list.
+- Archive entry requires a verified options sheet containing exact Archive/Arsip plus a known companion entry.
+- Generic Archive is accepted only as the archive page entry header. Capture starts only after the mode is verified as exact Stories Archive/Arsip Cerita or switched through the archive dropdown.
+- Archive thumbnails remain unopened. The capture boundary remains one initial screenshot plus at most three overlapping scroll screenshots.
+
+### Runtime Stability
+
+- Stopped force-stopping the automation package after a successful, already-completed instrumentation run. Timeout, cancellation, and failed instrumentation still use forced cleanup.
+- Restored the main agent and previously granted Accessibility state after instrumentation without repeatedly opening Android Settings.
+- Added a silent Accessibility restore attempt before presenting Settings when the backend observes a transient not-granted state.
+- Reduced redundant Instagram profile waits and retries while keeping bounded navigation and verification.
+- Diagnosed session `be6ff5a0-8afd-464d-872c-81acde40df86`: Instagram launched successfully, instrumentation stayed alive, no profile tap was injected, and the target ended with `automation_timeout` and zero social records.
+- Reordered Home navigation so the bounded bottom-right Profile coordinate tap occurs before any Instagram hierarchy proof or dialog scan.
+- Replaced package hierarchy checks in launch/foreground stabilization with deterministic current-package polling and fixed bounded settle intervals.
+- Replaced dozens of sequential Home selectors with one bounded package-hierarchy pass per proof attempt.
+- Limited initial Instagram profile navigation to an internal 8-second budget instead of allowing it to consume the 180-second outer ADB timeout.
+- Deferred dialog dismissal until a failed profile tap produces an exact known dismiss target in the same hierarchy pass.
+- Avoided the redundant shared scope-ledger clear between successful target launch and first scope navigation.
+- Added content-free `SIKSIKAutomation` stage logs for coordinate tap, hierarchy fallback, dialog handling, proof attempts, verification, and failure duration.
+- Preserved archive safety: returning from an Instagram subpage uses bounded Back navigation and own-profile verification before any bottom-navigation coordinate tap.
+
+### Persistence and Reporting
+
+- Added migration 7, `social_snapshot_enrichment`, with the `social_snapshot_enrichments` table.
+- Stored host OCR text, backend, confidence, OCR-derived profile metadata, source artifact IDs, and debug paths separately from canonical records.
+- Joined enrichment data into the existing social report loader without changing frontend layout or styles.
+- Direct-transfer progress now reports `host_social_ocr` before the transaction commit.
+
+### Validation
+
+- Added `tests/social_host_ocr_contract.py` and `tests/social_host_ocr_probe.py`.
+- Extended `tests/social_crawl_contract.py` to reject unbounded Instagram hamburger selection.
+- Host OCR contract, social crawl contract, Python syntax compilation, scoped whitespace validation, TypeScript compilation, and Vite production build passed.
+- `:app:assembleDebug` and `:automation:assembleDebug` passed after the final selector and host-OCR changes.
+- A cached EasyOCR probe against the latest retained Instagram profile screenshot resolved username `lutfizp`, followers `471`, and following `432`. The exact Android post-count resource remains the primary source for the zero-post value.
+- No APK installation, instrumentation crawl, Instagram interaction, or dashboard acquisition was executed for this source snapshot.
+
+## 2026-07-22: Instagram and X Own-Account Crawl Hardening
+
+### Android Agent Crash-Loop Correction
+
+- Diagnosed the physical-device force-close loop from Android's crash buffer. `SessionNotificationListener` replayed an existing notification after reconnect, and `CommunicationCaptureStore.recordNotification` attempted to reuse a globally unique `record_id` from an earlier crawl.
+- Scoped notification record IDs by crawl while retaining deterministic hashing and raw-identifier redaction.
+- Replaced process-fatal notification `insertOrThrow` with conflict-safe insertion and an idempotent update fallback for same-crawl callback races.
+- Added a bounded failure guard around notification posted, removed, and listener-disconnect callbacks. Storage failures now mark notification capture partial and emit structured logs instead of killing the agent process.
+- Added a pure policy regression test plus `tests/notification_capture_contract.py` and `tests/run_notification_capture_checks.sh`.
+
+### Instagram
+
+- Corrected Story Archive entry after a physical hierarchy audit on Instagram Profile Home. The verified top-right control is the exact `Options` accessibility node; the top-left `Create New` control is explicitly excluded.
+- Removed generic `more_options` and `action_bar_button_action` resource fallbacks from profile-menu navigation because they can resolve to Create, post actions, or other unrelated controls.
+- Replaced the old menu-open check, which could accept the still-visible profile `Options` button, with a strict menu-state proof requiring exact `Archive`/`Arsip` and `Your activity`/`Aktivitas Anda` entries.
+- Restricted Archive selection to that verified menu and removed menu scrolling from the Story Archive path, preventing profile highlights or grid content from being treated as Archive navigation targets.
+- Restricted archive-mode switching to exact `Posts archive`/`Live archive` headers and exact `Stories archive` picker entries. Generic `Archive` text no longer verifies the Story Archive surface.
+- Added bounded recovery to the verified own-profile state after any rejected menu tap before the coordinate fallback is allowed.
+- Reworked Home-to-Profile navigation with resource, text, content-description, geometry, and coordinate fallbacks.
+- Coordinate fallbacks now derive status-bar and navigation-bar insets from Android resources. They no longer target the OEM system navigation area.
+- Tightened own-profile verification to require multiple independent profile signals. Feed labels alone cannot verify the profile scope.
+- Removed target-app permission choices from dialog dismissal. Automation does not approve or deny Instagram permissions.
+- Added English and Indonesian selectors, including `Posts`, `Postingan`, `Kiriman`, `Archive`, `Arsip`, and story-archive variants.
+- Added structured post-count parsing with plain, K/M/B, `rb`, and `jt` forms.
+- Profiles with three or fewer posts receive one static grid capture and zero grid scrolls.
+- Profiles with more than three posts use an overlapping grid swipe, capture after each accepted scroll, and stop on an unchanged or previously visited visual/UI signature.
+- Kept post acquisition on the profile grid. The automation does not open individual Instagram posts.
+- Story Archive navigation now validates or switches the archive mode to Stories Archive.
+- Story thumbnails are never opened. Archive acquisition performs one initial capture plus at most three scroll/capture cycles and stops early when the surface does not change.
+- Screenshot allocation reserves one profile capture and four archive captures within the existing 16-screenshot Phase 07 boundary.
+
+### X / Twitter
+
+- Replaced detail-opening tweet automation with viewport-based text extraction.
+- X capture remains `TEXT_ONLY`; it does not request or retain screenshots.
+- Added adaptive Home-to-drawer-to-Profile navigation with semantic selectors and active-window coordinate fallback.
+- Added Posts and Replies tab recovery after long scrolling, including bounded return-to-tab gestures.
+- Extracted each visible own-account tweet/reply container as a separate canonical visible-UI record.
+- Reply records retain visible parent context when it belongs to the same accessible container.
+- Added per-scope content hashing, item deduplication, viewport signatures, repeated-viewport termination, empty-timeline handling, and bounded content-settle retries.
+- Posts and Replies each use the configured quick/full scroll boundary and stop before that boundary when the viewport is unchanged.
+- Reduced X stabilization waits to 350 ms while retaining bounded settle retries. Instagram remains visual and uses a longer stabilization interval.
+
+### Profile Metadata and Reports
+
+- Added structured `profile_display_name`, `profile_username`, `profile_bio`, `profile_links`, and `profile_metrics` fields.
+- `profile_metrics` contains nullable non-negative `posts`, `followers`, and `following` counts.
+- Added node-resource, inline-label, spatial count-pairing, and localized compact-count parsing.
+- Extended the strict Android-to-backend visible-UI contract for the new profile fields.
+- Added display name and profile metrics to JSON, HTML, and existing React report components without changing the SIKSIK stylesheet or page structure.
+- Kept social content in canonical JSON records and direct manifest files. No ZIP bundle was added.
+
+### Runtime Boundaries and Portability
+
+- Capped the internal instrumentation navigation deadline below the outer ADB timeout so instrumentation can return a terminal result before forced cleanup.
+- Added deadline checks to capture and scrolling paths.
+- Replaced fixed screen-edge gestures with active-window gestures that exclude system bars.
+- Kept selector priority device-independent: stable resource IDs, localized semantic labels, accessible descriptions, relative geometry, then bounded coordinates.
+- No manufacturer, model, serial, resolution, or Android-version-specific branch was added.
+
+### Validation
+
+- Added `tests/social_crawl_contract.py`.
+- Added `tests/run_social_crawl_checks.sh` as the single non-device verification entry point for this change.
+- The script validates the Instagram/X source contract, strict backend model, backend syntax, both debug APK assemblies, and the frontend production build.
+- The complete script was rerun after the Story Archive selector correction: social crawl contract, both APK assemblies, TypeScript, and Vite production build passed.
+- `:app:assembleDebug` and `:automation:assembleDebug`: passed.
+- Frontend `tsc -b` and Vite production build: passed.
+- Targeted whitespace validation for changed files: passed.
+- No APK installation, target-app navigation, instrumentation crawl, or dashboard session was executed. Physical acceptance remains operator-owned.
+
+Current debug artifacts:
+
+| Artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `app-debug.apk` | 108,848,424 | `3bc2ae81596cac96c7b6bdabac3f6020faeb68ad5bc2d10cb0dd5622611512b2` |
+| `automation-debug.apk` | 1,940,605 | `10b7799fc3b37342e5d3555d94f7c23578d01721c6c274025dc29c490bca8613` |
+
+## Scope and Architecture
+
+- SIKSIK remains the primary application and runtime authority.
+- `Flow.md` defines the required Android acquisition pipeline.
+- LPDP was used only as a code and design donor. SIKSIK has no LPDP runtime dependency.
+- `forensics-refrences` was reviewed only. No root, exploit, decryption, or private-app database code was imported.
+- Existing SIKSIK backend, analysis, findings, review, recommendation, RBAC, report, and UI flows remain authoritative.
+- Android hand-off uses canonical JSON records, a manifest, and individually verified files.
+- The Android agent does not create ZIP archives.
+- The existing SIKSIK ZIP upload provider remains available and unchanged.
+- Existing frontend routes, layout, stylesheet, and visual conventions were preserved.
+
+## Implementation Prompt Package
+
+Created `/Users/macbook/Documents/Product1/siksik-flow-ai-prompts` outside both projects.
+
+The package contains:
+
+- master context and source-of-truth rules;
+- current-state audit;
+- target architecture;
+- LPDP reuse matrix;
+- data contracts;
+- code rules;
+- functional and security boundaries;
+- acceptance matrix;
+- ordered Phase 00–12 implementation prompts.
+
+All prompts target SIKSIK. LPDP is read-only from the runtime architecture perspective.
+
+## Phase 00: Baseline Preservation
+
+- Preserved existing authentication, device detection, sessions, ZIP upload, findings, media, report, authorization, timeline, dashboard, and admin APIs.
+- Preserved session lifecycle, review states, recommendation logic, pagination, and the single-active-session rule.
+- Preserved existing database tables and frontend routes.
+- Preserved iOS, simulator, lab mode, RBAC, and legacy Android behavior during migration.
+- Historical baseline: 92 backend tests passed, 4 optional tests skipped, frontend production build passed.
+
+## Phase 01: Backend Acquisition Layer
+
+- Added typed acquisition providers for:
+  - Android agent;
+  - Android legacy;
+  - iOS;
+  - simulator;
+  - ZIP upload.
+- Added `AcquisitionProviderRegistry` without changing existing session endpoints.
+- Added async ADB transport with serial validation and mandatory `adb -s <serial>` device commands.
+- Added bounded subprocess output, timeouts, cancellation cleanup, and stable error categories.
+- Added lazy ADB resolution from `PATH`, `ANDROID_HOME`, `ANDROID_SDK_ROOT`, Android Studio SDK, and Homebrew paths.
+- Added deterministic APK input hashing, build locking, atomic artifact stamps, and artifact cache invalidation.
+- Added APK package, version, signer, size, and SHA-256 validation.
+- Added strict loopback agent client models, bearer authentication, request IDs, retry limits, timeouts, and response limits.
+- Increased the agent response default from 1 MiB to 4 MiB. Configurable range: 1–16 MiB through `SADT_ANDROID_AGENT_MAX_RESPONSE_MB`.
+- Added allowlisted JSON acquisition logs. Tokens, raw serials, SMS bodies, contacts, UI text, and notification content are excluded.
+
+## Phase 02: Android Agent
+
+### Main APK
+
+- Package: `com.siksik.agent`.
+- Version: `0.7.0`, version code 7.
+- minSdk 26, compileSdk 35, targetSdk 35.
+- Java and Kotlin target 17.
+- Runs a foreground service with a loopback-only HTTP server on `127.0.0.1:38471`.
+- Validates session ID, token, and expiration before starting the service.
+- Uses session-bound bearer authentication and request IDs.
+- Uses bounded request bodies, responses, workers, and timeouts.
+- Reports capabilities only after real initialization and health checks succeed.
+- Cleans session secrets and private runtime state on stop or expiration.
+- Uses a minimal white Android activity.
+
+### Automation APK
+
+- Package: `com.siksik.agent.automation`.
+- Runs UiAutomator as a separate instrumentation APK.
+- Main and automation APKs use the same shared UID for the protected communication capture store.
+- Refactored the automation source set to compile only automation code and shared communication contracts.
+- Fixed the build failure caused by compiling the full main-agent source tree without its dependencies.
+
+### Agent APIs
+
+Added authenticated routes for:
+
+- session bootstrap, capabilities, health, and stop;
+- permissions and grants;
+- media catalog and thumbnails;
+- inventory start, status, paging, cancel, and resume;
+- social automation results;
+- preprocessing start, status, paging, and cancel;
+- selection, candidates, live-selected records, mutation, confirmation, and cancel;
+- direct transfer, manifest, status, cleanup, and receipts.
+
+## Phase 03: Automatic ADB Bootstrap
+
+Implemented this state machine:
+
+`detect → validate → build/reuse APK → inspect package → install/update → grant runtime permissions → verify special access → start agent → create forward → authenticated handshake → ready`
+
+Changes:
+
+- Backend builds or reuses both APKs automatically.
+- Main APK installation uses `adb install -r -g`.
+- Automation APK installation uses `adb install -r -t`.
+- Installed package version, signer, and identity are verified.
+- Matching agent installations are reused without reinstalling.
+- ADB forwarding uses a dynamic host port mapped to device port 38471.
+- Handshake validates session, package, API, agent version, Android API, and build identity.
+- Forwarding and runtime processes are cleaned on failure, cancellation, teardown, and backend shutdown.
+
+### Installation Migration
+
+Handled:
+
+- `INSTALL_FAILED_UID_CHANGED`;
+- `INSTALL_FAILED_SHARED_USER_INCOMPATIBLE`;
+- `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
+
+For UID/shared-user migration, the installer removes only the configured old agent package and retries once. A one-time uninstall clears Android grants, so Accessibility must be approved again after this migration.
+
+### Permission Flow
+
+- Runtime media, audio, SMS, contact, notification, and media-location permissions are applied through `-g` and `pm grant` where supported.
+- Accessibility requires user approval in Android Settings.
+- Storage/All files is requested only when full shared-storage scanning requires it.
+- Notification Listener is granted through `cmd notification allow_listener` when supported.
+- Notification state is probed up to three times for OEM propagation delays.
+- Normal phone interaction is limited to Accessibility and optional full-scan Storage approval.
+- Previously granted Accessibility state is captured before instrumentation and restored for the active Android user afterward.
+
+### OEM and Connection Recovery
+
+- Fixed Infinix Settings false failures from `am start -W` output containing `Activity not started` for an already-running Settings activity.
+- Exit code, `Status: ok`, delivered-intent output, and explicit failure markers are now evaluated separately.
+- Missing activities, unresolved intents, security exceptions, permission denials, and non-zero exits still fail.
+- Restarts the main agent after each social instrumentation target.
+- Added coordinated loopback recovery for temporary agent or ADB-forward loss.
+- Recovery uses a lock and generation counter to prevent concurrent duplicate repairs.
+
+## Phase 04: Media and Document Inventory
+
+Added these inventory adapters:
+
+| Adapter | Scope |
+| --- | --- |
+| `media_store_image` | Images and image metadata |
+| `media_store_video` | Videos, dimensions, duration, timestamps |
+| `media_store_audio` | Audio and duration |
+| `shared_storage_document` | PDF, DOC, DOCX, XLS, XLSX, CSV, TXT, RTF |
+| `document_tree` | Recursive user-granted document tree |
+| `public_whatsapp` | Public WhatsApp media directories |
+| `public_telegram` | Public Telegram media directories |
+
+Inventory behavior:
+
+- Uses MediaStore and DocumentsContract only.
+- Does not read private application sandboxes.
+- Captures normalized timestamps, dimensions, duration, directory hints, EXIF, camera fields, and GPS where available.
+- Preserves public-app provenance before generic MediaStore deduplication.
+- Stores cursors and checkpoints in the private agent database.
+- Exposes opaque cursor tokens only.
+- Quick mode performs bounded sampling and reports `sampled`.
+- Full mode consumes all accessible source cursors to terminal state.
+- Reports denied, restricted, unsupported, partial, cancelled, and failed sources explicitly.
+- Current page limits:
+  - media/public/document: 100;
+  - SMS: 64;
+  - contacts: 100;
+  - visible UI: 1;
+  - notifications: 50.
+
+## Phase 05: Communication and Social Crawling
+
+### Communication Sources
+
+- Added SMS ContentProvider inventory with bounded text and stable checkpoints.
+- Added batched contact inventory without N+1 detail queries.
+- Added session-bound Accessibility visible-UI capture.
+- Added session-bound Notification Listener capture with stable update/removal identities.
+- Limited visible trees to depth 16, 256 nodes, and 512 characters per node field.
+- Limited SMS text to 32,768 characters and contact normalized text to 8,192 characters.
+- Limited capture records to 5,000 per type/session.
+- Blocked Instagram, X, and Facebook notifications to prevent DM, recommendation, like, and follow data from bypassing social scope controls.
+
+### Active Social Targets
+
+Default targets:
+
+- `com.instagram.android`;
+- `com.twitter.android`.
+
+Facebook remains in the compatibility registry but is not enabled by default.
+
+Allowed scopes:
+
+- `own_profile`;
+- `own_posts`;
+- `own_tweets`;
+- `own_story_archive`;
+- `own_comments`;
+- `own_replies`.
+
+Home feeds, recommendations, other profiles, DMs, likes, follows, posting, deletion, purchases, credential input, and private target-app databases are excluded.
+
+### Instagram
+
+- Verifies the logged-in profile through the profile tab and Edit Profile marker.
+- Captures visible username, bio, and profile links.
+- Opens grid posts individually.
+- Verifies post ownership against the profile account marker when available.
+- Uses visited signatures to prevent duplicate post capture.
+- Opens Archive, selects Story Archive, and opens an archive item before capture.
+- Advances archive stories with a right-side tap and requires a changed, unvisited signature.
+- Opens account comments through Your Activity → Interactions → Comments.
+- Crops profile and post screenshots to the verified scope.
+
+### X / Twitter
+
+- Opens the account drawer and Profile.
+- Verifies Edit Profile and the current account handle.
+- Captures visible handle, bio, and profile links.
+- Selects Posts and Replies explicitly.
+- Opens only items containing the verified account marker.
+- Opens items individually.
+- Processes all unvisited items on the current screen before scrolling.
+- Uses signatures to prevent duplicate tweet/reply capture.
+- Rejects generic thread content when account ownership cannot be proven.
+- Crops screenshots to verified own-account content.
+
+### White Screen Behavior
+
+- Local inventory, preprocessing, selection, and transfer preparation can run behind the white SIKSIK activity.
+- Instagram/X must be foreground during UiAutomator and Accessibility inspection.
+- The target application is therefore visible during bounded social crawling.
+- Automation always returns to the white SIKSIK activity after success, timeout, cancellation, missing target, or failure.
+- API 34 privacy curtain and API 33 text-only white mode are not implemented.
+
+## Phase 06: Local Android Preprocessing
+
+| Capability | Engine |
+| --- | --- |
+| OCR | ML Kit Latin bundled 16.0.1 |
+| Document extraction | SIKSIK bounded parser + Apache POI 5.5.1 |
+| Exact hash | Streaming SHA-256 |
+| Perceptual hash | 64-bit dHash |
+| Face detection | BlazeFace short-range float16 |
+| Face embedding | MobileNet V3 Small float32, 1,024 dimensions |
+| Object detection | EfficientDet-Lite0 int8 |
+| Vision runtime | MediaPipe Tasks Vision 0.10.35 |
+
+Processing map:
+
+- images: SHA-256, dHash, OCR, face, object;
+- videos: SHA-256 plus bounded representative-frame visual processing;
+- audio: SHA-256 and source metadata;
+- documents: SHA-256 and text extraction;
+- PDF: page render followed by OCR;
+- SMS, contacts, notifications: normalized typed source text;
+- visible UI: node text plus record-bound screenshot OCR/face/object/dHash.
+
+Supported documents:
+
+- PDF;
+- DOC/DOCX;
+- XLS/XLSX;
+- CSV;
+- TXT;
+- RTF.
+
+Current limits:
+
+- 3 preprocessing workers;
+- 20-second standard item timeout;
+- 120-second full-mode document timeout;
+- 10-minute quick deadline;
+- 6-hour full deadline;
+- 4 million shared visual pixels;
+- 4 GiB exact-hash/stage file limit;
+- 32 MiB document input;
+- 24 PDF pages;
+- 32,768 OCR characters and 128 OCR regions;
+- 65,536 document text characters;
+- 8 face signals and 12 object labels per record.
+
+Optimizations:
+
+- Decodes a bounded visual base once for dHash, OCR, face, and object processing.
+- Added exact-content caches keyed by source kind, MIME, and SHA-256.
+- Cache limits: 64 visual results and 32 document results.
+- Failed or cancelled results are not cached.
+- Cache hits are marked with `content_hash_cache_hit`.
+- Added deterministic exact/perceptual duplicate clustering.
+- Added bounded BK-tree perceptual grouping with Hamming distance 8.
+- Added anonymous face clustering with cosine similarity 0.92.
+- Raw face vectors remain private and are deleted after cluster membership is applied.
+
+## Phase 07: Selection and Review
+
+- Added backend-owned `siksik-selection-v3` policy generation.
+- The APK does not contain a second production risk dictionary.
+- Policy fingerprint is validated before use.
+- Threshold: 5,500 basis points, inclusive.
+- Quick budget: 2,500 candidates, 1 GiB.
+- Full budget: 10,000 candidates, 8 GiB.
+- Added normalized phrase/token keyword matching with alphanumeric boundaries.
+- Added source, text, keyword, face, and object scoring.
+- Added deterministic duplicate representative handling.
+- All verified own-account social scopes are selected for reporting even without a keyword match.
+- Added private candidate ledger, revision control, expected-revision conflicts, idempotent confirmation, and immutable confirmed revisions.
+- `review_candidates=false` auto-confirms.
+- `review_candidates=true` waits for operator/admin review.
+- Agent selection does not create findings or recommendations.
+
+### Incremental Selection
+
+- Preprocessing and selection run concurrently after inventory reaches terminal state.
+- SMS, contacts, notifications, visible UI, and documents become selection inputs as each record finishes.
+- Images and videos wait for final duplicate/face clustering to prevent unstable representatives.
+- Added cursor-based `live-selected-records` endpoint.
+- Backend reads pages of 16 and analyzes batches up to 64 records.
+- Live ingestion is disabled during manual candidate review.
+
+Current limitation: incremental analysis begins after inventory completes, not while inventory enumeration is still running.
+
+## Phase 08: Direct Transfer Without ZIP
+
+Implemented:
+
+`confirmed selection → private stage → manifest → canonical record and selected attachments → one recursive ADB pull → size/hash validation → database commit → cleanup receipt`
+
+- Only confirmed selection revisions can be staged.
+- Canonical records use `application/vnd.siksik.crawl-record+json`.
+- Original binary files are included only for selected media/documents.
+- Screenshots are included only for selected visible-UI records.
+- Manifest binds session, crawl, policy, revision, selection fingerprint, record, role, MIME, path, size, and SHA-256.
+- Rejects absolute paths, traversal, symlinks, ZIP paths, duplicate IDs, relation mismatches, count mismatches, size mismatches, and hash mismatches.
+- Commits records, artifacts, and transfer receipt transactionally.
+- Requests agent cleanup only after the server receipt is committed.
+- Reuses verified hashes and canonical timestamps during indexing.
+
+### Server Storage Behavior
+
+For Android-agent sessions:
+
+- Full inventory and preprocessing intermediate data remain on Android.
+- Unselected source binaries are not copied to server staging.
+- Server stores bounded runtime/event metadata, candidate ledger metadata, selected canonical records, selected binaries/screenshots, findings, and reports.
+- Live ingestion writes only auto-selected canonical records.
+- Final transfer writes only selected artifacts.
+
+The legacy ZIP provider keeps its original storage behavior.
+
+## Phase 09: SIKSIK Analysis Integration
+
+- Parses canonical records through strict `InventoryRecordV1` validation.
+- Analyzes only canonical `normalized_text`; JSON keys and raw metadata are not keyword-scanned.
+- Sends image/video/screenshot artifacts through the existing SIKSIK visual analyzer.
+- Preserves existing findings, review, and recommendation authority.
+- Adds source app, social scope, record ID, timestamps, artifact role, and acquisition method to file metadata.
+- Runs live-selected analysis under session status `ACQUIRING`.
+- Publishes findings before the full session is terminal.
+- Processes only `files.analyzed = 0`, allowing safe incremental calls.
+- Commits analyzed state and findings in batches before publishing progress.
+- Accumulates live-analysis time into final analysis timing.
+- OCR, keyword analysis, crawling, selection, and L1/L2 findings do not require an LLM.
+
+### SQLite Concurrency Fix
+
+Fixed `cannot start a transaction within a transaction` by:
+
+- serializing all connection operations with one `asyncio.Lock`;
+- using the same lock for execute, executemany, fetch, and transaction operations;
+- closing cursors explicitly;
+- rolling back on `BaseException`, including cancellation;
+- committing only after a successful transaction block.
+
+## Phase 10: Frontend and Report Integration
+
+No frontend stylesheet or route was replaced.
+
+### Live Telemetry
+
+- Added `preparing_agent`, `awaiting_access`, `selecting`, and `awaiting_review` session states.
+- Mapped the new states into the existing Acquisition pipeline step.
+- Polls active sessions every 500 ms.
+- Updates the local total/phase clock every 500 ms.
+- Displays committed transfer/live-file counts under `MASUK`.
+- Displays processed OCR count and OCR hit count separately.
+- Publishes live file counts before analysis starts.
+- Publishes analyzed/finding counts only after database commit.
+- Refreshes the open Findings or Report page when live counts increase.
+- Uses a polling epoch to prevent stale session responses from overwriting the current session.
+
+### Finding Preview
+
+- Added optional `preview_path` and `preview_text` fields.
+- Resolves a verified image/video artifact from the same crawl record.
+- Uses normalized text or bounded evidence when no media preview exists.
+- Limits text preview to 320 characters.
+- Does not display raw `.siksik-record.json` content.
+- Falls back to text when image/video loading fails.
+
+### Social Report
+
+- Added `social_accounts` and `social_data` to JSON/HTML reports.
+- Groups data by Instagram and X.
+- Includes username/handle, visible bio, and up to 16 profile links.
+- Includes scope, observation time, and normalized preview for social items.
+- Separates social account data from findings.
+- Limits rendered social items to 500 and exposes truncation metadata.
+- Reuses existing SIKSIK frontend classes for desktop and mobile layouts.
+
+## Phase 11–12: Hardening and Performance
+
+- Increased inventory page sizes to reduce loopback round trips.
+- Added 4 MiB default response ceiling to fix `records=too_long`.
+- Reused one visual decode across four preprocessors.
+- Added exact-content inference caches.
+- Batched direct-transfer and analysis database writes.
+- Performs one recursive ADB pull followed by per-file verification.
+- Increased full social navigation budget to 24 operations per target.
+- Quick social navigation remains 3 operations per target.
+- Screenshot budgets: quick 6, full 16 per target.
+- Preprocessing and selection polling interval: 250 ms.
+- Added a read-only full-scan benchmark requiring the same device, dataset, scope, and timing boundaries.
+- No faster-than-Cellebrite claim has been made.
+
+## Defects Fixed
+
+| Defect | Fix |
+| --- | --- |
+| Infinix `special_access_settings_open` false failure | Parse exit code, status, delivered intent, and hard-failure markers separately |
+| `InventoryPageV1 ... records=too_long` | 4 MiB response ceiling and source-specific pagination |
+| Automation build compiled the full app source tree | Restricted automation source set to shared contracts/store only |
+| `INSTALL_FAILED_UID_CHANGED` | One-time configured-package uninstall and retry |
+| Agent unreachable after social instrumentation | Agent restart and coordinated ADB-forward recovery |
+| Repeated Accessibility prompt | Active-user exact-component probe and previous-state restoration |
+| Nested SQLite transaction error | Global operation lock and cancellation-safe rollback |
+| Live `MASUK/DIANALISIS` remained zero | Publish committed live-ingestion and analysis counters incrementally |
+| Canonical JSON finding had no preview | Resolve related verified media or bounded normalized text |
+| Instagram stopped at profile/archive page | Open individual grid posts and Story Archive items |
+| Instagram repeated the same story | Before/after signature and visited-story set |
+| X skipped visible account items | Process unvisited on-screen items before scrolling |
+| Social notifications expanded collection scope | Reject social packages at notification listener and storage boundaries |
+| Identical media repeated expensive inference | Exact SHA-256 bounded result cache |
+
+## Backend Database Migrations
+
+| Version | Migration | Change |
+| ---: | --- | --- |
+| 1 | `finding_media_dates` | Adds media year and captured timestamp |
+| 2 | `agent_runtimes` | Adds agent runtime state and token fingerprint metadata |
+| 3 | `agent_bootstrap_trace` | Adds build identity and bootstrap event history |
+| 4 | `selection_review` | Adds session ownership, review mode, crawl run, and candidate ledger |
+| 5 | `direct_crawl_ingestion` | Adds permissions, records, artifacts, transfers, and crawl events |
+| 6 | `direct_crawl_composite_identity` | Changes record identity to `(crawl_id, record_id)` |
+
+All migrations are additive/idempotent and preserve existing baseline data.
+
+## Dynamic Android APK Installation Compatibility
+
+- Replaced the single-path APK install behavior with an output-driven install policy shared by the main agent and automation APK.
+- Preserved `adb install -r -g` as the preferred main-agent path and `adb install -r -t` as the preferred automation path.
+- Added automatic retry without `-g` when an OEM removes the shell `INSTALL_GRANT_RUNTIME_PERMISSIONS` capability. Runtime permissions are still applied and verified individually after installation.
+- Added automatic `--no-streaming` retry for bounded ADB streaming transport failures such as broken pipes, connection resets, protocol faults, and unexpected EOF.
+- Preserved `-t` when the automation APK changes from streamed install to no-streaming install.
+- Kept UID/shared-user and signature migration package-scoped. Only the configured incompatible SIKSIK package is uninstalled before one verified retry.
+- Added typed classification for update incompatibility, UID incompatibility, insufficient storage, version downgrade, API/ABI incompatibility, user-restricted installation, device policy, invalid APK, streaming transport failure, and unknown failure.
+- OEM installation approval remains an explicit Android prerequisite. The backend reports it as actionable and retryable instead of returning the generic agent-install failure.
+- Applied one total installation deadline across all fallback attempts and migration work. Retry combinations cannot multiply the configured timeout.
+- Persisted manufacturer, model, Android API, successful install strategy, attempt count, and install-time grant mode in redacted runtime metadata.
+- Added structured `agent_install_fallback` logging with reason, selected fallback, and retry count. Raw serials, package-manager output, and device content are not logged.
+- Added deterministic contract coverage for runtime-grant fallback, streamed-to-push fallback, automation `-t` preservation, OEM restriction classification, and existing UID migration behavior.
+- Physical diagnostic on a Xiaomi M2101K7AG running Android 11/MIUI 12.5 confirmed two distinct OEM behaviors: `-g` was rejected by shell policy, then the no-`-g` install reached Package Installer and was blocked by the device's Install via USB policy. No successful installation or crawl was claimed from that diagnostic.
+- Confirmed that the same MIUI build can report `GRANT_RUNTIME_PERMISSIONS` as granted in `dumpsys` while still rejecting both install-time grants and `pm grant` at execution time. Static shell capability output is therefore not trusted as install/grant readiness.
+- Added an in-memory, per-device runtime-grant capability cache. After one verified shell-policy rejection, remaining permission checks do not repeat slow failing `pm grant` commands.
+- Added an app-owned runtime-permission probe receiver. The backend now reads the agent's own effective permission state through one serial-pinned explicit broadcast instead of relying on slow and OEM-dependent `dumpsys package` output.
+- Kept the permission probe payload fixed and content-free. It reports only `granted`, `denied`, or `unsupported` for the declared SIKSIK permission allowlist and never returns device content or identifiers.
+- Kept legacy compatibility: if an older installed APK does not provide the probe receiver or returns an incomplete contract, the backend falls back to the bounded package-dump parser.
+- Added a 500 ms in-memory permission snapshot cache to avoid repeating the same device query while bootstrap evaluates multiple permission requirements. The cache is invalidated after install and after a successful shell grant.
+- Added `awaiting_runtime_permission` between runtime permission setup and special-access verification.
+- When required media/storage permission cannot be granted through ADB, the backend opens the standard package-scoped Android App info screen, publishes awaiting access, and polls the exact required permissions for the active Android user.
+- Bootstrap continues only after Android reports every required storage/media permission as granted. Unsupported permission contracts fail immediately; unresolved user confirmation times out with a retryable storage-access error.
+- Optional SMS, contact, media-location, and notification permission failures do not create extra phone-side screens.
+- Added contract coverage for capability-cache behavior, permission-probe parsing, explicit serial-pinned probe execution without `dumpsys`, and the complete denied-to-interactive-to-granted storage flow.
+
+## Public API Changes
+
+Added:
+
+- `POST /api/v1/agent/bootstrap`
+- `GET /api/v1/agent/status`
+- `GET /api/v1/sessions/{session_id}/crawl`
+- `GET /api/v1/sessions/{session_id}/candidates`
+- `PATCH /api/v1/sessions/{session_id}/candidates/{record_id}`
+- `POST /api/v1/sessions/{session_id}/candidates/confirm`
+
+Additive model fields include:
+
+- agent/bootstrap state;
+- inventory/preprocessing/selection/transfer progress;
+- `review_candidates`;
+- finding preview fields;
+- social report data.
+
+Existing endpoints, including `/sessions/from-zip`, remain available.
+
+## Main Source Areas
+
+### Android
+
+- `android-agent/app/src/main/java/com/siksik/agent/api`
+- `android-agent/app/src/main/java/com/siksik/agent/session`
+- `android-agent/app/src/main/java/com/siksik/agent/permission`
+- `android-agent/app/src/main/java/com/siksik/agent/source/inventory`
+- `android-agent/app/src/main/java/com/siksik/agent/source/communication`
+- `android-agent/app/src/main/java/com/siksik/agent/preprocessing`
+- `android-agent/app/src/main/java/com/siksik/agent/selection`
+- `android-agent/app/src/main/java/com/siksik/agent/staging`
+- `android-agent/automation/src/main/java/com/siksik/agent/automation`
+
+### Backend
+
+- `backend/app/acquisition`
+- `backend/app/selection`
+- `backend/app/core/db.py`
+- `backend/app/core/logging.py`
+- `backend/app/core/request_context.py`
+- `backend/app/models/schemas.py`
+- `backend/app/services/acquisition.py`
+- `backend/app/services/analysis.py`
+- `backend/app/services/sessions.py`
+- `backend/app/services/reports.py`
+- `backend/app/api/routes.py`
+
+### Frontend
+
+- `frontend/src/App.tsx`
+- `frontend/src/api.ts`
+- `frontend/src/constants.ts`
+- `frontend/src/pages/OperatorPage.tsx`
+- `frontend/src/pages/ReportPage.tsx`
+- `frontend/src/components/FindingsList.tsx`
+- `frontend/src/components/MediaPreview.tsx`
+
+### Validation Scripts
+
+- `tests/social_crawl_contract.py`
+- `tests/run_social_crawl_checks.sh`
+- `tests/android_adb_automation_contract.py`
+- `tests/sqlite_concurrency_check.py`
+- `tests/live_ingestion_progress_check.py`
+- `tests/dashboard_social_flow_check.py`
+- `tests/full_scan_benchmark.py`
+- `tests/run_contract_tests.sh`
+
+## Verification Snapshot Before 2026-07-22 Hardening
+
+Validation recorded before the Instagram/X hardening above:
+
+- Android `:app:assembleDebug :automation:assembleDebug`: passed on the preceding source snapshot. It was not rerun after adding the permission probe receiver, in accordance with dashboard-owned device testing.
+- Backend `compileall`: passed.
+- Frontend TypeScript and Vite production build: passed.
+- ADB automation contract script: passed after the permission probe changes.
+- SQLite concurrency script: passed.
+- Live-ingestion progress script: passed.
+- Scoped `git diff --check`: passed.
+
+Superseded debug artifacts:
+
+| Artifact | Size | SHA-256 |
+| --- | ---: | --- |
+| `app-debug.apk` | 108,716,806 bytes | `590bebe1bd18a1cc532aedebc59c91320c3424e3ba1daf8bd91aaac3e42042bb` |
+| `automation-debug.apk` | 1,864,120 bytes | `4ab5817297015c9ebe55883d824c896e79f8c92d55944aee31d3a456be9b8cd5` |
+
+Historical physical evidence:
+
+- Infinix X6837, Android 13/API 33: agent bootstrap and instrumentation checks passed in earlier phases.
+- Samsung SM-A736B, Android 14/API 34: Phase 06 real OCR/model/document instrumentation passed.
+
+Not run for the latest source snapshot:
+
+- full backend pytest suite;
+- current APK installation;
+- current instrumentation suite;
+- current Instagram/X dashboard crawl;
+- current direct-transfer device run;
+- current full-scan benchmark.
+
+## Open Limitations
+
+1. Current Instagram/X automation still requires device acceptance against the installed application versions and locale.
+2. Live analysis starts after inventory completion, not during inventory enumeration.
+3. Image/video live selection waits for final clustering.
+4. Privacy curtain is not implemented.
+5. Accessibility restoration may be blocked by OEM or enterprise policy.
+6. Main debug APK is approximately 104 MiB.
+7. PDF extraction is bounded to 24 pages and reports truncation.
+8. Full preprocessing currently allows a 6-hour deadline for large inventories.
+9. The Android agent does not add a new local ASR engine.
+10. Facebook compatibility code exists but is disabled by default.
+11. Faster-than-Cellebrite performance is not proven.
+
+## Repository State Notes
+
+- `android-agent/.gradle/**` contains generated local cache/lock files and should not be included in a release commit.
+- `.gitignore` pattern `**/staging/` currently ignores required source files under `android-agent/app/src/main/java/com/siksik/agent/staging/**`.
+- The staging source package must be explicitly unignored or added before the implementation is committed.

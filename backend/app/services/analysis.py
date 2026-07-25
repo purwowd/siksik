@@ -6,12 +6,29 @@ import re
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from app.core.config import settings
 from app.core.db import db, utcnow
 from app.models.schemas import AcquisitionMode, Layer, ReviewStatus, SessionStatus
 from app.services.acquisition import IMG_EXT, TEXT_EXT, VID_EXT
 from app.services import vision as vis
+
+CANONICAL_CRAWL_RECORD_MIME = "application/vnd.siksik.crawl-record+json"
+
+
+def _skip_heavy_ocr_for_gallery(path: Path, source: str) -> bool:
+    """QUICK gallery camera-roll: skip EasyOCR unless screenshot/chat path."""
+    if source != "gallery":
+        return False
+    from app.services.hash_cache import get_analysis_mode
+    from app.services import media_text
+
+    if get_analysis_mode() != AcquisitionMode.QUICK:
+        return False
+    if media_text.looks_like_chat_or_screenshot(path):
+        return False
+    return True
 
 
 def _normalize(text: str) -> str:
@@ -115,11 +132,32 @@ def _is_probably_text(path: Path, mime: str) -> bool:
 async def read_preview(path: Path, mime: str, max_bytes: int = 200_000) -> str:
     """Baca cuplikan teks. Binary media (gambar/video/pdf) → kosong (hindari FP keyword di noise byte)."""
     ext = path.suffix.lower()
+    if mime == CANONICAL_CRAWL_RECORD_MIME:
+
+        def _read_crawl_record() -> str:
+            from app.acquisition.agent_client import InventoryRecordV1
+
+            try:
+                record = InventoryRecordV1.model_validate_json(path.read_bytes())
+            except (OSError, ValueError):
+                return ""
+            return (record.normalized_text or "")[:max_bytes]
+
+        return await asyncio.to_thread(_read_crawl_record)
+    if ext in {".imgmeta", ".vidmeta"}:
+
+        def _read_meta() -> str:
+            try:
+                return path.read_text(encoding="utf-8", errors="ignore")[:max_bytes]
+            except OSError:
+                return ""
+
+        return await asyncio.to_thread(_read_meta)
     if ext in IMG_EXT or ext in VID_EXT or mime.startswith("image/") or mime.startswith("video/"):
         return ""
     if ext in {".pdf", ".doc", ".docx", ".rtf", ".odt", ".zip", ".rar", ".7z"}:
         return ""
-    if ext in {".imgmeta", ".vidmeta"} or _is_probably_text(path, mime):
+    if _is_probably_text(path, mime):
 
         def _read() -> str:
             try:
@@ -141,8 +179,19 @@ from app.services.hash_cache import (
 )
 
 
-def analyze_content(path: Path, mime: str, source: str, text: str, keywords: list[str]) -> list[dict]:
+def analyze_content(
+    path: Path,
+    mime: str,
+    source: str,
+    text: str,
+    keywords: list[str],
+    *,
+    precomputed_ocr_text: str | None = None,
+    precomputed_ocr_backend: str | None = None,
+) -> list[dict]:
     ext = path.suffix.lower()
+    if mime == CANONICAL_CRAWL_RECORD_MIME:
+        return analyze_text_l1_l2(text, keywords) if text.strip() else []
     findings: list[dict] = []
     findings.extend(analyze_path_signals(str(path), keywords))
 
@@ -154,8 +203,32 @@ def analyze_content(path: Path, mime: str, source: str, text: str, keywords: lis
     if ext == ".imgmeta":
         findings.extend(analyze_image_meta_l3(text))
     elif is_image:
-        # Teks dari gambar hanya lewat OCR / vision — jangan L1 pada byte JPEG
-        findings.extend(vis.analyze_image_file(path))
+        # Social UI screenshots already have structured inventory records.
+        # Running EasyOCR/media_text here hangs the pipeline (looks stuck at INDEXING).
+        if source in {"visible_ui", "accessibility_visible_ui"}:
+            if precomputed_ocr_text:
+                from app.services import ocr as ocr_mod
+
+                findings.extend(
+                    ocr_mod.ocr_findings_from_text(
+                        precomputed_ocr_text,
+                        backend=precomputed_ocr_backend or "host_ocr",
+                    )
+                )
+            else:
+                findings.extend(vis._analyze_pil_image(path))
+        elif _skip_heavy_ocr_for_gallery(path, source):
+            # iOS AFC dumps raw camera HEIC; Android already samples a few media.
+            # QUICK: PIL/path signals only — EasyOCR on every HEIC is why iOS lags.
+            findings.extend(vis._analyze_pil_image(path))
+        else:
+            findings.extend(
+                vis.analyze_image_file(
+                    path,
+                    precomputed_ocr_text=precomputed_ocr_text,
+                    precomputed_ocr_backend=precomputed_ocr_backend,
+                )
+            )
     elif ext == ".vidmeta":
         findings.extend(analyze_video_meta_l4(text))
     elif is_video:
@@ -180,11 +253,26 @@ async def analyze_session(
     staging: Path,
     mode: AcquisitionMode,
     on_progress,
+    *,
+    progress_status: SessionStatus = SessionStatus.ANALYZING,
+    progress_start: float = 60.0,
+    progress_end: float = 98.0,
+    progress_label: str = "Analisis",
 ) -> tuple[int, int, float, dict]:
     t0 = time.perf_counter()
     mode_token = set_analysis_mode(mode)
     try:
-        return await _analyze_session_body(session_id, staging, mode, on_progress, t0)
+        return await _analyze_session_body(
+            session_id,
+            staging,
+            mode,
+            on_progress,
+            t0,
+            progress_status,
+            progress_start,
+            progress_end,
+            progress_label,
+        )
     finally:
         reset_analysis_mode(mode_token)
 
@@ -195,16 +283,54 @@ async def _analyze_session_body(
     mode: AcquisitionMode,
     on_progress,
     t0: float,
+    progress_status: SessionStatus,
+    progress_start: float,
+    progress_end: float,
+    progress_label: str,
 ) -> tuple[int, int, float, dict]:
     rows = await db.fetchall(
-        "SELECT id, source, path, sha256, mime, meta_json FROM files WHERE session_id = ?",
+        "SELECT id, source, path, sha256, mime, meta_json FROM files "
+        "WHERE session_id = ? AND analyzed = 0",
         (session_id,),
     )
+    file_count_row = await db.fetchone(
+        "SELECT COUNT(*) AS total, COALESCE(SUM(analyzed), 0) AS analyzed "
+        "FROM files WHERE session_id = ?",
+        (session_id,),
+    )
+    file_count = int(file_count_row["total"]) if file_count_row else 0
+    previously_analyzed = int(file_count_row["analyzed"]) if file_count_row else 0
+    finding_count_row = await db.fetchone(
+        "SELECT COUNT(*) AS total FROM findings WHERE session_id = ?",
+        (session_id,),
+    )
+    findings_count = int(finding_count_row["total"]) if finding_count_row else 0
 
-    # Di mode gallery-focus: prioritas analisis sumber gallery, baru sisanya
-    gallery_rows = [r for r in rows if r["source"] == "gallery"]
-    other_rows = [r for r in rows if r["source"] != "gallery"]
-    ordered = gallery_rows + other_rows
+    # Light inventory/text first (SMS/contacts/JSON), then images, then video.
+    # iOS used to OCR all HEIC gallery first → UI stuck at "8/106" for minutes.
+    def _weight(row) -> tuple[int, str]:
+        source = str(row["source"] or "")
+        path = Path(str(row["path"] or ""))
+        mime = str(row["mime"] or "")
+        ext = path.suffix.lower()
+        if (
+            mime == CANONICAL_CRAWL_RECORD_MIME
+            or path.name.endswith(".siksik-record.json")
+            or (ext == ".json" and source in {"sms", "contacts", "contact", "visible_ui"})
+            or source in {"sms", "contacts", "contact"}
+        ):
+            return (0, str(row["path"]))
+        if source == "video" or ext in VID_EXT or mime.startswith("video/"):
+            return (3, str(row["path"]))
+        if (
+            source in {"gallery", "media_image", "visible_ui", "accessibility_visible_ui"}
+            or ext in IMG_EXT
+            or mime.startswith("image/")
+        ):
+            return (2, str(row["path"]))
+        return (1, str(row["path"]))
+
+    ordered = sorted(rows, key=_weight)
 
     image_cap = settings.image_cap_quick if mode == AcquisitionMode.QUICK else settings.image_cap_full
     gallery_seen = 0
@@ -213,7 +339,7 @@ async def _analyze_session_body(
     for r in ordered:
         if r["source"] == "gallery":
             gallery_seen += 1
-            if gallery_seen > image_cap:
+            if image_cap > 0 and gallery_seen > image_cap:
                 continue
         if r["source"] == "video" or Path(r["path"]).suffix.lower() in VID_EXT:
             video_seen += 1
@@ -227,15 +353,67 @@ async def _analyze_session_body(
         selected.append(r)
 
     total = len(selected)
-    findings_count = 0
-    finding_rows: list[tuple] = []
     sem = asyncio.Semaphore(settings.worker_concurrency)
     keywords = settings.risk_keywords
     layer_counts = {"L1": 0, "L2": 0, "L3": 0, "L4": 0}
     category_counts: dict[str, int] = {}
     source_counts: dict[str, int] = {}
-    hits_ocr = 0
-    hits_asr = 0
+    for row in await db.fetchall(
+        "SELECT layer_origin, COUNT(*) AS total FROM findings "
+        "WHERE session_id = ? GROUP BY layer_origin",
+        (session_id,),
+    ):
+        layer_counts[str(row["layer_origin"])] = int(row["total"])
+    for row in await db.fetchall(
+        "SELECT category, COUNT(*) AS total FROM findings "
+        "WHERE session_id = ? GROUP BY category",
+        (session_id,),
+    ):
+        category_counts[str(row["category"])] = int(row["total"])
+    for row in await db.fetchall(
+        "SELECT source, COUNT(*) AS total FROM findings "
+        "WHERE session_id = ? GROUP BY source",
+        (session_id,),
+    ):
+        source_counts[str(row["source"])] = int(row["total"])
+    existing_labels = await db.fetchall(
+        "SELECT label FROM findings WHERE session_id = ?",
+        (session_id,),
+    )
+    hits_ocr = sum(
+        1
+        for row in existing_labels
+        if "ocr" in str(row["label"]).lower() or "on-screen" in str(row["label"]).lower()
+    )
+    hits_asr = sum(
+        1
+        for row in existing_labels
+        if any(
+            value in str(row["label"]).lower()
+            for value in ("audio", "lirik", "whisper")
+        )
+    )
+    social_ocr_rows = await db.fetchall(
+        "SELECT record_id, ocr_text, ocr_backend FROM social_snapshot_enrichments "
+        "WHERE session_id = ? AND ocr_text IS NOT NULL",
+        (session_id,),
+    )
+    social_ocr = {
+        str(row["record_id"]): (str(row["ocr_text"]), str(row["ocr_backend"] or "host_ocr"))
+        for row in social_ocr_rows
+        if str(row["ocr_text"] or "").strip()
+    }
+
+    await on_progress(
+        progress_status,
+        progress_start,
+        f"{progress_label} dimulai ({previously_analyzed}/{file_count})…",
+        files_listed=file_count,
+        files_pulled=file_count,
+        files_indexed=file_count,
+        files_analyzed=previously_analyzed,
+        findings_count=findings_count,
+    )
 
     def _count_media_kinds(label: str) -> None:
         nonlocal hits_ocr, hits_asr
@@ -249,6 +427,13 @@ async def _analyze_session_body(
         async with sem:
             cached = await get_cached(row["sha256"]) if row["sha256"] else None
             path = staging / row["path"]
+            try:
+                meta = json.loads(row["meta_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                meta = {}
+            precomputed = None
+            if meta.get("crawl_artifact_role") == "screenshot":
+                precomputed = social_ocr.get(str(meta.get("crawl_record_id") or ""))
             if cached is not None:
                 results = cached
             else:
@@ -268,6 +453,8 @@ async def _analyze_session_body(
                         row["source"],
                         text,
                         keywords,
+                        precomputed_ocr_text=precomputed[0] if precomputed else None,
+                        precomputed_ocr_backend=precomputed[1] if precomputed else None,
                     )
                 else:
                     results = analyze_content(
@@ -279,10 +466,9 @@ async def _analyze_session_body(
             media_year = None
             media_captured_at = None
             try:
-                meta = json.loads(row["meta_json"] or "{}")
                 media_year = meta.get("captured_year")
                 media_captured_at = meta.get("captured_at")
-            except (TypeError, json.JSONDecodeError):
+            except AttributeError:
                 pass
             if media_year is None and path.is_file():
                 from app.services.media_dates import capture_meta
@@ -314,43 +500,25 @@ async def _analyze_session_body(
             return out
 
     analyzed_ids: list[str] = []
-    wave = max(settings.cv_batch_size, 16)
-    for start in range(0, total, wave):
-        batch = selected[start : start + wave]
-        batch_findings = await asyncio.gather(*(process(r) for r in batch))
-        for row, items in zip(batch, batch_findings):
-            finding_rows.extend(items)
-            findings_count += len(items)
-            analyzed_ids.append(row["id"])
-            for it in items:
-                layer_counts[it[8]] = layer_counts.get(it[8], 0) + 1
-                category_counts[it[5]] = category_counts.get(it[5], 0) + 1
-                source_counts[it[3]] = source_counts.get(it[3], 0) + 1
-                _count_media_kinds(str(it[6]))
 
-        if batch:
-            placeholders = ",".join("?" * len(batch))
-            await db.execute(
-                f"UPDATE files SET analyzed = 1 WHERE id IN ({placeholders})",
-                tuple(r["id"] for r in batch),
-            )
-
-        analyzed = len(analyzed_ids)
+    async def publish_progress() -> None:
+        analyzed = previously_analyzed + len(analyzed_ids)
         elapsed = max(time.perf_counter() - t0, 1e-6)
-        fps = analyzed / elapsed
-        pct = 60 + (analyzed / max(total, 1)) * 38
+        fps = len(analyzed_ids) / elapsed
+        batch_fraction = len(analyzed_ids) / max(total, 1)
+        pct = progress_start + batch_fraction * (progress_end - progress_start)
         msg = (
-            f"Analisis AI ({analyzed}/{total}) · "
+            f"{progress_label} ({analyzed}/{file_count}) · "
             f"L3:{layer_counts.get('L3', 0)} L4:{layer_counts.get('L4', 0)} · "
             f"OCR:{hits_ocr} ASR:{hits_asr}"
         )
         await on_progress(
-            SessionStatus.ANALYZING,
+            progress_status,
             pct,
             msg,
-            files_listed=total,
-            files_pulled=total,
-            files_indexed=total,
+            files_listed=file_count,
+            files_pulled=file_count,
+            files_indexed=file_count,
             files_analyzed=analyzed,
             findings_count=findings_count,
             throughput_files_per_sec=round(fps, 1),
@@ -362,24 +530,71 @@ async def _analyze_session_body(
             hits_asr=hits_asr,
         )
 
-    if finding_rows:
-        await db.executemany(
-            """
-            INSERT INTO findings (
-                id, session_id, file_id, source, path, category, label,
-                confidence, layer_origin, evidence, review_status, created_at,
-                media_year, media_captured_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            finding_rows,
-        )
+    async def commit_results(results: list[tuple[Any, list[tuple]]]) -> None:
+        nonlocal findings_count
+        rows_to_insert = [item for _, items in results for item in items]
+        async with db.transaction() as conn:
+            await conn.executemany(
+                "UPDATE files SET analyzed = 1 WHERE id = ?",
+                [(row["id"],) for row, _ in results],
+            )
+            if rows_to_insert:
+                await conn.executemany(
+                    """
+                    INSERT INTO findings (
+                        id, session_id, file_id, source, path, category, label,
+                        confidence, layer_origin, evidence, review_status, created_at,
+                        media_year, media_captured_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows_to_insert,
+                )
+
+        for row, items in results:
+            analyzed_ids.append(row["id"])
+            findings_count += len(items)
+            for item in items:
+                layer_counts[item[8]] = layer_counts.get(item[8], 0) + 1
+                category_counts[item[5]] = category_counts.get(item[5], 0) + 1
+                source_counts[item[3]] = source_counts.get(item[3], 0) + 1
+                _count_media_kinds(str(item[6]))
+        await publish_progress()
+
+    async def process_with_row(row) -> tuple[Any, list[tuple]]:
+        return row, await process(row)
+
+    wave = max(settings.cv_batch_size, 16)
+    clean_commit_batch = 8
+    for start in range(0, total, wave):
+        batch = selected[start : start + wave]
+        tasks = [asyncio.create_task(process_with_row(row)) for row in batch]
+        pending_results: list[tuple[Any, list[tuple]]] = []
+        try:
+            for completed in asyncio.as_completed(tasks):
+                result = await completed
+                pending_results.append(result)
+                if result[1] or len(pending_results) >= clean_commit_batch:
+                    await commit_results(pending_results)
+                    pending_results = []
+            if pending_results:
+                await commit_results(pending_results)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     stats = {
         "layer_counts": layer_counts,
         "category_counts": category_counts,
         "source_counts": source_counts,
-        "files_selected": total,
+        "files_selected": file_count,
         "hits_ocr": hits_ocr,
         "hits_asr": hits_asr,
     }
-    return len(analyzed_ids), findings_count, (time.perf_counter() - t0) * 1000, stats
+    return (
+        previously_analyzed + len(analyzed_ids),
+        findings_count,
+        (time.perf_counter() - t0) * 1000,
+        stats,
+    )

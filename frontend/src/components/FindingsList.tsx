@@ -102,7 +102,11 @@ export function FindingsList({
                   onMouseEnter={() => onFocusFinding?.(f.id)}
                 >
                   <td>
-                    <MediaPreview sessionId={sessionId} path={f.path} />
+                    <MediaPreview
+                      sessionId={sessionId}
+                      path={f.preview_path || f.path}
+                      text={f.preview_text || f.evidence}
+                    />
                   </td>
                   <td>
                     <strong className="finding-label">{f.label}</strong>
@@ -155,7 +159,11 @@ export function FindingsList({
               onMouseEnter={() => onFocusFinding?.(f.id)}
             >
               <div className="finding-card-media">
-                <MediaPreview sessionId={sessionId} path={f.path} />
+                <MediaPreview
+                  sessionId={sessionId}
+                  path={f.preview_path || f.path}
+                  text={f.preview_text || f.evidence}
+                />
               </div>
               <div className="finding-card-body">
                 <strong className="finding-label">{f.label}</strong>

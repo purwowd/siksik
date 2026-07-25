@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import { useEffect, useState, type RefObject } from "react";
 import { ms, type AcquisitionMode, type DeviceInfo, type SessionSummary } from "../api";
 import { PanelTitle } from "../components/PanelTitle";
 import { PipelineTrack } from "../components/PipelineTrack";
@@ -36,6 +36,72 @@ type Props = {
 export function OperatorPage(p: Props) {
   const progress = p.session?.progress;
   const timing = p.session?.timing;
+  const active = !!p.session && ACTIVE.has(p.session.status);
+  const [clockMs, setClockMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active) return;
+    setClockMs(Date.now());
+    const timer = window.setInterval(() => setClockMs(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, [active, p.session?.id]);
+
+  const sessionStartedMs = Date.parse(p.session?.created_at ?? "");
+  const sessionUpdatedMs = Date.parse(p.session?.updated_at ?? "");
+  const measuredTotalMs =
+    Number.isFinite(sessionStartedMs) && Number.isFinite(active ? clockMs : sessionUpdatedMs)
+      ? Math.max(0, (active ? clockMs : sessionUpdatedMs) - sessionStartedMs)
+      : 0;
+  const liveTotalMs = active
+    ? Math.max(timing?.t_total_ms ?? 0, measuredTotalMs)
+    : timing?.t_total_ms || measuredTotalMs;
+  const liveDetectMs =
+    p.session?.status === "detecting"
+      ? Math.max(timing?.t_detect_ms ?? 0, liveTotalMs)
+      : timing?.t_detect_ms ?? 0;
+  const acquisitionActive =
+    p.session?.status === "preparing_agent" ||
+    p.session?.status === "awaiting_access" ||
+    p.session?.status === "acquiring" ||
+    p.session?.status === "selecting" ||
+    p.session?.status === "awaiting_review";
+  const liveAcquireMs = acquisitionActive
+    ? Math.max(timing?.t_acquire_ms ?? 0, liveTotalMs - liveDetectMs)
+    : timing?.t_acquire_ms ?? 0;
+  const liveIndexMs =
+    p.session?.status === "indexing"
+      ? Math.max(
+          timing?.t_index_ms ?? 0,
+          liveTotalMs - liveDetectMs - liveAcquireMs,
+        )
+      : timing?.t_index_ms ?? 0;
+  const committedAnalyzeMs = Math.max(
+    timing?.t_analyze_ms ?? 0,
+    progress?.live_analysis_ms ?? 0,
+  );
+  const liveAnalyzeMs =
+    p.session?.status === "analyzing"
+      ? Math.max(
+          committedAnalyzeMs,
+          liveTotalMs - liveDetectMs - liveAcquireMs - liveIndexMs,
+        )
+      : committedAnalyzeMs;
+  const inventoried = Math.max(
+    progress?.files_listed ?? 0,
+    progress?.crawl_discovered ?? 0,
+    progress?.preprocessing_total ?? 0,
+    progress?.selection_evaluated ?? 0,
+  );
+  const transferred = Math.max(
+    progress?.files_pulled ?? 0,
+    progress?.transfer_completed ?? 0,
+  );
+  const transferTotal = Math.max(
+    progress?.transfer_artifacts ?? 0,
+    progress?.transfer_records ?? 0,
+  );
+  const ocrProcessed =
+    progress?.preprocessing_preprocessor_totals?.ocr?.processed ?? 0;
 
   return (
     <div className="grid-2">
@@ -171,8 +237,9 @@ export function OperatorPage(p: Props) {
           <div className="standby">
             <p className="standby-title">Pipeline siap</p>
             <p className="standby-copy">
-              Pilih perangkat live atau unggah ZIP dump, lalu jalankan. Alur: Deteksi/Unggah →
-              Akuisisi → Indeks → Analisa → Temuan.
+              Pilih perangkat live atau unggah ZIP dump, lalu jalankan. Live Android otomatis
+              build + pasang APK agent terbaru. Alur: Deteksi/Unggah → Akuisisi → Indeks →
+              Analisa → Temuan.
             </p>
             <PipelineTrack />
           </div>
@@ -206,8 +273,12 @@ export function OperatorPage(p: Props) {
               <div>
                 Masuk
                 <strong>
-                  {progress?.files_pulled ?? 0}
-                  {progress?.files_listed ? ` / ${progress.files_listed}` : ""}
+                  {transferred}
+                  {transferTotal
+                    ? ` / ${transferTotal}`
+                    : inventoried
+                      ? ` / ${inventoried}`
+                      : ""}
                 </strong>
               </div>
               <div>
@@ -220,7 +291,7 @@ export function OperatorPage(p: Props) {
               </div>
               <div>
                 Total waktu
-                <strong>{ms(timing?.t_total_ms ?? 0)}</strong>
+                <strong>{ms(liveTotalMs)}</strong>
               </div>
             </div>
 
@@ -229,19 +300,19 @@ export function OperatorPage(p: Props) {
               <div className="timing">
                 <div>
                   Deteksi
-                  <strong>{ms(timing?.t_detect_ms ?? 0)}</strong>
+                  <strong>{ms(liveDetectMs)}</strong>
                 </div>
                 <div>
                   Akuisisi
-                  <strong>{ms(timing?.t_acquire_ms ?? 0)}</strong>
+                  <strong>{ms(liveAcquireMs)}</strong>
                 </div>
                 <div>
                   Indeks
-                  <strong>{ms(timing?.t_index_ms ?? 0)}</strong>
+                  <strong>{ms(liveIndexMs)}</strong>
                 </div>
                 <div>
                   Analisa
-                  <strong>{ms(timing?.t_analyze_ms ?? 0)}</strong>
+                  <strong>{ms(liveAnalyzeMs)}</strong>
                 </div>
                 <div>
                   L3 / L4
@@ -251,7 +322,12 @@ export function OperatorPage(p: Props) {
                 </div>
                 <div>
                   OCR
-                  <strong>{progress?.hits_ocr ?? 0}</strong>
+                  <strong>
+                    {ocrProcessed || progress?.hits_ocr || 0}
+                    {ocrProcessed && (progress?.hits_ocr ?? 0) > 0
+                      ? ` · ${progress?.hits_ocr} hit`
+                      : ""}
+                  </strong>
                 </div>
                 <div>
                   ASR

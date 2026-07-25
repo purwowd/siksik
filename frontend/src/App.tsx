@@ -13,6 +13,7 @@ import {
   type Finding,
   type Paginated,
   type ReviewStatus,
+  type SessionReport,
   type SessionSummary,
   type VisionHealth,
 } from "./api";
@@ -74,6 +75,7 @@ export default function App() {
   const [findingsPage, setFindingsPage] = useState(1);
   const [reviewFilter, setReviewFilter] = useState<"all" | ReviewStatus>("all");
   const [reportFindings, setReportFindings] = useState<Paginated<Finding> | null>(null);
+  const [reportData, setReportData] = useState<SessionReport | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [reportPage, setReportPage] = useState(1);
   const [reviewSummary, setReviewSummary] = useState<ReviewSummary | null>(null);
@@ -83,7 +85,7 @@ export default function App() {
   const [dashFindingsPage, setDashFindingsPage] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const [globalPending, setGlobalPending] = useState(0);
+  const [, setGlobalPending] = useState(0);
   const [gpu, setGpu] = useState(false);
   const [toolchain, setToolchain] = useState<Record<string, boolean>>({});
   const [vision, setVision] = useState<VisionHealth>({});
@@ -100,6 +102,8 @@ export default function App() {
   const prevSessionStatusRef = useRef<string | null>(null);
   const completionToastIds = useRef<Set<string>>(new Set());
   const pollEpochRef = useRef(0);
+  const liveFindingsCountRef = useRef(0);
+  const liveReportRecordsRef = useRef(0);
   const toastTimers = useRef<Map<string, number>>(new Map());
   const intendedPathRef = useRef<string | null>(null);
   const urlFilterApplied = useRef(false);
@@ -144,6 +148,8 @@ export default function App() {
   // Reset tracking saat ganti sesi (hindari toast beruntun & status macet)
   useEffect(() => {
     prevSessionStatusRef.current = null;
+    liveFindingsCountRef.current = 0;
+    liveReportRecordsRef.current = 0;
     pollEpochRef.current += 1;
   }, [session?.id]);
 
@@ -381,7 +387,53 @@ export default function App() {
       try {
         const s = await api.session(sessionId);
         if (stopped || pollEpochRef.current !== epoch) return;
+        const nextFindingsCount = s.progress?.findings_count ?? 0;
+        const findingsChanged = nextFindingsCount > liveFindingsCountRef.current;
+        const nextReportRecords = Math.max(
+          s.progress?.transfer_records ?? 0,
+          s.progress?.files_pulled ?? 0,
+        );
+        const reportRecordsChanged = nextReportRecords > liveReportRecordsRef.current;
+        liveFindingsCountRef.current = nextFindingsCount;
+        liveReportRecordsRef.current = nextReportRecords;
         applyPolled(s);
+        if (
+          ACTIVE.has(s.status) &&
+          (findingsChanged || reportRecordsChanged) &&
+          can(auth, "findings:read")
+        ) {
+          if (tab === "findings") {
+            try {
+              const liveFindings = await api.findings(
+                s.id,
+                findingsPage,
+                DEFAULT_PAGE_SIZE,
+                reviewFilter === "all" ? undefined : { review_status: reviewFilter },
+              );
+              if (!stopped && pollEpochRef.current === epoch) {
+                setFindingsData(liveFindings);
+              }
+            } catch {
+              // Poll sesi berikutnya tetap berjalan saat refresh daftar temuan gagal sementara.
+            }
+          }
+          if (tab === "report") {
+            try {
+              const [liveReportFindings, liveReport] = await Promise.all([
+                api.findings(s.id, reportPage, DEFAULT_PAGE_SIZE),
+                api.report(s.id),
+              ]);
+              if (!stopped && pollEpochRef.current === epoch) {
+                setReportFindings(liveReportFindings);
+                setReportData(liveReport);
+              }
+            } catch {
+              // Telemetri sesi tetap berjalan saat data laporan belum siap sementara.
+            }
+          }
+          void refreshReviewSummary(s.id).catch(() => undefined);
+          void refreshGlobalPending();
+        }
         if (!ACTIVE.has(s.status)) {
           stopped = true;
           const f = await api.findings(
@@ -393,6 +445,16 @@ export default function App() {
           if (pollEpochRef.current !== epoch) return;
           setFindingsData(f);
           setFindingsPage(1);
+          if (tab === "report") {
+            const [completedReportFindings, completedReport] = await Promise.all([
+              api.findings(s.id, 1, DEFAULT_PAGE_SIZE),
+              api.report(s.id),
+            ]);
+            if (pollEpochRef.current !== epoch) return;
+            setReportFindings(completedReportFindings);
+            setReportData(completedReport);
+            setReportPage(1);
+          }
           void refreshSessionList({ soft: true });
           void refreshReviewSummary(s.id);
           void refreshGlobalPending();
@@ -414,7 +476,18 @@ export default function App() {
         pollEpochRef.current += 1;
       }
     };
-  }, [session?.id, session?.status, reviewFilter, refreshSessionList, refreshReviewSummary, refreshGlobalPending]);
+  }, [
+    session?.id,
+    session?.status,
+    auth,
+    tab,
+    findingsPage,
+    reportPage,
+    reviewFilter,
+    refreshSessionList,
+    refreshReviewSummary,
+    refreshGlobalPending,
+  ]);
 
   useEffect(() => {
     if (tab !== "dashboard") return;
@@ -423,7 +496,15 @@ export default function App() {
     Promise.all([
       api.dashboard(session?.id),
       api.sessions(dashSessionsPage, DEFAULT_PAGE_SIZE),
-      api.findings(undefined, dashFindingsPage, DEFAULT_PAGE_SIZE),
+      session?.id
+        ? api.findings(session.id, dashFindingsPage, DEFAULT_PAGE_SIZE)
+        : Promise.resolve({
+            items: [],
+            total: 0,
+            page: dashFindingsPage,
+            page_size: DEFAULT_PAGE_SIZE,
+            pages: 0,
+          }),
     ])
       .then(([d, sessionsRes, findingsRes]) => {
         if (cancelled) return;
@@ -506,6 +587,7 @@ export default function App() {
   useEffect(() => {
     setFindingsData(null);
     setReportFindings(null);
+    setReportData(null);
   }, [session?.id]);
 
   useEffect(() => {
@@ -513,11 +595,14 @@ export default function App() {
     let cancelled = false;
     setReportLoading(true);
 
-    api
-      .findings(session.id, reportPage, DEFAULT_PAGE_SIZE)
-      .then((data) => {
+    Promise.all([
+      api.findings(session.id, reportPage, DEFAULT_PAGE_SIZE),
+      api.report(session.id),
+    ])
+      .then(([findings, report]) => {
         if (cancelled) return;
-        setReportFindings(data);
+        setReportFindings(findings);
+        setReportData(report);
       })
       .catch((e) => {
         if (!cancelled) setError(String(e.message || e));
@@ -793,6 +878,7 @@ export default function App() {
     setSession(null);
     setFindingsData(null);
     setReportFindings(null);
+    setReportData(null);
     setReviewSummary(null);
     setError(null);
     navigate("/");
@@ -869,9 +955,9 @@ export default function App() {
               className={({ isActive }) => (isActive ? "active" : "")}
             >
               {t.label}
-              {t.id === "findings" && globalPending > 0 && (
-                <span className="tab-badge" aria-label={`${globalPending} temuan pending`}>
-                  {globalPending}
+              {t.id === "findings" && session && (reviewSummary?.pending ?? 0) > 0 && (
+                <span className="tab-badge" aria-label={`${reviewSummary?.pending} temuan pending`}>
+                  {reviewSummary?.pending}
                 </span>
               )}
             </NavLink>
@@ -994,6 +1080,7 @@ export default function App() {
                 sessionsLoading={sessionsLoading && sessionList.length === 0}
                 onPickSession={(id) => void onPickSession(id)}
                 reportFindings={reportFindings}
+                reportData={reportData}
                 reportLoading={reportLoading}
                 reviewSummary={reviewSummary}
                 setReportPage={setReportPage}

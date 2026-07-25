@@ -10,7 +10,14 @@ import time
 import uuid
 from pathlib import Path
 
+from app.acquisition.adb import AsyncAdbTransport
+from app.acquisition.contracts import AcquisitionContext, UploadedArchive
+from app.acquisition.errors import AcquisitionError, ErrorCategory
+from app.acquisition.file_identity import stable_file_id
+from app.acquisition.process import run_process
+from app.acquisition.providers import AcquisitionProviderRegistry
 from app.core.config import settings
+from app.core.request_context import current_request_id
 from app.core.db import db
 from app.models.schemas import (
     AcquisitionMode,
@@ -59,25 +66,37 @@ def _is_junk_media_path(path_str: str) -> bool:
 
 async def _run(cmd: list[str], timeout: float = 30.0) -> tuple[int, str, str]:
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        result = await run_process(
+            cmd,
+            timeout=timeout,
+            check=False,
+            output_limit_bytes=1024 * 1024,
+            operation="acquisition_dependency",
         )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return proc.returncode or 0, out.decode(errors="ignore"), err.decode(errors="ignore")
-    except FileNotFoundError:
-        return 127, "", f"command not found: {cmd[0]}"
-    except asyncio.TimeoutError:
-        return 124, "", "timeout"
+        return result.returncode, result.stdout, result.stderr
+    except AcquisitionError as exc:
+        code = 124 if exc.category == ErrorCategory.ADB_TIMEOUT else 127
+        return code, "", exc.public_message
 
 
 async def toolchain_status() -> dict:
-    adb_code, _, _ = await _run(["adb", "version"], timeout=3)
+    try:
+        adb_result = await AsyncAdbTransport(
+            settings.adb_path,
+            timeout_seconds=3,
+        ).run(
+            None,
+            ["version"],
+            operation="adb_version_probe",
+            check=False,
+        )
+        adb_ready = adb_result.returncode == 0
+    except AcquisitionError:
+        adb_ready = False
     idevice_code, _, _ = await _run(["idevice_id", "-l"], timeout=3)
     backup_code, _, _ = await _run(["idevicebackup2", "-h"], timeout=3)
     return {
-        "adb": adb_code == 0,
+        "adb": adb_ready,
         "idevice_id": idevice_code == 0,
         "idevicebackup2": backup_code in (0, 1),  # help often exits 1
     }
@@ -86,31 +105,95 @@ async def toolchain_status() -> dict:
 async def detect_devices(*, include_simulators: bool = True) -> list[DeviceInfo]:
     devices: list[DeviceInfo] = []
 
-    code, out, _ = await _run(["adb", "devices", "-l"], timeout=5)
-    if code == 0:
-        for line in out.strip().splitlines()[1:]:
-            parts = line.split()
-            if len(parts) >= 2 and parts[1] == "device":
-                serial = parts[0]
-                model = "Android"
-                for p in parts[2:]:
-                    if p.startswith("model:"):
-                        model = p.split(":", 1)[1].replace("_", " ")
-                ver_code, ver_out, _ = await _run(
-                    ["adb", "-s", serial, "shell", "getprop", "ro.build.version.release"],
-                    timeout=5,
-                )
-                os_version = ver_out.strip() if ver_code == 0 and ver_out.strip() else "unknown"
-                devices.append(
-                    DeviceInfo(
-                        device_id=serial,
-                        device_type=DeviceType.ANDROID,
-                        label=f"{model} ({serial[:8]})",
-                        os_version=os_version,
-                        connected=True,
-                        simulated=False,
+    try:
+        from app.acquisition.install_policy import oem_install_guidance
+
+        transport = AsyncAdbTransport(
+            settings.adb_path,
+            timeout_seconds=min(settings.adb_command_timeout_s, 5.0),
+        )
+        android_devices = await transport.list_devices()
+        for item in android_devices:
+            if item.state != "device":
+                continue
+            model = (item.model or "Android").replace("_", " ")
+            os_version = "unknown"
+            manufacturer: str | None = None
+            api_level: int | None = None
+            unlocked: bool | None = None
+            install_hint: str | None = None
+            try:
+                os_version = await transport.getprop(item.serial, "ro.build.version.release") or "unknown"
+            except AcquisitionError:
+                pass
+            try:
+                manufacturer = await transport.getprop(item.serial, "ro.product.manufacturer")
+            except AcquisitionError:
+                pass
+            try:
+                brand = await transport.getprop(item.serial, "ro.product.brand")
+            except AcquisitionError:
+                brand = None
+            try:
+                sdk = await transport.getprop(item.serial, "ro.build.version.sdk")
+                if sdk and sdk.isdigit():
+                    api_level = int(sdk)
+            except AcquisitionError:
+                pass
+            try:
+                readiness = await transport.device_readiness(item.serial)
+                unlocked = readiness.unlocked
+            except AcquisitionError:
+                pass
+            install_hint = oem_install_guidance(manufacturer=manufacturer, brand=brand)
+            agent_state: str | None = None
+            agent_version: str | None = None
+            agent_error_category: str | None = None
+            automation_state: str | None = None
+            if settings.android_agent_enabled:
+                try:
+                    package = await transport.inspect_package(
+                        item.serial,
+                        settings.android_agent_package,
                     )
+                    agent_state = "installed" if package.installed else "not_installed"
+                    agent_version = package.version_name
+                except AcquisitionError as exc:
+                    agent_state = "unknown"
+                    agent_error_category = exc.category.value
+                try:
+                    automation = await transport.inspect_package(
+                        item.serial,
+                        settings.android_agent_automation_package,
+                    )
+                    automation_state = (
+                        "installed" if automation.installed else "not_installed"
+                    )
+                except AcquisitionError:
+                    automation_state = "unknown"
+            lock_note = ""
+            if unlocked is False:
+                lock_note = " · terkunci"
+            devices.append(
+                DeviceInfo(
+                    device_id=item.serial,
+                    device_type=DeviceType.ANDROID,
+                    label=f"{model} · Android {os_version}{lock_note} ({item.serial[:8]})",
+                    os_version=os_version or "unknown",
+                    connected=True,
+                    simulated=False,
+                    agent_state=agent_state,
+                    agent_version=agent_version,
+                    agent_error_category=agent_error_category,
+                    manufacturer=manufacturer,
+                    api_level=api_level,
+                    unlocked=unlocked,
+                    install_hint=install_hint,
+                    automation_state=automation_state,
                 )
+            )
+    except AcquisitionError:
+        pass
 
     code, out, _ = await _run(["idevice_id", "-l"], timeout=5)
     if code == 0:
@@ -181,6 +264,8 @@ def _classify_source(path_str: str) -> str:
 
 
 def guess_mime(path: Path) -> str:
+    if path.name.endswith(".siksik-record.json"):
+        return "application/vnd.siksik.crawl-record+json"
     mime, _ = mimetypes.guess_type(str(path))
     if mime:
         return mime
@@ -301,31 +386,39 @@ async def acquire_simulated(
     return staging, pulled, (time.perf_counter() - t0) * 1000, "simulated"
 
 
-async def _adb_list_files(device_id: str, remote_dirs: list[str], limit: int) -> list[str]:
-    """List files via ADB, newest first, prefer relevant extensions."""
+async def _adb_list_files(
+    device_id: str,
+    remote_dirs: list[str],
+    limit: int,
+    transport: AsyncAdbTransport | None = None,
+) -> list[str]:
+    """List files via ADB and prioritize relevant paths and extensions."""
     scored: list[tuple[float, str]] = []
     prefer = tuple(settings.android_prefer_ext)
+    adb = transport or AsyncAdbTransport(
+        settings.adb_path,
+        timeout_seconds=settings.adb_command_timeout_s,
+    )
 
     for remote in remote_dirs:
-        # Newest first using epoch mtime when toybox/find supports -printf; fallback plain find
-        code, out, _ = await _run(
-            [
-                "adb",
-                "-s",
-                device_id,
-                "shell",
-                (
-                    f'test -d "{remote}" && '
-                    f'(find "{remote}" -type f -printf "%T@ %p\\n" 2>/dev/null '
-                    f'|| find "{remote}" -type f -exec stat -c "%Y %n" {{}} + 2>/dev/null '
-                    f'|| find "{remote}" -type f 2>/dev/null) | head -n {max(limit * 3, 100)}'
-                ),
-            ],
+        result = await adb.run(
+            device_id,
+            ["shell", "find", remote, "-type", "f", "-printf", "%T@ %p\\n"],
+            operation="legacy_file_listing",
             timeout=90,
+            check=False,
         )
-        if code != 0 or not out.strip():
+        if result.returncode != 0:
+            result = await adb.run(
+                device_id,
+                ["shell", "find", remote, "-type", "f"],
+                operation="legacy_file_listing_fallback",
+                timeout=90,
+                check=False,
+            )
+        if result.returncode != 0 or not result.stdout.strip():
             continue
-        for line in out.splitlines():
+        for line in result.stdout.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -384,12 +477,17 @@ async def acquire_android_adb(
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
+    transport = AsyncAdbTransport(
+        settings.adb_path,
+        timeout_seconds=settings.adb_command_timeout_s,
+    )
+    await transport.select_device(device_id)
 
     paths = settings.android_paths_quick if mode == AcquisitionMode.QUICK else settings.android_paths_full
     limit = settings.adb_max_files_quick if mode == AcquisitionMode.QUICK else settings.adb_max_files_full
 
     await on_progress(SessionStatus.ACQUIRING, 8, f"Listing file via ADB ({device_id})…", acquisition_method="adb")
-    remote_files = await _adb_list_files(device_id, paths, limit)
+    remote_files = await _adb_list_files(device_id, paths, limit, transport)
     listed = len(remote_files)
     if listed == 0:
         raise RuntimeError(
@@ -408,11 +506,14 @@ async def acquire_android_adb(
         if local_path.exists():
             local_path = local_dir / f"{idx}_{name}"
 
-        code, _, err = await _run(
-            ["adb", "-s", device_id, "pull", remote, str(local_path)],
+        result = await transport.run(
+            device_id,
+            ["pull", remote, str(local_path)],
+            operation="legacy_file_pull",
             timeout=float(settings.adb_pull_timeout_s),
+            check=False,
         )
-        if code == 0 and local_path.exists():
+        if result.returncode == 0 and local_path.exists():
             # skip oversized
             if local_path.stat().st_size > settings.max_file_size_mb * 1024 * 1024:
                 local_path.unlink(missing_ok=True)
@@ -431,7 +532,7 @@ async def acquire_android_adb(
             )
 
     if pulled == 0:
-        raise RuntimeError(f"ADB pull gagal untuk semua kandidat file ({listed} listed). Detail: {err[-200:] if err else 'n/a'}")
+        raise RuntimeError(f"ADB pull gagal untuk semua kandidat file ({listed} kandidat).")
 
     return staging, pulled, (time.perf_counter() - t0) * 1000, "adb"
 
@@ -464,12 +565,12 @@ async def acquire_ios_libimobiledevice(
     backup_dir = staging / "_backup"
     backup_dir.mkdir(parents=True, exist_ok=True)
 
-    code, out, err = await _run(
+    code, _out, _err = await _run(
         ["idevicebackup2", "-u", device_id, "backup", str(backup_dir)],
         timeout=900,
     )
     if code != 0:
-        raise RuntimeError(f"idevicebackup2 gagal: {(err or out)[:400]}")
+        raise RuntimeError("idevicebackup2 gagal menjalankan backup perangkat.")
 
     # Copy interesting extensions out of backup tree into classified folders
     pulled = 0
@@ -477,7 +578,7 @@ async def acquire_ios_libimobiledevice(
         p
         for p in backup_dir.rglob("*")
         if p.is_file()
-        and p.suffix.lower() in (IMG_EXT | VID_EXT | {".heic"})
+        and p.suffix.lower() in (IMG_EXT | VID_EXT | DOC_EXT | TEXT_EXT | {".heic"})
         and p.suffix.lower() not in {".db", ".sqlite"}
     ]
     if mode == AcquisitionMode.QUICK:
@@ -508,7 +609,18 @@ async def acquire_ios_libimobiledevice(
             )
 
     if pulled == 0:
-        raise RuntimeError("Backup iOS berhasil tetapi tidak ada file terklasifikasi untuk dianalisis.")
+        # Unencrypted / modern iOS backups often have no gallery files with media
+        # extensions in the backup tree. Keep staging so additive iOS social UI
+        # (IG/X WDA) can still run; provider fails only if every source is empty.
+        await on_progress(
+            SessionStatus.ACQUIRING,
+            40,
+            "Backup iOS tanpa media terklasifikasi — lanjut sumber iOS lain bila diaktifkan",
+            files_listed=0,
+            files_pulled=0,
+            acquisition_method="idevicebackup2",
+        )
+        return staging, 0, (time.perf_counter() - t0) * 1000, "idevicebackup2"
 
     return staging, pulled, (time.perf_counter() - t0) * 1000, "idevicebackup2"
 
@@ -640,18 +752,58 @@ async def acquire_dispatch(
     scenario: Scenario,
     file_count: int,
     on_progress,
+    review_candidates: bool = False,
 ) -> tuple[Path, int, float, str]:
-    if simulated or device_id.startswith("sim-"):
-        return await acquire_simulated(session_id, device_id, mode, scenario, file_count, on_progress)
+    agent_runner = None
+    if settings.android_agent_enabled:
+        from app.acquisition.bootstrap import android_agent_runner
 
-    if device_type == DeviceType.ANDROID:
-        return await acquire_android_adb(session_id, device_id, mode, on_progress)
+        agent_runner = android_agent_runner
+    registry = AcquisitionProviderRegistry(
+        android_agent_enabled=settings.android_agent_enabled,
+        android_legacy_fallback=settings.android_legacy_fallback,
+        agent_runner=agent_runner,
+    )
+    result = await registry.acquire(
+        AcquisitionContext(
+            session_id=session_id,
+            device_id=device_id,
+            device_type=device_type,
+            mode=mode,
+            scenario=scenario,
+            file_count=file_count,
+            on_progress=on_progress,
+            simulated=simulated,
+            request_id=current_request_id(),
+            review_candidates=review_candidates,
+        )
+    )
+    return result.as_legacy_tuple()
 
-    if device_type == DeviceType.IOS:
-        return await acquire_ios_libimobiledevice(session_id, device_id, mode, on_progress)
 
-    # fallback
-    return await acquire_simulated(session_id, device_id, mode, scenario, file_count, on_progress)
+async def acquire_zip_dispatch(
+    *,
+    session_id: str,
+    zip_bytes: bytes,
+    mode: AcquisitionMode,
+    original_name: str,
+    on_progress,
+) -> tuple[Path, int, float, str]:
+    registry = AcquisitionProviderRegistry()
+    result = await registry.acquire(
+        AcquisitionContext(
+            session_id=session_id,
+            device_id=f"zip:{original_name[:40]}",
+            device_type=DeviceType.ANDROID,
+            mode=mode,
+            scenario=Scenario.LULUS,
+            file_count=0,
+            on_progress=on_progress,
+            archive=UploadedArchive(content=zip_bytes, original_name=original_name),
+            request_id=current_request_id(),
+        )
+    )
+    return result.as_legacy_tuple()
 
 
 async def hash_file(path: Path) -> str:
@@ -677,25 +829,122 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
         if p.is_file()
         and not p.name.endswith(".risk")
         and "_backup" not in p.parts
+        and not any(part.startswith("_") for part in p.parts)
         and not _is_junk_media_path(str(p))
     ]
     total = len(paths)
     sem = asyncio.Semaphore(settings.worker_concurrency)
+    crawl_artifact_rows = await db.fetchall(
+        "SELECT a.record_id, a.source_kind, a.role, a.mime_type, a.relative_path, "
+        "a.sha256, "
+        "r.social_scope, r.source_app, r.canonical_json FROM crawl_artifacts a "
+        "JOIN crawl_records r ON r.crawl_id = a.crawl_id AND r.record_id = a.record_id "
+        "WHERE a.session_id = ? AND a.verified = 1",
+        (session_id,),
+    )
+    crawl_artifacts = {row["relative_path"]: row for row in crawl_artifact_rows}
+    existing_file_rows = await db.fetchall(
+        "SELECT id, path FROM files WHERE session_id = ?",
+        (session_id,),
+    )
+    existing_file_ids = {str(row["path"]): str(row["id"]) for row in existing_file_rows}
+    crawl_capture_meta: dict[str, dict[str, object]] = {}
+    for row in crawl_artifact_rows:
+        record_id = str(row["record_id"])
+        if record_id in crawl_capture_meta:
+            continue
+        try:
+            payload = json.loads(row["canonical_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("canonical crawl metadata is invalid") from exc
+        captured_at = (
+            payload.get("source_created_at")
+            or payload.get("source_modified_at")
+            or payload.get("observed_at")
+        )
+        captured_year = None
+        if isinstance(captured_at, str) and len(captured_at) >= 4:
+            try:
+                year = int(captured_at[:4])
+                captured_year = year if 1970 <= year <= 9999 else None
+            except ValueError:
+                captured_year = None
+        crawl_capture_meta[record_id] = {
+            "captured_at": captured_at if isinstance(captured_at, str) else None,
+            "captured_year": captured_year,
+            "date_source": "android_agent_canonical",
+        }
 
     async def one(p: Path) -> tuple:
         async with sem:
-            from app.services.media_dates import capture_meta
-
             rel = str(p.relative_to(staging))
-            source = Path(rel).parts[0] if Path(rel).parts else "other"
-            digest = await hash_file(p)
-            meta = {"ext": p.suffix.lower(), **capture_meta(p)}
+            artifact = crawl_artifacts.get(rel)
+            source = (
+                artifact["source_kind"]
+                if artifact is not None
+                else Path(rel).parts[0] if Path(rel).parts else "other"
+            )
+            digest = artifact["sha256"] if artifact is not None else await hash_file(p)
+            mime = artifact["mime_type"] if artifact is not None else guess_mime(p)
+            if artifact is not None:
+                capture = crawl_capture_meta[str(artifact["record_id"])]
+            else:
+                from app.services.media_dates import capture_meta
+
+                capture = capture_meta(p)
+            meta = {"ext": p.suffix.lower(), **capture}
+            if artifact is not None:
+                meta.update(
+                    {
+                        "acquisition_method": "android_agent_direct_manifest",
+                        "crawl_record_id": artifact["record_id"],
+                        "crawl_artifact_role": artifact["role"],
+                        "social_scope": artifact["social_scope"],
+                        "source_app": artifact["source_app"],
+                    }
+                )
+            if mime == "application/vnd.siksik.crawl-record+json":
+                from app.acquisition.agent_client import InventoryRecordV1
+
+                try:
+                    record = InventoryRecordV1.model_validate_json(p.read_bytes())
+                except (OSError, ValueError) as exc:
+                    raise RuntimeError("canonical crawl record is invalid") from exc
+                meta.update(
+                    {
+                        "crawl_id": record.crawl_id,
+                        "record_id": record.record_id,
+                        "source_kind": record.source_kind,
+                        "source_app": record.source_app,
+                        "observed_at": record.observed_at,
+                        "source_created_at": record.source_created_at,
+                        "source_modified_at": record.source_modified_at,
+                        "captured_at": record.source_created_at or record.observed_at,
+                        "captured_year": int(
+                            (record.source_created_at or record.observed_at)[:4]
+                        ),
+                        "provenance": record.provenance.model_dump(mode="json"),
+                        "social_scope": (
+                            record.metadata.social_scope
+                            if record.source_kind == "visible_ui"
+                            else None
+                        ),
+                    }
+                )
+            file_id = (
+                existing_file_ids.get(rel)
+                or (
+                    stable_file_id(session_id, rel)
+                    if artifact is not None
+                    else str(uuid.uuid4())
+                )
+            )
             return (
-                str(uuid.uuid4()),
+                file_id,
                 session_id,
                 source,
                 rel,
-                guess_mime(p),
+                mime,
                 p.stat().st_size,
                 digest,
                 "pulled",
@@ -725,6 +974,14 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
             """
             INSERT INTO files (id, session_id, source, path, mime, size_bytes, sha256, pull_status, analyzed, meta_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                source = excluded.source,
+                path = excluded.path,
+                mime = excluded.mime,
+                size_bytes = excluded.size_bytes,
+                sha256 = excluded.sha256,
+                pull_status = excluded.pull_status,
+                meta_json = excluded.meta_json
             """,
             files,
         )
