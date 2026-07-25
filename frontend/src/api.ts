@@ -5,7 +5,11 @@ export type Role = "operator" | "analis" | "pimpinan" | "admin";
 export type SessionStatus =
   | "pending"
   | "detecting"
+  | "preparing_agent"
+  | "awaiting_access"
   | "acquiring"
+  | "selecting"
+  | "awaiting_review"
   | "indexing"
   | "analyzing"
   | "completed"
@@ -40,6 +44,7 @@ export interface SessionProgress {
   files_analyzed: number;
   findings_count: number;
   throughput_files_per_sec: number;
+  live_analysis_ms?: number;
   acquisition_method?: string | null;
   hits_l1?: number;
   hits_l2?: number;
@@ -50,6 +55,31 @@ export interface SessionProgress {
   authorized_by?: string | null;
   authorized_at?: string | null;
   authorize_note?: string | null;
+  crawl_discovered?: number;
+  crawl_duplicates?: number;
+  preprocessing_state?: string;
+  preprocessing_total?: number;
+  preprocessing_completed?: number;
+  preprocessing_skipped?: number;
+  preprocessing_truncated?: number;
+  preprocessing_failed?: number;
+  preprocessing_preprocessor_totals?: Record<
+    string,
+    {
+      attempted?: number;
+      processed?: number;
+      skipped?: number;
+      truncated?: number;
+      failed?: number;
+      cancelled?: number;
+    }
+  >;
+  selection_evaluated?: number;
+  selection_candidates?: number;
+  selection_selected?: number;
+  transfer_completed?: number;
+  transfer_records?: number;
+  transfer_artifacts?: number;
 }
 
 export interface TimingBreakdown {
@@ -74,6 +104,7 @@ export interface SessionSummary {
   created_at: string;
   updated_at: string;
   error: string | null;
+  review_candidates?: boolean;
 }
 
 export interface Finding {
@@ -91,6 +122,8 @@ export interface Finding {
   created_at: string;
   media_year?: number | null;
   media_captured_at?: string | null;
+  preview_path?: string | null;
+  preview_text?: string | null;
 }
 
 export interface NamedCount {
@@ -153,6 +186,40 @@ export interface Paginated<T> {
   page_size: number;
   total: number;
   pages: number;
+}
+
+export interface SocialReportItem {
+  record_id: string;
+  scope: string;
+  scope_label: string;
+  observed_at?: string | null;
+  preview_text?: string | null;
+}
+
+export interface SocialReportAccount {
+  platform: string;
+  source_app: string;
+  username?: string | null;
+  display_name?: string | null;
+  bio?: string | null;
+  profile_links: string[];
+  profile_metrics: {
+    posts?: number | null;
+    followers?: number | null;
+    following?: number | null;
+  };
+  scope_counts: Record<string, number>;
+  items: SocialReportItem[];
+}
+
+export interface SessionReport {
+  generated_at: string;
+  social_accounts: SocialReportAccount[];
+  social_data: {
+    total_items: number;
+    truncated: boolean;
+    maximum_items: number;
+  };
 }
 
 export interface VisionHealth {
@@ -349,6 +416,8 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ review_status }),
     }),
+  report: (sessionId: string) =>
+    req<SessionReport>(`/sessions/${sessionId}/report?format=json`),
   /** Fetch report with Authorization header and open blob URL (no token in query). */
   openReport: async (sessionId: string, format: "json" | "html" = "html") => {
     const headers: Record<string, string> = {};

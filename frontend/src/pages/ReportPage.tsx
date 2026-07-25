@@ -1,4 +1,10 @@
-import type { AuthSession, Finding, Paginated, SessionSummary } from "../api";
+import type {
+  AuthSession,
+  Finding,
+  Paginated,
+  SessionReport,
+  SessionSummary,
+} from "../api";
 import { api, can } from "../api";
 import { FindingOriginBadge } from "../components/FindingOriginBadge";
 import { PanelTitle } from "../components/PanelTitle";
@@ -14,6 +20,12 @@ const REVIEW_LABEL = {
   rejected: "Ditolak",
 } as const;
 
+const PROFILE_METRIC_LABEL: Record<string, string> = {
+  posts: "Post / tweet",
+  followers: "Followers",
+  following: "Following",
+};
+
 type ReviewSummary = {
   pending: number;
   confirmed: number;
@@ -27,6 +39,7 @@ type Props = {
   sessionList: SessionSummary[];
   sessionsLoading: boolean;
   reportFindings: Paginated<Finding> | null;
+  reportData: SessionReport | null;
   reportLoading: boolean;
   reviewSummary: ReviewSummary | null;
   setReportPage: (p: number) => void;
@@ -45,6 +58,7 @@ export function ReportPage({
   sessionList,
   sessionsLoading,
   reportFindings,
+  reportData,
   reportLoading,
   reviewSummary,
   setReportPage,
@@ -189,7 +203,97 @@ export function ReportPage({
           </aside>
 
           <div className="report-main">
-            <h3 className="dash-section-title">Ringkasan temuan</h3>
+            <h3 className="dash-section-title">Data akun &amp; sosial yang dikoleksi</h3>
+            <p className="dash-section-copy">
+              Username, bio, link profil, postingan, tweet, arsip, dan interaksi akun perangkat.
+              Bagian ini adalah data laporan, bukan temuan.
+            </p>
+            {reportLoading && !reportData ? (
+              <div className="empty">Memuat data sosial…</div>
+            ) : !reportData || reportData.social_accounts.length === 0 ? (
+              <div className="empty">Tidak ada data akun sosial terverifikasi</div>
+            ) : (
+              <div>
+                {reportData.social_accounts.map((account) => (
+                  <section className="result-stack" key={account.source_app}>
+                    <div className="result-stack-head">
+                      <h4 className="dash-section-title">{account.platform}</h4>
+                      <p className="dash-section-copy">
+                        {account.username
+                          ? `${account.display_name ? `${account.display_name} · ` : ""}@${account.username}`
+                          : "Username tidak terbaca"}
+                      </p>
+                    </div>
+                    <div className="report-meta">
+                      {Object.entries(account.profile_metrics ?? {})
+                        .filter(([, count]) => typeof count === "number")
+                        .map(([metric, count]) => (
+                          <div key={`profile-${metric}`}>
+                            <span className="report-meta-label">
+                              {PROFILE_METRIC_LABEL[metric] ?? metric}
+                            </span>
+                            <strong>{Number(count).toLocaleString("id-ID")}</strong>
+                          </div>
+                        ))}
+                    </div>
+                    <div className="authorize-meta">
+                      <span className="report-meta-label">Bio / profil terlihat</span>
+                      <p className="authorize-note">{account.bio || "—"}</p>
+                      <span className="report-meta-label">Link profil</span>
+                      {account.profile_links.length > 0 ? (
+                        account.profile_links.map((link) => (
+                          <span className="finding-path" key={link}>{link}</span>
+                        ))
+                      ) : (
+                        <span className="finding-path">—</span>
+                      )}
+                    </div>
+
+                    {account.items.length > 0 && (
+                      <>
+                        <div className="findings-desktop">
+                          <table className="table findings-table">
+                            <thead>
+                              <tr>
+                                <th>Jenis data</th>
+                                <th>Waktu</th>
+                                <th>Preview</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {account.items.map((item) => (
+                                <tr key={item.record_id}>
+                                  <td>{item.scope_label}</td>
+                                  <td>{item.observed_at || "—"}</td>
+                                  <td className="evidence-body">{item.preview_text || "—"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <div className="findings-cards report-cards">
+                          {account.items.map((item) => (
+                            <article className="finding-card" key={item.record_id}>
+                              <strong className="finding-label">{item.scope_label}</strong>
+                              <div className="finding-meta">{item.observed_at || "—"}</div>
+                              <div className="evidence-body">{item.preview_text || "—"}</div>
+                            </article>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </section>
+                ))}
+                {reportData.social_data.truncated && (
+                  <div className="empty">
+                    Tampilan dibatasi {reportData.social_data.maximum_items} item dari {" "}
+                    {reportData.social_data.total_items} data sosial.
+                  </div>
+                )}
+              </div>
+            )}
+
+            <h3 className="dash-section-title dash-section-spaced">Ringkasan temuan</h3>
             <p className="dash-section-copy">Daftar indikasi + status verifikasi analis.</p>
             {reportLoading && !reportFindings ? (
               <div className="empty">Memuat ringkasan temuan…</div>

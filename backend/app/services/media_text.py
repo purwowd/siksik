@@ -172,13 +172,21 @@ def analyze_video_enrichment(path: Path) -> list[dict]:
     n = max(3, int(settings.video_overlay_keyframes))
     frames = extract_video_keyframes(path, max_frames=n)
     try:
+        from app.models.schemas import AcquisitionMode
+        from app.services.hash_cache import get_analysis_mode
+
+        # QUICK + OCR flag: still skip per-keyframe EasyOCR (iOS .mov dumps lag hard).
+        # FULL keeps on-screen OCR when SADT_OCR_ENABLED / media_text on.
+        do_frame_ocr = bool(settings.media_text_enabled) or (
+            bool(settings.ocr_enabled) and get_analysis_mode() != AcquisitionMode.QUICK
+        )
         for fr in frames:
             for f in _analyze_pil_image(fr):
                 f["label"] = f"Video keyframe: {f['label']}"
                 f["layer_origin"] = Layer.L4.value
                 findings.append(f)
 
-            if settings.media_text_enabled or settings.ocr_enabled:
+            if do_frame_ocr:
                 for f in ocr_image_best_effort(fr, force=True):
                     f["label"] = f"Video on-screen {f['label']}"
                     f["layer_origin"] = Layer.L4.value

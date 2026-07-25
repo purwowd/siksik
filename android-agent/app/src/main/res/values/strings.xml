@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">SIKSIK Android Agent</string>
+    <string name="inactive_session">Tidak ada sesi SIKSIK aktif.</string>
+    <string name="active_session">Sesi SIKSIK aktif. Konfirmasi hanya dialog keamanan Android yang tampil.</string>
+    <string name="invalid_bootstrap">Data bootstrap tidak valid atau sudah kedaluwarsa.</string>
+    <string name="permission_requested">Permintaan akses diterima.</string>
+    <string name="permission_waiting">Konfirmasi akses pada dialog Android.</string>
+    <string name="permission_approved">Akses disetujui. Proses dapat dilanjutkan.</string>
+    <string name="permission_denied">Akses tidak disetujui.</string>
+    <string name="permission_cancelled">Permintaan akses dibatalkan.</string>
+    <string name="permission_revoked">Akses tidak lagi tersedia.</string>
+    <string name="background_channel_name">Sesi perangkat SIKSIK</string>
+    <string name="background_notification_title">Sesi SIKSIK aktif</string>
+    <string name="background_notification_text">Koneksi lokal melalui ADB sedang berjalan.</string>
+    <string name="accessibility_service_name">Pengambilan UI terlihat SIKSIK</string>
+    <string name="accessibility_service_description">Mengambil teks yang terlihat hanya untuk target dan sesi pemeriksaan aktif.</string>
+    <string name="notification_listener_name">Pengambilan notifikasi SIKSIK</string>
+</resources>

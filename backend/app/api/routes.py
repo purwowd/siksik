@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from pathlib import Path
 
 from app.core.config import settings
 from app.core.db import db, utcnow
 from app.models.schemas import (
     AcquisitionMode,
+    AgentBootstrapRequest,
+    AgentBootstrapStatus,
     AuthorizeRequest,
     DashboardStats,
     DeviceInfo,
@@ -29,6 +31,7 @@ from app.models.schemas import (
     StartSessionRequest,
     YearRiskBucket,
 )
+from app.core.request_context import current_request_id
 from app.services.timeline import build_risk_timeline
 from app.services.acquisition import detect_devices, toolchain_status
 from app.services.auth import (
@@ -44,8 +47,19 @@ from app.services.auth import (
 from app.services.reports import build_session_report, report_to_html
 from app.services.sessions import sessions
 from app.services.vision import vision_status
+from app.selection.contracts import (
+    CandidateConfirmRequest,
+    CandidateConfirmationResponse,
+    CandidateListResponse,
+    CandidateMutationResponse,
+    CandidateOverrideRequest,
+    SelectionRunV1,
+    SourceKind,
+)
+from app.selection.service import selection_review_service
 
 router = APIRouter()
+MAX_FINDING_PREVIEW_CHARS = 320
 
 
 def _pages(total: int, page_size: int) -> int:
@@ -66,17 +80,65 @@ async def _paginate_findings(
     page: int,
     page_size: int,
 ) -> PaginatedFindings:
-    total_row = await db.fetchone(f"SELECT COUNT(*) AS c FROM findings {where_sql}", params)
+    total_row = await db.fetchone(f"SELECT COUNT(*) AS c FROM findings f {where_sql}", params)
     total = int(total_row["c"]) if total_row else 0
     pages = _pages(total, page_size)
     page = _clamp_page(page, pages)
     offset = (page - 1) * page_size
     rows = await db.fetchall(
-        f"SELECT * FROM findings {where_sql} {order_sql} LIMIT ? OFFSET ?",
+        f"""
+        SELECT
+            f.*,
+            CASE
+                WHEN fi.mime LIKE 'image/%' OR fi.mime LIKE 'video/%' THEN f.path
+                ELSE (
+                    SELECT ca.relative_path
+                    FROM crawl_artifacts ca
+                    WHERE ca.session_id = f.session_id
+                      AND ca.record_id = CASE
+                          WHEN json_valid(fi.meta_json)
+                          THEN json_extract(fi.meta_json, '$.crawl_record_id')
+                          ELSE NULL
+                      END
+                      AND ca.verified = 1
+                      AND ca.role IN ('source_binary', 'screenshot')
+                      AND (ca.mime_type LIKE 'image/%' OR ca.mime_type LIKE 'video/%')
+                    ORDER BY CASE ca.role WHEN 'source_binary' THEN 0 ELSE 1 END,
+                             ca.relative_path
+                    LIMIT 1
+                )
+            END AS resolved_preview_path,
+            (
+                SELECT cr.normalized_text
+                FROM crawl_records cr
+                WHERE cr.session_id = f.session_id
+                  AND cr.record_id = CASE
+                      WHEN json_valid(fi.meta_json)
+                      THEN json_extract(fi.meta_json, '$.crawl_record_id')
+                      ELSE NULL
+                  END
+                LIMIT 1
+            ) AS normalized_preview_text
+        FROM findings f
+        LEFT JOIN files fi ON fi.id = f.file_id
+        {where_sql} {order_sql} LIMIT ? OFFSET ?
+        """,
         (*params, page_size, offset),
     )
+    items: list[FindingOut] = []
+    for row in rows:
+        payload = dict(row)
+        preview_path = payload.pop("resolved_preview_path", None)
+        normalized_text = payload.pop("normalized_preview_text", None)
+        preview_source = normalized_text or payload.get("evidence") or ""
+        preview_text = " ".join(
+            str(preview_source).replace("\x00", " ").split(),
+        )[:MAX_FINDING_PREVIEW_CHARS]
+        payload["preview_path"] = preview_path
+        payload["preview_text"] = preview_text or None
+        items.append(FindingOut.model_validate(payload))
     return PaginatedFindings(
-        items=[FindingOut.model_validate(dict(r)) for r in rows],
+        items=items,
         page=page,
         page_size=page_size,
         total=total,
@@ -211,10 +273,37 @@ async def toolchain(_: Annotated[AuthUser, Depends(require_perm("health"))]) -> 
     return {"toolchain": tools, "gpu_available": _gpu_available()}
 
 
+@router.post("/agent/bootstrap", response_model=AgentBootstrapStatus)
+async def bootstrap_android_agent(
+    body: AgentBootstrapRequest,
+    _: Annotated[AuthUser, Depends(require_perm("sessions:start"))],
+) -> AgentBootstrapStatus:
+    try:
+        record = await sessions.retry_agent_bootstrap(body.session_id, body.device_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    from app.acquisition.bootstrap import agent_bootstrap
+
+    return AgentBootstrapStatus.model_validate(agent_bootstrap.public_status(record))
+
+
+@router.get("/agent/status", response_model=AgentBootstrapStatus)
+async def android_agent_status(
+    _: Annotated[AuthUser, Depends(require_perm("sessions:read"))],
+    device_id: str = Query(..., min_length=1, max_length=128),
+) -> AgentBootstrapStatus:
+    from app.acquisition.bootstrap import agent_bootstrap
+
+    record = await agent_bootstrap.status_for_device(device_id, current_request_id())
+    return AgentBootstrapStatus.model_validate(agent_bootstrap.public_status(record))
+
+
 @router.post("/sessions", response_model=SessionSummary)
 async def start_session(
     body: StartSessionRequest,
-    _: Annotated[AuthUser, Depends(require_perm("sessions:start"))],
+    user: Annotated[AuthUser, Depends(require_perm("sessions:start"))],
 ) -> SessionSummary:
     wants_sim = bool(body.force_simulated) or (body.device_id or "").startswith("sim-")
     if wants_sim and not settings.lab_demo_mode:
@@ -223,7 +312,7 @@ async def start_session(
             detail="Mode lab/simulator dinonaktifkan. Sambungkan perangkat live atau set SADT_LAB_DEMO_MODE=1.",
         )
     try:
-        data = await sessions.create_and_run(body)
+        data = await sessions.create_and_run(body, operator_id=user.id)
         return SessionSummary.model_validate(data)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -231,7 +320,7 @@ async def start_session(
 
 @router.post("/sessions/from-zip", response_model=SessionSummary)
 async def start_session_from_zip(
-    _: Annotated[AuthUser, Depends(require_perm("sessions:start"))],
+    user: Annotated[AuthUser, Depends(require_perm("sessions:start"))],
     file: UploadFile = File(..., description="ZIP hasil adb pull / dump media"),
     mode: AcquisitionMode = Form(AcquisitionMode.QUICK),
     label: str | None = Form(None),
@@ -254,6 +343,7 @@ async def start_session_from_zip(
             original_name=name,
             mode=mode,
             label=label,
+            operator_id=user.id,
         )
         return SessionSummary.model_validate(data)
     except RuntimeError as exc:
@@ -289,6 +379,82 @@ async def get_session(
         raise HTTPException(status_code=404, detail="Session not found") from exc
 
 
+@router.get("/sessions/{session_id}/crawl", response_model=SelectionRunV1)
+async def session_crawl_selection(
+    session_id: str,
+    user: Annotated[AuthUser, Depends(require_perm("candidates:review"))],
+) -> SelectionRunV1:
+    try:
+        return await selection_review_service.crawl(session_id, user)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Selection crawl not found") from exc
+
+
+@router.get("/sessions/{session_id}/candidates", response_model=CandidateListResponse)
+async def session_candidates(
+    session_id: str,
+    user: Annotated[AuthUser, Depends(require_perm("candidates:review"))],
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    source_kind: SourceKind | None = Query(None),
+    selected: bool | None = Query(None),
+    minimum_score: float | None = Query(None, ge=0, le=1),
+) -> CandidateListResponse:
+    try:
+        return await selection_review_service.list_candidates(
+            session_id,
+            user,
+            page=page,
+            page_size=page_size,
+            source_kind=source_kind,
+            selected=selected,
+            minimum_score=minimum_score,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Selection crawl not found") from exc
+
+
+@router.patch(
+    "/sessions/{session_id}/candidates/{record_id}",
+    response_model=CandidateMutationResponse,
+)
+async def update_session_candidate(
+    session_id: str,
+    record_id: str,
+    body: CandidateOverrideRequest,
+    user: Annotated[AuthUser, Depends(require_perm("candidates:review"))],
+) -> CandidateMutationResponse:
+    try:
+        return await selection_review_service.mutate_candidate(
+            session_id,
+            record_id,
+            user,
+            expected_revision=body.expected_revision,
+            override=body.override,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Selection candidate not found") from exc
+
+
+@router.post(
+    "/sessions/{session_id}/candidates/confirm",
+    response_model=CandidateConfirmationResponse,
+)
+async def confirm_session_candidates(
+    session_id: str,
+    body: CandidateConfirmRequest,
+    user: Annotated[AuthUser, Depends(require_perm("candidates:review"))],
+) -> CandidateConfirmationResponse:
+    try:
+        return await selection_review_service.confirm(
+            session_id,
+            user,
+            expected_revision=body.expected_revision,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Selection crawl not found") from exc
+
+
 @router.post("/sessions/{session_id}/cancel", response_model=SessionSummary)
 async def cancel_session(
     session_id: str,
@@ -310,16 +476,16 @@ async def session_findings(
 ) -> PaginatedFindings:
     if review_status:
         return await _paginate_findings(
-            where_sql="WHERE session_id = ? AND review_status = ?",
+            where_sql="WHERE f.session_id = ? AND f.review_status = ?",
             params=(session_id, review_status.value),
-            order_sql="ORDER BY confidence DESC",
+            order_sql="ORDER BY f.confidence DESC",
             page=page,
             page_size=page_size,
         )
     return await _paginate_findings(
-        where_sql="WHERE session_id = ?",
+        where_sql="WHERE f.session_id = ?",
         params=(session_id,),
-        order_sql="ORDER BY confidence DESC",
+        order_sql="ORDER BY f.confidence DESC",
         page=page,
         page_size=page_size,
     )
@@ -416,16 +582,16 @@ async def all_findings(
 ) -> PaginatedFindings:
     if session_id:
         return await _paginate_findings(
-            where_sql="WHERE session_id = ?",
+            where_sql="WHERE f.session_id = ?",
             params=(session_id,),
-            order_sql="ORDER BY created_at DESC",
+            order_sql="ORDER BY f.created_at DESC",
             page=page,
             page_size=page_size,
         )
     return await _paginate_findings(
         where_sql="",
         params=(),
-        order_sql="ORDER BY created_at DESC",
+        order_sql="ORDER BY f.created_at DESC",
         page=page,
         page_size=page_size,
     )
@@ -447,8 +613,16 @@ async def review_finding(
     from app.services.recommendation import apply_recommendation
 
     await apply_recommendation(str(row["session_id"]))
-    row = await db.fetchone("SELECT * FROM findings WHERE id = ?", (finding_id,))
-    return FindingOut.model_validate(dict(row))
+    refreshed = await _paginate_findings(
+        where_sql="WHERE f.id = ?",
+        params=(finding_id,),
+        order_sql="ORDER BY f.created_at DESC",
+        page=1,
+        page_size=1,
+    )
+    if not refreshed.items:
+        raise HTTPException(status_code=404, detail="Finding not found")
+    return refreshed.items[0]
 
 
 @router.get("/sessions/{session_id}/risk-timeline", response_model=RiskTimeline)
@@ -513,11 +687,22 @@ async def dashboard(
     active = await db.fetchone(
         """
         SELECT COUNT(*) AS c FROM sessions
-        WHERE status IN ('pending','detecting','acquiring','indexing','analyzing')
+        WHERE status IN (
+            'pending','detecting','preparing_agent','awaiting_access',
+            'acquiring','indexing','analyzing'
+        )
         """
     )
     findings = await db.fetchone("SELECT COUNT(*) AS c FROM findings")
-    pending = await db.fetchone("SELECT COUNT(*) AS c FROM findings WHERE review_status = 'pending'")
+    if session_id:
+        pending = await db.fetchone(
+            "SELECT COUNT(*) AS c FROM findings WHERE review_status = 'pending' AND session_id = ?",
+            (session_id,),
+        )
+    else:
+        pending = await db.fetchone(
+            "SELECT COUNT(*) AS c FROM findings WHERE review_status = 'pending'"
+        )
     confirmed = await db.fetchone(
         "SELECT COUNT(*) AS c FROM findings WHERE review_status = 'confirmed'"
     )

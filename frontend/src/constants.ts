@@ -5,7 +5,11 @@ import type { Tab } from "./types";
 export const ACTIVE = new Set([
   "pending",
   "detecting",
+  "preparing_agent",
+  "awaiting_access",
   "acquiring",
+  "selecting",
+  "awaiting_review",
   "indexing",
   "analyzing",
 ]);
@@ -26,7 +30,17 @@ export function isThreatRecommendation(rec?: string | null): boolean {
 
 export const PIPELINE = [
   { id: "detect", label: "Deteksi", match: ["pending", "detecting"] },
-  { id: "acquire", label: "Akuisisi", match: ["acquiring"] },
+  {
+    id: "acquire",
+    label: "Akuisisi",
+    match: [
+      "preparing_agent",
+      "awaiting_access",
+      "acquiring",
+      "selecting",
+      "awaiting_review",
+    ],
+  },
   { id: "index", label: "Indeks", match: ["indexing"] },
   { id: "analyze", label: "Analisa", match: ["analyzing"] },
   { id: "report", label: "Temuan", match: ["completed"] },
