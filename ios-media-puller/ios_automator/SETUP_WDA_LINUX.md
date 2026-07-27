@@ -12,7 +12,7 @@ Ini jalur **default** untuk develop di Linux. Tidak perlu Mac di tangan.
 
 Apple ID **gratis** = cert ~**7 hari**, max ~**3 app** sideload. Setelah expire: ulang sign/install (langkah 3).
 
-`WebDriverAgentRunner.ipa` (unsigned, ~7 MB) sudah ada di root repo — langsung pakai dari situ. Build ulang dari Actions hanya kalau WDA perlu update.
+IPA unsigned dibuild di GitHub Actions (macOS runner) dan di-download sebagai artifact — **tidak** di-commit ke git.
 
 ---
 
@@ -30,20 +30,17 @@ idevicepair pair       # kalau belum pair
 
 ---
 
-## 1. IPA (sudah di repo)
+## 1. IPA (dari GitHub Actions)
+
+1. Buka workflow di monorepo:  
+   https://github.com/purwowd/siksik/actions/workflows/build-wda.yml  
+2. Pakai run terbaru yang sukses, atau **Run workflow** (manual) di branch `main`
+3. Download artifact **`WebDriverAgentRunner-ipa`** → extract `WebDriverAgentRunner.ipa`
+4. Simpan lokal (contoh `ios-media-puller/WebDriverAgentRunner.ipa` atau `~/wda/`) — file ini di-gitignore
 
 ```bash
-# dari root repo
 ls -lh WebDriverAgentRunner.ipa
 ```
-
-Kalau mau rebuild (opsional):
-
-1. Buka run sukses:  
-   https://github.com/Alvincf10/ios-media-puller/actions/workflows/build-wda.yml  
-2. Download artifact **`WebDriverAgentRunner-ipa`** → extract  
-3. Ganti `WebDriverAgentRunner.ipa` di root repo, lalu commit
-
 ---
 
 ## 2. Pasang AltServer-Linux
