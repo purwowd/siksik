@@ -42,3 +42,4 @@ jobs:
         with:
           name: WebDriverAgentRunner-ipa
           path: build/Build/Products/Debug-iphoneos/WebDriverAgentRunner.ipa
+          retention-days: 90
