@@ -135,7 +135,9 @@ def test_android_transfer_source_does_not_create_archive_output() -> None:
         path
         for root in roots
         for path in root.rglob("*")
-        if path.is_file() and "transfer" in path.name.casefold()
+        if path.is_file()
+        and path.suffix in {".kt", ".py"}
+        and "transfer" in path.name.casefold()
     ]
     assert transfer_sources
     for path in transfer_sources:

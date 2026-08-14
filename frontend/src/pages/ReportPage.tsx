@@ -318,6 +318,9 @@ export function ReportPage({
                           <td className="finding-label">{f.label}</td>
                           <td>
                             <FindingOriginBadge layer={f.layer_origin} label={f.label} />
+                            <div className="finding-meta">
+                              {humanLabel("source", f.source)}
+                            </div>
                           </td>
                           <td>{(f.confidence * 100).toFixed(0)}%</td>
                           <td>
@@ -345,6 +348,7 @@ export function ReportPage({
                       <strong className="finding-label">{f.label}</strong>
                       <div className="finding-meta">
                         <FindingOriginBadge layer={f.layer_origin} label={f.label} />
+                        <span>· {humanLabel("source", f.source)}</span>
                         <span>· {(f.confidence * 100).toFixed(0)}%</span>
                         <span
                           className={`pill ${

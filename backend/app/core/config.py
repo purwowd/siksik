@@ -118,6 +118,41 @@ class Settings(BaseSettings):
     )
     android_agent_automation_install_timeout_s: float = 180.0
     android_agent_automation_target_timeout_s: float = 180.0
+
+    # Non-root Android trash/recycle recovery. QUICK scans bounded live trash;
+    # FULL also evaluates gallery cache and orphan thumbnail residue.
+    android_recovery_enabled: bool = True
+    android_recovery_quick_max_items: int = Field(default=25, ge=1, le=500)
+    android_recovery_full_max_items: int = Field(default=500, ge=1, le=10_000)
+    android_recovery_quick_max_bytes: int = Field(
+        default=512 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=8 * 1024 * 1024 * 1024,
+    )
+    android_recovery_full_max_bytes: int = Field(
+        default=8 * 1024 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=32 * 1024 * 1024 * 1024,
+    )
+    android_recovery_max_file_bytes: int = Field(
+        default=4 * 1024 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=4 * 1024 * 1024 * 1024,
+    )
+    android_recovery_quick_scan_timeout_s: float = Field(default=120.0, ge=5.0, le=900.0)
+    android_recovery_full_scan_timeout_s: float = Field(default=900.0, ge=30.0, le=3600.0)
+    android_recovery_query_timeout_s: float = Field(default=300.0, ge=5.0, le=900.0)
+    android_recovery_transfer_timeout_s: float = Field(default=3600.0, ge=30.0, le=7200.0)
+    android_recovery_output_limit_bytes: int = Field(
+        default=32 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=128 * 1024 * 1024,
+    )
+    android_recovery_max_cache_source_bytes: int = Field(
+        default=512 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=2 * 1024 * 1024 * 1024,
+    )
     android_agent_social_targets: list[str] = [
         "com.instagram.android",
         "com.twitter.android",
@@ -227,6 +262,23 @@ class Settings(BaseSettings):
     ocr_full_gallery: bool = True
     video_overlay_keyframes: int = 5
     gpu_whisper_enabled: bool = True
+
+    # Explicit nudity detection — lightweight bundled NudeNet 320n.
+    # Runs for every selected image/video in QUICK and FULL, independent of OCR/GPU stack.
+    nudity_detection_enabled: bool = True
+    nudity_threshold_anus: float = Field(default=0.50, ge=0.2, le=1.0)
+    nudity_threshold_buttocks: float = Field(default=0.60, ge=0.2, le=1.0)
+    nudity_threshold_female_breast: float = Field(default=0.55, ge=0.2, le=1.0)
+    nudity_threshold_female_genitalia: float = Field(default=0.50, ge=0.2, le=1.0)
+    nudity_threshold_male_genitalia: float = Field(default=0.50, ge=0.2, le=1.0)
+    nudity_video_frames_quick: int = Field(default=12, ge=1, le=120)
+    nudity_video_frames_full: int = Field(default=24, ge=1, le=120)
+    nudity_video_min_positive_frames: int = Field(default=1, ge=1, le=10)
+    nudity_frame_max_edge_px: int = Field(default=640, ge=320, le=1920)
+    nudity_batch_size: int = Field(default=4, ge=1, le=32)
+    nudity_max_evidence_items: int = Field(default=6, ge=1, le=24)
+    nudity_video_probe_timeout_s: int = Field(default=30, ge=1, le=300)
+    nudity_video_extract_timeout_s: int = Field(default=180, ge=10, le=1800)
 
     # CLIP zero-shot tokoh / presiden (butuh: pip install transformers)
     clip_tokoh_enabled: bool = True

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from app.core import config
+from app.models.schemas import AcquisitionMode
 from app.services import hash_cache
 
 
@@ -35,3 +36,25 @@ async def test_legacy_cache_list_is_miss(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(hash_cache.db, "fetchone", fake_fetchone)
     hit = await hash_cache.get_cached("abc")
     assert hit is None  # legacy list invalidated
+
+
+@pytest.mark.unit
+def test_engine_fingerprint_separates_quick_and_full_nudity_cache(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(config.settings, "nudity_detection_enabled", True)
+    quick_token = hash_cache.set_analysis_mode(AcquisitionMode.QUICK)
+    try:
+        quick = hash_cache.engine_fingerprint()
+    finally:
+        hash_cache.reset_analysis_mode(quick_token)
+
+    full_token = hash_cache.set_analysis_mode(AcquisitionMode.FULL)
+    try:
+        full = hash_cache.engine_fingerprint()
+    finally:
+        hash_cache.reset_analysis_mode(full_token)
+
+    assert "mode=quick" in quick
+    assert "mode=full" in full
+    assert quick != full

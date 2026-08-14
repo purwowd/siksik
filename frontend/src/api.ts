@@ -80,6 +80,14 @@ export interface SessionProgress {
   transfer_completed?: number;
   transfer_records?: number;
   transfer_artifacts?: number;
+  recovery_state?: "scanning" | "complete" | "partial" | "unavailable";
+  recovery_mode?: AcquisitionMode;
+  recovery_candidates?: number;
+  recovery_captured?: number;
+  recovery_bytes?: number;
+  recovery_warning_count?: number;
+  recovery_duration_ms?: number;
+  recovery_error_category?: string;
 }
 
 export interface TimingBreakdown {

@@ -34,9 +34,11 @@ def contains_phrase(haystack: str, phrase: str) -> bool:
     parts = [re.escape(w) for w in p.split() if w]
     if not parts:
         return False
-    # Dot/underscore keep handles like intel.negara from matching token "negara".
+    # Underscore and an immediately adjacent dot keep handles/domains such as
+    # intel.negara or negara.id from matching, while sentence punctuation
+    # ("makar.") remains a valid word boundary.
     body = r"[\s\-/]+".join(parts)
-    pat = rf"(?<![a-z0-9._]){body}(?![a-z0-9._])"
+    pat = rf"(?<![a-z0-9._]){body}(?![a-z0-9_])(?!\.[a-z0-9_])"
     return bool(re.search(pat, hay))
 
 

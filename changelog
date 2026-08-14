@@ -1,10 +1,63 @@
 # SIKSIK Flow Implementation Changelog
 
-- Work period: 2026-07-16 to 2026-07-25
+- Work period: 2026-07-16 to 2026-08-14
 - Status: Unreleased local changes
 - Git baseline: `9f0d91c`
 - Android agent: `0.7.0`, API `1.0`
 - Primary project: `/Users/macbook/Documents/Product1/siksik`
+
+## 2026-08-14: Native Android trash/deleted-preview recovery in QUICK + FULL
+
+- Reimplemented the useful non-root recovery behavior as native SIKSIK modules.
+  The external donor project was used only to understand behavior and validate
+  the device capability; there is no runtime import, path, subprocess, symlink,
+  dependency, or staging connection to that project.
+- Added bounded MediaStore trash and shared-storage trash discovery to QUICK and
+  FULL. QUICK scans selected high-value shared folders with 25-item/512 MiB
+  defaults; FULL scans all readable shared roots with 500-item/8 GiB defaults.
+- FULL additionally validates gallery cache indexes/data, classic thumbnails,
+  and thumbdata residue. Cache previews are emitted only when their MediaStore
+  identity/source is absent and their JPEG/PNG/WebP structure validates.
+- Recovery is additive after the existing Android provider completes. Existing
+  agent inventory, preprocessing, selection/review ledger, direct transfer, and
+  teardown remain unchanged. Verified recovered artifacts then use the normal
+  indexing, hash, analysis (including nudity), review, recommendation, timeline,
+  and report paths under source `recovered_trash`.
+- Added a strict versioned manifest with hash/size verification, hashed artifact
+  names, source/classification/confidence provenance, atomic writes, idempotent
+  resume, bounded output/time/bytes/items, cancellation cleanup, and safe
+  best-effort fallback when only recovery is unavailable. Raw device paths,
+  content URIs, filenames, serials, and media content are not persisted in the
+  recovery manifest or structured logs.
+- Added a privacy-safe SIKSIK smoke runner that reports only state, counts,
+  scopes, and hashes, and always removes temporary artifacts. On the connected
+  authorized device, both QUICK and FULL completed with 2 verified trash
+  payloads (101,233,120 bytes), zero warnings, and successful cleanup; no media
+  was displayed. The device contained no validated orphan cache preview.
+- Session progress, finding source labels, session picker, operator telemetry,
+  dashboard, and HTML report use the existing SIKSIK contracts/components; no
+  separate prototype result format or wireframe was introduced.
+- No database migration was required. Backend suite: 244 passed, 4 conditional
+  skips. Android app/automation Kotlin compilation and frontend production build
+  both passed.
+
+## 2026-08-03: Additive image/video nudity flag for QUICK + FULL
+
+- Added local NudeNet 320n enrichment for selected images (L3) and uniformly
+  sampled video frames (L4), with one pending-review finding per media item.
+- QUICK analyzes up to 12 video frames; FULL analyzes up to 24. Thresholds,
+  frame budgets, and feature enablement are configurable through `SADT_*`.
+- The detector runs before existing OCR/vision bypasses, so QUICK gallery and
+  social screenshots remain covered without changing their established flow.
+- Video sampling prefers bounded `ffmpeg`/`ffprobe` execution and falls back to
+  OpenCV. Temporary frames stay below SIKSIK's configured data directory and
+  are deleted automatically; the implementation has no prototype/test-media
+  path or runtime model download.
+- Hash-cache fingerprint bumped to v13 and made QUICK/FULL-aware. Existing
+  findings, analyst review, recommendation, report, timeline, and dashboard
+  flows remain additive and unchanged.
+- Added isolated failure handling, detector health metadata, Docker/runtime
+  dependencies, frontend category/badge labels, and focused regression tests.
 
 ## 2026-07-25: FB missing — notification permission sheet (2c71ebbf)
 

@@ -1,4 +1,5 @@
 import type { SessionSummary } from "../api";
+import { humanLabel } from "../lib/dashboardLabels";
 import { StatusPill } from "./StatusPill";
 
 function sessionOptionLabel(s: SessionSummary): string {
@@ -48,7 +49,9 @@ export function SessionPicker({
             return (
               <>
                 <StatusPill status={s.status} recommendation={s.recommendation} />
-                <span className="pill muted">{s.progress?.acquisition_method || s.mode}</span>
+                <span className="pill muted">
+                  {humanLabel("method", s.progress?.acquisition_method || "unknown")}
+                </span>
                 <span className="pill muted">{s.progress?.findings_count ?? 0} temuan</span>
                 <span className="pill muted mono">{s.id.slice(0, 8)}</span>
               </>

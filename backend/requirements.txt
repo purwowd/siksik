@@ -6,6 +6,8 @@ aiosqlite>=0.21.0
 python-multipart>=0.0.20
 easyocr>=1.7.0; platform_system=="Darwin"
 bcrypt>=4.2.0
+# Explicit image/video nudity detector. 320n ONNX model is bundled in the wheel.
+nudenet==3.4.2
 # CLIP tokoh/presiden (foto) — opsional tapi disarankan di lab:
 #   pip install transformers
 transformers>=4.40.0

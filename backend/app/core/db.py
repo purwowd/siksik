@@ -504,6 +504,11 @@ class Database:
         self._operation_lock = asyncio.Lock()
 
     async def connect(self) -> None:
+        if self._conn is not None:
+            raise RuntimeError("Database already connected")
+        # A Database may be reopened by tests or application lifecycle hooks on
+        # a fresh event loop. asyncio primitives cannot be reused across loops.
+        self._operation_lock = asyncio.Lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self.path)
         self._conn.row_factory = aiosqlite.Row

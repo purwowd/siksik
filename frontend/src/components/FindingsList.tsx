@@ -2,6 +2,7 @@ import { can, type AuthSession, type Finding, type Paginated, type ReviewStatus 
 import { Pagination } from "../Pagination";
 import { FindingOriginBadge } from "./FindingOriginBadge";
 import { MediaPreview } from "./MediaPreview";
+import { humanLabel } from "../lib/dashboardLabels";
 
 const REVIEW_LABEL: Record<ReviewStatus, string> = {
   pending: "Menunggu",
@@ -110,10 +111,10 @@ export function FindingsList({
                   </td>
                   <td>
                     <strong className="finding-label">{f.label}</strong>
-                    <div className="finding-meta">{f.category.replace(/_/g, " ")}</div>
+                    <div className="finding-meta">{humanLabel("category", f.category)}</div>
                   </td>
                   <td>
-                    <span className="finding-source">{f.source}</span>
+                    <span className="finding-source">{humanLabel("source", f.source)}</span>
                     <div className="finding-path">{f.path}</div>
                   </td>
                   <td>
@@ -168,7 +169,9 @@ export function FindingsList({
               <div className="finding-card-body">
                 <strong className="finding-label">{f.label}</strong>
                 <div className="finding-meta">
-                  <span>{f.category.replace(/_/g, " ")}</span>
+                  <span>{humanLabel("category", f.category)}</span>
+                  <span>·</span>
+                  <span>{humanLabel("source", f.source)}</span>
                   <span>·</span>
                   <span>{(f.confidence * 100).toFixed(0)}%</span>
                   <FindingOriginBadge layer={f.layer_origin} label={f.label} />

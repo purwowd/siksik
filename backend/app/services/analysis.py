@@ -200,6 +200,17 @@ def analyze_content(
     )
     is_video = ext in VID_EXT or source == "video" or mime.startswith("video/")
 
+    # Independent visual flag: run before the OCR/vision branches so QUICK gallery
+    # and social screenshots (which intentionally bypass heavy OCR) are covered too.
+    if is_image and ext != ".imgmeta":
+        from app.services import nudity
+
+        findings.extend(nudity.analyze_image(path))
+    elif is_video and ext != ".vidmeta":
+        from app.services import nudity
+
+        findings.extend(nudity.analyze_video(path))
+
     if ext == ".imgmeta":
         findings.extend(analyze_image_meta_l3(text))
     elif is_image:

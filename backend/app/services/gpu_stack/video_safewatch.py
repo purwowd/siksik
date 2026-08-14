@@ -10,6 +10,7 @@ Refs: https://github.com/BillChan226/SafeWatch · https://safewatch-aiguard.gith
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from app.core.config import settings
@@ -54,11 +55,12 @@ def status() -> dict:
 def _bridge_policy(path: Path) -> list[ModerationHit]:
     from app.services.vision import extract_video_keyframes
 
-    blobs: list[str] = [f"{path.parent.name} {path.name}"]
+    path_text = re.sub(r"[^A-Za-z0-9]+", " ", f"{path.parent.name} {path.name}")
+    blobs: list[str] = [path_text]
     frames = extract_video_keyframes(path, max_frames=min(3, settings.gpu_video_keyframes))
     try:
         for fr in frames:
-            blobs.append(fr.name)
+            blobs.append(re.sub(r"[^A-Za-z0-9]+", " ", fr.name))
             try:
                 from app.services import ocr as ocr_mod
 

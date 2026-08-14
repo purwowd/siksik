@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import shutil
@@ -11,7 +12,7 @@ import uuid
 from pathlib import Path
 
 from app.acquisition.adb import AsyncAdbTransport
-from app.acquisition.contracts import AcquisitionContext, UploadedArchive
+from app.acquisition.contracts import AcquisitionContext, AcquisitionResult, UploadedArchive
 from app.acquisition.errors import AcquisitionError, ErrorCategory
 from app.acquisition.file_identity import stable_file_id
 from app.acquisition.process import run_process
@@ -34,6 +35,7 @@ DOC_EXT = {".pdf", ".doc", ".docx", ".rtf", ".odt"}
 IMG_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".bmp", ".imgmeta"}
 VID_EXT = {".mp4", ".mov", ".mkv", ".avi", ".3gp", ".webm", ".vidmeta"}
 CHAT_HINTS = ("whatsapp", "telegram", "wa-", "msgstore", "chat")
+logger = logging.getLogger("siksik.services.acquisition")
 
 # Junk Android / OS clutter — jangan di-pull / di-index
 _JUNK_BASENAMES = frozenset(
@@ -764,20 +766,82 @@ async def acquire_dispatch(
         android_legacy_fallback=settings.android_legacy_fallback,
         agent_runner=agent_runner,
     )
-    result = await registry.acquire(
-        AcquisitionContext(
-            session_id=session_id,
-            device_id=device_id,
-            device_type=device_type,
-            mode=mode,
-            scenario=scenario,
-            file_count=file_count,
-            on_progress=on_progress,
-            simulated=simulated,
-            request_id=current_request_id(),
-            review_candidates=review_candidates,
-        )
+    context = AcquisitionContext(
+        session_id=session_id,
+        device_id=device_id,
+        device_type=device_type,
+        mode=mode,
+        scenario=scenario,
+        file_count=file_count,
+        on_progress=on_progress,
+        simulated=simulated,
+        request_id=current_request_id(),
+        review_candidates=review_candidates,
     )
+    result = await registry.acquire(context)
+    if (
+        settings.android_recovery_enabled
+        and device_type == DeviceType.ANDROID
+        and not simulated
+    ):
+        from app.acquisition.android_recovery import AndroidRecoveryService
+        from app.acquisition.android_recovery.service import cleanup_recovery_staging
+
+        try:
+            recovery = await AndroidRecoveryService().recover(
+                session_id=session_id,
+                serial=device_id,
+                mode=mode,
+                staging=result.staging,
+                on_progress=on_progress,
+                request_id=context.request_id,
+            )
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                asyncio.to_thread(cleanup_recovery_staging, result.staging)
+            )
+            raise
+        except (AcquisitionError, OSError) as exc:
+            await asyncio.to_thread(cleanup_recovery_staging, result.staging)
+            error_category = (
+                exc.category
+                if isinstance(exc, AcquisitionError)
+                else ErrorCategory.STORAGE_UNAVAILABLE
+            )
+            logger.warning(
+                "android_recovery_unavailable",
+                extra={
+                    "request_id": context.request_id,
+                    "session_id": session_id,
+                    "phase": mode.value,
+                    "error_category": error_category.value,
+                    "retryable": (
+                        exc.retryable if isinstance(exc, AcquisitionError) else False
+                    ),
+                    "dependency_exit_code": (
+                        exc.dependency_exit_code
+                        if isinstance(exc, AcquisitionError)
+                        else None
+                    ),
+                },
+            )
+            await on_progress(
+                SessionStatus.ACQUIRING,
+                60.0,
+                "Recovery sampah Android dilewati; akuisisi utama tetap dilanjutkan",
+                recovery_state="unavailable",
+                recovery_error_category=error_category.value,
+            )
+        else:
+            result = AcquisitionResult(
+                staging=result.staging,
+                item_count=result.item_count + recovery.item_count,
+                duration_ms=result.duration_ms + recovery.duration_ms,
+                method=(
+                    f"{result.method}+android_recovery_{mode.value}_{recovery.manifest.status}"
+                ),
+                provider=result.provider,
+            )
     return result.as_legacy_tuple()
 
 
@@ -823,6 +887,10 @@ async def hash_file(path: Path) -> str:
 async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[int, float]:
     t0 = time.perf_counter()
     files: list[tuple] = []
+    from app.acquisition.android_recovery.paths import is_recovery_namespace_path
+    from app.acquisition.android_recovery.service import recovery_metadata
+
+    recovered_artifacts = await asyncio.to_thread(recovery_metadata, staging)
     paths = [
         p
         for p in staging.rglob("*")
@@ -831,6 +899,10 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
         and "_backup" not in p.parts
         and not any(part.startswith("_") for part in p.parts)
         and not _is_junk_media_path(str(p))
+        and (
+            not is_recovery_namespace_path(p.relative_to(staging).as_posix())
+            or p.relative_to(staging).as_posix() in recovered_artifacts
+        )
     ]
     total = len(paths)
     sem = asyncio.Semaphore(settings.worker_concurrency)
@@ -879,13 +951,24 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
         async with sem:
             rel = str(p.relative_to(staging))
             artifact = crawl_artifacts.get(rel)
+            recovered = recovered_artifacts.get(rel)
             source = (
                 artifact["source_kind"]
                 if artifact is not None
                 else Path(rel).parts[0] if Path(rel).parts else "other"
             )
-            digest = artifact["sha256"] if artifact is not None else await hash_file(p)
-            mime = artifact["mime_type"] if artifact is not None else guess_mime(p)
+            digest = (
+                artifact["sha256"]
+                if artifact is not None
+                else recovered.sha256 if recovered is not None else await hash_file(p)
+            )
+            mime = (
+                artifact["mime_type"]
+                if artifact is not None
+                else recovered.mime_type if recovered is not None else guess_mime(p)
+            )
+            if recovered is not None and p.stat().st_size != recovered.size_bytes:
+                raise RuntimeError("artifact recovery Android gagal verifikasi")
             if artifact is not None:
                 capture = crawl_capture_meta[str(artifact["record_id"])]
             else:
@@ -901,6 +984,17 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         "crawl_artifact_role": artifact["role"],
                         "social_scope": artifact["social_scope"],
                         "source_app": artifact["source_app"],
+                    }
+                )
+            if recovered is not None:
+                meta.update(
+                    {
+                        "acquisition_method": "android_recovery_v1",
+                        "recovery_candidate_id": recovered.candidate_id,
+                        "recovery_source": recovered.source,
+                        "recovery_classification": recovered.classification,
+                        "recovery_confidence": recovered.confidence,
+                        "recovery_expires_epoch_s": recovered.expires_epoch_s,
                     }
                 )
             if mime == "application/vnd.siksik.crawl-record+json":
@@ -935,7 +1029,7 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                 existing_file_ids.get(rel)
                 or (
                     stable_file_id(session_id, rel)
-                    if artifact is not None
+                    if artifact is not None or recovered is not None
                     else str(uuid.uuid4())
                 )
             )

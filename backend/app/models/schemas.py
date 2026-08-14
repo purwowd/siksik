@@ -17,6 +17,13 @@ class AcquisitionMode(str, Enum):
     FULL = "full"
 
 
+class RecoveryState(str, Enum):
+    SCANNING = "scanning"
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
+
+
 class Scenario(str, Enum):
     LULUS = "lulus"
     TIDAK_LULUS = "tidak_lulus"
@@ -188,6 +195,14 @@ class SessionProgress(ResponseModel):
     )
     selection_candidates: int | None = Field(default=None, ge=0)
     selection_selected: int | None = Field(default=None, ge=0)
+    recovery_state: RecoveryState | None = None
+    recovery_mode: AcquisitionMode | None = None
+    recovery_candidates: int | None = Field(default=None, ge=0)
+    recovery_captured: int | None = Field(default=None, ge=0)
+    recovery_bytes: int | None = Field(default=None, ge=0)
+    recovery_warning_count: int | None = Field(default=None, ge=0)
+    recovery_duration_ms: float | None = Field(default=None, ge=0)
+    recovery_error_category: str | None = Field(default=None, max_length=64)
 
 
 class AgentBootstrapStatus(ResponseModel):
