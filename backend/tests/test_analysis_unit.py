@@ -29,7 +29,7 @@ def test_jpeg_binary_noise_does_not_trigger_l1_bom(tmp_path, monkeypatch):
     # vision path may add findings; stub it so we only test L1 binary scan removal
     monkeypatch.setattr(
         "app.services.vision.analyze_image_file",
-        lambda _p: [],
+        lambda _p, **_kwargs: [],
     )
     findings = analyze_content(img, "image/jpeg", "documents", text, settings.risk_keywords)
     assert not any("Indikasi: bom" in f["label"] for f in findings)

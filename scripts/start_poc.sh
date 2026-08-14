@@ -22,10 +22,11 @@ API_HOST="${SADT_API_HOST:-127.0.0.1}"
 # media_text = jalur enrichment ekstra (bisa tarik EasyOCR/Whisper). Lab: matikan;
 # pakai SADT_OCR_ENABLED=1 untuk image-to-text eksplisit.
 : "${SADT_MEDIA_TEXT_ENABLED:=0}"
+: "${SADT_NUDITY_DETECTION_ENABLED:=1}"
 
 export SADT_GPU_STACK_ENABLED SADT_GPU_WHISPER_ENABLED \
   SADT_GPU_SAFEWATCH_ENABLED SADT_GPU_ICM_ENABLED SADT_GPU_QWEN_ENABLED \
-  SADT_CLIP_TOKOH_ENABLED SADT_MEDIA_TEXT_ENABLED
+  SADT_CLIP_TOKOH_ENABLED SADT_MEDIA_TEXT_ENABLED SADT_NUDITY_DETECTION_ENABLED
 
 # EasyOCR CPU + worker_concurrency=4 OOM Mac (uvicorn Killed:9). When GPU is off,
 # serialize analysis OCR and shrink preprocess unless caller overrides.
@@ -64,6 +65,7 @@ echo "Starting API on $API_HOST:$API_PORT (auto-restart on crash)"
 echo "  OCR (image→text): ${SADT_OCR_ENABLED:-0}  backend=${SADT_OCR_BACKEND:-default}  gpu=${SADT_OCR_GPU:-0}"
 echo "  workers:          ${SADT_WORKER_CONCURRENCY:-4}"
 echo "  media_text:       ${SADT_MEDIA_TEXT_ENABLED}"
+echo "  nudity detector:  ${SADT_NUDITY_DETECTION_ENABLED}"
 echo "  GPU AI stack:     ${SADT_GPU_STACK_ENABLED}  (whisper=${SADT_GPU_WHISPER_ENABLED} icm=${SADT_GPU_ICM_ENABLED} qwen=${SADT_GPU_QWEN_ENABLED} clip=${SADT_CLIP_TOKOH_ENABLED})"
 
 # Watchdog: if uvicorn dies (OOM/Killed:9), bring it back without killing Vite.

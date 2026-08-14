@@ -11,7 +11,7 @@ from app.acquisition.runtime import (
     AgentRuntimeState,
     device_ref,
 )
-from app.core.db import Database, utcnow
+from app.core.db import MIGRATIONS, Database, utcnow
 from app.core.logging import StructuredJsonFormatter
 
 
@@ -72,12 +72,13 @@ async def test_migrations_are_idempotent_and_runtime_is_redacted(tmp_path: Path)
     assert "device-serial-001" not in serialized
     assert token not in serialized
     versions = await database.fetchall("SELECT version FROM schema_migrations ORDER BY version")
-    assert [row["version"] for row in versions] == [1, 2, 3, 4]
+    expected_versions = [version for version, _name, _handler in MIGRATIONS]
+    assert [row["version"] for row in versions] == expected_versions
 
     await database.close()
     await database.connect()
     versions = await database.fetchall("SELECT version FROM schema_migrations ORDER BY version")
-    assert [row["version"] for row in versions] == [1, 2, 3, 4]
+    assert [row["version"] for row in versions] == expected_versions
     await database.close()
 
 

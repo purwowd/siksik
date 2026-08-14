@@ -24,6 +24,36 @@ SOCIAL_SCOPES = {
 }
 MAX_SOCIAL_REPORT_ITEMS = 500
 MAX_SOCIAL_PREVIEW_CHARS = 2_000
+REPORT_CATEGORY_LABELS = {
+    "ketelanjangan": "Ketelanjangan / konten eksplisit",
+}
+REPORT_SOURCE_LABELS = {
+    "recovered_trash": "Sampah / media terhapus",
+}
+REPORT_METHOD_LABELS = {
+    "adb": "USB Android (ADB)",
+    "adb_pull": "USB Android (ADB)",
+    "android_agent_inventory_complete": "Inventaris Android selesai",
+    "android_agent_inventory_partial": "Inventaris Android sebagian",
+    "preprocessing_complete": "Pra-pemrosesan selesai",
+    "preprocessing_partial": "Pra-pemrosesan sebagian",
+    "selection_confirmed": "Seleksi terkonfirmasi",
+    "android_agent_direct_manifest": "Transfer agen Android",
+    "android_agent_direct_manifest_resumed": "Transfer agen Android dilanjutkan",
+    "android_recovery_quick_complete": "Recovery sampah Android (Cepat)",
+    "android_recovery_quick_partial": "Recovery sampah Android (Cepat, sebagian)",
+    "android_recovery_full_complete": "Recovery sampah Android (Penuh)",
+    "android_recovery_full_partial": "Recovery sampah Android (Penuh, sebagian)",
+    "zip_upload": "Unggah ZIP",
+    "simulated": "Simulasi lab",
+    "unknown": "Tidak diketahui",
+}
+RECOVERY_STATE_LABELS = {
+    "scanning": "memindai",
+    "complete": "selesai",
+    "partial": "sebagian",
+    "unavailable": "tidak tersedia",
+}
 PROFILE_USERNAME = re.compile(r"(?<![A-Za-z0-9._])@([A-Za-z0-9._]{2,30})")
 PROFILE_LINK = re.compile(
     r"(?i)(?:https?://|www\.)[^\s<>{}\[\]\"']+|"
@@ -224,6 +254,21 @@ def _ms(v: float) -> str:
 
 def _esc(value: object) -> str:
     return html.escape("" if value is None else str(value), quote=True)
+
+
+def _report_label(value: object, labels: dict[str, str]) -> str:
+    key = "" if value is None else str(value).strip()
+    return labels.get(key, key.replace("_", " "))
+
+
+def _report_method(value: object) -> str:
+    key = "unknown" if value is None else str(value).strip() or "unknown"
+    parts: list[str] = []
+    for raw_part in key.split("+"):
+        label = _report_label(raw_part, REPORT_METHOD_LABELS)
+        if label not in parts:
+            parts.append(label)
+    return " + ".join(parts)
 
 
 def _record_metadata(record: dict) -> dict:
@@ -1062,8 +1107,8 @@ def report_to_html(report: dict) -> str:
     rows = "".join(
         "<tr>"
         f"<td>{_esc(f['label'])}</td>"
-        f"<td>{_esc(f['category'])}</td>"
-        f"<td>{_esc(f['source'])}</td>"
+        f"<td>{_esc(_report_label(f['category'], REPORT_CATEGORY_LABELS))}</td>"
+        f"<td>{_esc(_report_label(f['source'], REPORT_SOURCE_LABELS))}</td>"
         f"<td>{_esc(f['layer'])}</td>"
         f"<td>{f['confidence']:.0%}</td>"
         f"<td><code>{_esc(f['path'])}</code></td>"
@@ -1071,9 +1116,25 @@ def report_to_html(report: dict) -> str:
         for f in report["findings"][:200]
     )
     cat = (
-        "".join(f"<li>{_esc(k)}: <b>{_esc(v)}</b></li>" for k, v in b["by_category"].items())
+        "".join(
+            f"<li>{_esc(_report_label(k, REPORT_CATEGORY_LABELS))}: "
+            f"<b>{_esc(v)}</b></li>"
+            for k, v in b["by_category"].items()
+        )
         or "<li>-</li>"
     )
+    progress = m.get("progress") if isinstance(m.get("progress"), dict) else {}
+    recovery_state = progress.get("recovery_state")
+    recovery_metric = ""
+    if recovery_state:
+        state_label = _report_label(recovery_state, RECOVERY_STATE_LABELS)
+        recovery_metric = (
+            "<li>Recovery sampah Android: "
+            f"{_esc(progress.get('recovery_captured', 0))} item · "
+            f"{_esc(progress.get('recovery_bytes', 0))} bytes · "
+            f"{_esc(state_label)} · "
+            f"{_esc(progress.get('recovery_warning_count', 0))} peringatan</li>"
+        )
     rec = s["recommendation"] or "-"
     if s["recommendation"] == "TIDAK LULUS":
         rec_class = "bad"
@@ -1122,7 +1183,7 @@ th,td{{border-bottom:1px solid rgba(0,229,200,.15);padding:8px;text-align:left;v
 <div class="box">
   <div>Session: <code>{_esc(s['id'])}</code></div>
   <div>Device: {_esc(s['label'])} / {_esc(s['device_id'])} ({_esc(s['device_type'])})</div>
-  <div>Mode: {_esc(s['mode'])} · Method: {_esc(s['acquisition_method'])}</div>
+  <div>Mode: {_esc(s['mode'])} · Method: {_esc(_report_method(s['acquisition_method']))}</div>
   <div>Recommendation: {rec_badge}</div>
 </div>
 <div class="box">
@@ -1139,6 +1200,7 @@ th,td{{border-bottom:1px solid rgba(0,229,200,.15);padding:8px;text-align:left;v
     <li>Acquire: {_esc(_ms(m['timing'].get('t_acquire_ms',0)))}</li>
     <li>Analyze: {_esc(_ms(m['timing'].get('t_analyze_ms',0)))}</li>
     <li>Total: {_esc(_ms(m['timing'].get('t_total_ms',0)))}</li>
+    {recovery_metric}
   </ul>
   <h2>By category</h2>
   <ul>{cat}</ul>

@@ -72,11 +72,13 @@ def test_prepare_ocr_path_sharpens_small_when_enabled(tmp_path: Path, monkeypatc
 def test_engine_fingerprint_includes_tuning(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(config.settings, "ocr_max_edge_px", 1280)
     fp = hash_cache.engine_fingerprint()
-    assert "v12" in fp
+    assert "v13" in fp
     assert "ocr_px=1280" in fp
     assert "wh1st=" in fp
     assert "clip=" in fp
     assert "ocr_min=" in fp
+    assert "nudity=" in fp
+    assert "nudity_video=" in fp
 
     monkeypatch.setattr(config.settings, "ocr_max_edge_px", 640)
     assert hash_cache.engine_fingerprint() != fp

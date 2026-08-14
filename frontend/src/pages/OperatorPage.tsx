@@ -5,6 +5,7 @@ import { PipelineTrack } from "../components/PipelineTrack";
 import { StatusPill } from "../components/StatusPill";
 import { VerdictNotice } from "../components/VerdictNotice";
 import { ACTIVE, isThreatRecommendation } from "../constants";
+import { humanLabel } from "../lib/dashboardLabels";
 
 type Props = {
   teleRef: RefObject<HTMLElement | null>;
@@ -249,7 +250,9 @@ export function OperatorPage(p: Props) {
             <div className="tel-live">
               <StatusPill status={p.session.status} recommendation={p.session.recommendation} />
               <span className="pill muted">{p.session.mode === "full" ? "Penuh" : "Cepat"}</span>
-              <span className="pill muted">{progress?.acquisition_method || "…"}</span>
+              <span className="pill muted">
+                {humanLabel("method", progress?.acquisition_method || "unknown")}
+              </span>
               <span className="pill muted">{p.session.device_id}</span>
             </div>
 
@@ -337,6 +340,17 @@ export function OperatorPage(p: Props) {
                   Throughput
                   <strong>{progress?.throughput_files_per_sec ?? 0} b/d</strong>
                 </div>
+                {progress?.recovery_state && (
+                  <div>
+                    Sampah terpulihkan
+                    <strong>
+                      {progress.recovery_captured ?? 0}
+                      {progress.recovery_warning_count
+                        ? ` · ${progress.recovery_warning_count} peringatan`
+                        : ""}
+                    </strong>
+                  </div>
+                )}
               </div>
             </details>
 

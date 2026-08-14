@@ -317,6 +317,7 @@ def analyze_video_file(path: Path) -> list[dict]:
 def vision_status() -> dict:
     from app.services.ocr import ocr_status
     from app.services import gpu_stack
+    from app.services import nudity
     from app.core.config import settings as cfg
 
     pil_ok = False
@@ -339,6 +340,7 @@ def vision_status() -> dict:
         "video_whisper_transcribe_first_s": cfg.video_whisper_transcribe_first_s,
         "whisper": bool(cfg.gpu_whisper_enabled),
     }
+    info["nudity"] = nudity.status()
     info["tuning"] = {
         "ocr_max_edge_px": cfg.ocr_max_edge_px,
         "ocr_sharpen": cfg.ocr_sharpen,

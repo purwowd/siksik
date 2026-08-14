@@ -17,6 +17,18 @@ from app.services.auth import ensure_auth_schema, reset_login_rate_limits
 from app.services.sessions import sessions
 
 
+async def cancel_session_tasks() -> None:
+    tasks = list(sessions._tasks.values())
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    sessions._tasks.clear()
+    sessions._active_device = None
+    sessions._lock = asyncio.Lock()
+    sessions._update_lock = asyncio.Lock()
+
+
 @pytest.fixture
 def tmp_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     data = tmp_path / "data"
@@ -39,17 +51,13 @@ def tmp_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture
 async def client(tmp_data_dir: Path) -> AsyncIterator[AsyncClient]:
     reset_login_rate_limits()
+    await cancel_session_tasks()
     if db._conn:
         await db.close()
     db.path = config.settings.db_path
     ensure_dirs()
     await db.connect()
     await ensure_auth_schema()
-
-    for task in list(sessions._tasks.values()):
-        task.cancel()
-    sessions._tasks.clear()
-    sessions._active_device = None
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -62,10 +70,7 @@ async def client(tmp_data_dir: Path) -> AsyncIterator[AsyncClient]:
         ac.headers["Authorization"] = f"Bearer {token}"
         yield ac
 
-    for task in list(sessions._tasks.values()):
-        task.cancel()
-    sessions._tasks.clear()
-    sessions._active_device = None
+    await cancel_session_tasks()
     reset_login_rate_limits()
     if db._conn:
         await db.close()
@@ -75,6 +80,7 @@ async def client(tmp_data_dir: Path) -> AsyncIterator[AsyncClient]:
 async def anon_client(tmp_data_dir: Path) -> AsyncIterator[AsyncClient]:
     """Client tanpa token (untuk uji 401)."""
     reset_login_rate_limits()
+    await cancel_session_tasks()
     if db._conn:
         await db.close()
     db.path = config.settings.db_path
@@ -84,6 +90,7 @@ async def anon_client(tmp_data_dir: Path) -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+    await cancel_session_tasks()
     reset_login_rate_limits()
     if db._conn:
         await db.close()

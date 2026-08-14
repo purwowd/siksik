@@ -9,7 +9,10 @@ export function FindingOriginBadge({
   const low = label.toLowerCase();
   let kind = layer;
   let tone: "muted" | "ok" | "warn" | "bad" = "muted";
-  if (low.includes("audio") || low.includes("lirik") || low.includes("whisper")) {
+  if (low.includes("ketelanjangan") || low.includes("nudenet")) {
+    kind = "NUDITY";
+    tone = "bad";
+  } else if (low.includes("audio") || low.includes("lirik") || low.includes("whisper")) {
     kind = "ASR";
     tone = "warn";
   } else if (low.includes("ocr") || low.includes("on-screen") || low.includes("dokumen")) {

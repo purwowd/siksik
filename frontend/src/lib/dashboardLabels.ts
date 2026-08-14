@@ -2,6 +2,7 @@
 
 const CATEGORY_LABELS: Record<string, string> = {
   konten_visual: "Konten visual berisiko",
+  ketelanjangan: "Ketelanjangan / konten eksplisit",
   konten_teks: "Teks berisiko",
   dokumen: "Dokumen",
   pesan: "Pesan",
@@ -31,10 +32,24 @@ const SOURCE_LABELS: Record<string, string> = {
   gallery: "Galeri HP",
   dcim: "Kamera HP",
   download: "Folder unduhan",
+  recovered_trash: "Sampah / media terhapus",
 };
 
 const METHOD_LABELS: Record<string, string> = {
+  adb: "USB Android (ADB)",
   adb_pull: "USB Android (ADB)",
+  android_agent: "Agen SIKSIK Android",
+  android_agent_inventory_complete: "Inventaris Android selesai",
+  android_agent_inventory_partial: "Inventaris Android sebagian",
+  preprocessing_complete: "Pra-pemrosesan selesai",
+  preprocessing_partial: "Pra-pemrosesan sebagian",
+  selection_confirmed: "Seleksi terkonfirmasi",
+  android_agent_direct_manifest: "Transfer agen Android",
+  android_agent_direct_manifest_resumed: "Transfer agen Android dilanjutkan",
+  android_recovery_quick_complete: "Recovery sampah Android (Cepat)",
+  android_recovery_quick_partial: "Recovery sampah Android (Cepat, sebagian)",
+  android_recovery_full_complete: "Recovery sampah Android (Penuh)",
+  android_recovery_full_partial: "Recovery sampah Android (Penuh, sebagian)",
   zip_upload: "Unggah ZIP",
   simulated: "Simulasi lab",
   idevice: "USB iPhone",
@@ -59,6 +74,13 @@ export function humanLabel(
     method: METHOD_LABELS,
     review: REVIEW_LABELS,
   } as const;
+  if (kind === "method" && key.includes("+")) {
+    return key
+      .split("+")
+      .map((part) => humanLabel("method", part))
+      .filter((part, index, values) => values.indexOf(part) === index)
+      .join(" + ");
+  }
   const hit = maps[kind][key] ?? maps[kind][key.toLowerCase()];
   if (hit) return hit;
   return key.replace(/_/g, " ");

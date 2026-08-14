@@ -27,9 +27,11 @@ def get_analysis_mode() -> AcquisitionMode | None:
 
 def engine_fingerprint() -> str:
     """Bump semantics when enrichment knobs change so stale lean results miss."""
+    mode = get_analysis_mode()
     return "|".join(
         [
-            "v12",  # consolidate OCR/meme per image (no duplicate rows)
+            "v13",  # add mode-aware explicit-nudity enrichment
+            f"mode={mode.value if mode else 'none'}",
             f"ocr={int(bool(settings.ocr_enabled))}",
             f"mt={int(bool(settings.media_text_enabled))}",
             f"wh={int(bool(settings.gpu_whisper_enabled))}:{settings.gpu_whisper_model}:{settings.gpu_whisper_lang or 'auto'}",
@@ -46,6 +48,20 @@ def engine_fingerprint() -> str:
             f"vkf={settings.video_overlay_keyframes}",
             f"clip={int(bool(settings.clip_tokoh_enabled))}:{settings.clip_tokoh_model.split('/')[-1]}",
             f"meme={len(settings.meme_hate_keywords)}",
+            (
+                f"nudity={int(bool(settings.nudity_detection_enabled))}:"
+                f"{settings.nudity_threshold_anus}:"
+                f"{settings.nudity_threshold_buttocks}:"
+                f"{settings.nudity_threshold_female_breast}:"
+                f"{settings.nudity_threshold_female_genitalia}:"
+                f"{settings.nudity_threshold_male_genitalia}"
+            ),
+            (
+                f"nudity_video={settings.nudity_video_frames_quick}:"
+                f"{settings.nudity_video_frames_full}:"
+                f"{settings.nudity_video_min_positive_frames}:"
+                f"{settings.nudity_frame_max_edge_px}"
+            ),
         ]
     )
 
