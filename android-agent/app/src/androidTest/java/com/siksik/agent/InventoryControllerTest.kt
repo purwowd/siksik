@@ -14,8 +14,10 @@ import com.siksik.agent.source.inventory.InventoryRunState
 import com.siksik.agent.source.inventory.InventorySource
 import com.siksik.agent.source.inventory.InventorySourceKind
 import com.siksik.agent.source.inventory.InventorySourceState
+import com.siksik.agent.source.inventory.InventoryTimeScope
 import com.siksik.agent.source.inventory.SourceAdapter
 import com.siksik.agent.source.inventory.SourceAvailability
+import java.time.Instant
 import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -79,6 +81,37 @@ class InventoryControllerTest {
             assertEquals("quick_sample_limit", sampled.reason)
             assertTrue(sources.all { (it as FakeSource).maxRequestedLimit <= 100 })
         }
+    }
+
+    @Test
+    fun quickAndFullKeepThreeAndSixMonthRecords() {
+        val recent = Instant.parse("2023-09-01T00:00:00Z").toEpochMilli()
+        val betweenScopes = Instant.parse("2023-06-01T00:00:00Z").toEpochMilli()
+        val records = listOf(
+            record(SourceAdapter.MEDIA_IMAGE, "recent", timestamp = recent),
+            record(SourceAdapter.MEDIA_IMAGE, "between", timestamp = betweenScopes),
+        )
+
+        fun discovered(mode: InventoryMode): Int {
+            var count = -1
+            val sources = SourceAdapter.entries.map { adapter ->
+                FakeSource(
+                    adapter,
+                    if (adapter == SourceAdapter.MEDIA_IMAGE) records else emptyList(),
+                )
+            }
+            withController(sources) { controller, sessionId ->
+                count = exhaust(
+                    controller,
+                    controller.start(sessionId, mode, null),
+                    pageSize = 10,
+                ).sources.sumOf { it.discoveredCount }
+            }
+            return count
+        }
+
+        assertEquals(1, discovered(InventoryMode.QUICK))
+        assertEquals(2, discovered(InventoryMode.FULL))
     }
 
     @Test
@@ -198,7 +231,12 @@ class InventoryControllerTest {
         block: (InventoryController, String) -> Unit,
     ) {
         val sessionId = "session_${UUID.randomUUID()}"
-        InventoryController(context, GrantGateway(context), sources = sources).use { controller ->
+        InventoryController(
+            context,
+            GrantGateway(context),
+            sources = sources,
+            clock = { 1_700_000_000_000L },
+        ).use { controller ->
             try {
                 block(controller, sessionId)
             } finally {
@@ -211,6 +249,7 @@ class InventoryControllerTest {
         adapter: SourceAdapter,
         suffix: String,
         identity: String = "identity_$suffix",
+        timestamp: Long = 1_700_000_000_000,
     ) = InventoryRecord(
         recordId = "record_$suffix",
         identityHash = identity,
@@ -225,10 +264,10 @@ class InventoryControllerTest {
         width = 10,
         height = 10,
         durationMs = null,
-        dateTakenEpochMs = 1_700_000_000_000,
-        dateAddedEpochMs = 1_700_000_000_000,
-        dateModifiedEpochMs = 1_700_000_000_000,
-        captureTimeEpochMs = 1_700_000_000_000,
+        dateTakenEpochMs = timestamp,
+        dateAddedEpochMs = timestamp,
+        dateModifiedEpochMs = timestamp,
+        captureTimeEpochMs = timestamp,
         captureTimeSource = "date_taken",
         directoryHint = "Pictures/Fixture",
         exif = null,
@@ -261,6 +300,7 @@ class InventoryControllerTest {
             documentGrantId: String?,
             checkpoint: String?,
             limit: Int,
+            timeScope: InventoryTimeScope,
             isCancelled: () -> Boolean,
         ): AdapterPage {
             maxRequestedLimit = maxOf(maxRequestedLimit, limit)

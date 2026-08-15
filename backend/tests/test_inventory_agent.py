@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +26,7 @@ from app.acquisition.bootstrap_contracts import runtime_permissions_for_api
 from app.acquisition.contracts import AcquisitionContext, AcquisitionResult, ProviderKind
 from app.acquisition.errors import AcquisitionError, ErrorCategory
 from app.acquisition.runtime import AgentRuntimeSecrets
+from app.acquisition.time_scope import build_time_scope
 from app.models.schemas import AcquisitionMode, DeviceType, Scenario, SessionStatus
 
 SESSION_ID = "session-inventory-001"
@@ -673,8 +675,10 @@ async def test_phase4_runner_preserves_explicit_partial_state(tmp_path: Path) ->
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("mode", [AcquisitionMode.QUICK, AcquisitionMode.FULL])
 async def test_phase5_runner_runs_and_reports_read_only_social_automation(
     tmp_path: Path,
+    mode: AcquisitionMode,
 ) -> None:
     final = InventoryRunV1.model_validate(run_payload("complete", source_state="complete"))
     client = FakeInventoryClient(final)
@@ -690,9 +694,14 @@ async def test_phase5_runner_runs_and_reports_read_only_social_automation(
         transfer=FakeTransfer(tmp_path),
     )
 
-    await runner.acquire(acquisition_context(AcquisitionMode.QUICK))
+    await runner.acquire(acquisition_context(mode))
 
     assert len(automation.calls) == 1
+    assert automation.calls[0]["mode"] == mode.value
+    assert automation.calls[0]["not_before_epoch_ms"] == build_time_scope(
+        mode,
+        reference=datetime.fromisoformat(TIMESTAMP),
+    ).not_before_epoch_ms
     assert automation.calls[0]["target_packages"] == ("com.instagram.android",)
     assert automation.calls[0]["session_token"] == "t" * 32
     assert automation.calls[0]["token_expires_at_epoch_ms"] > 0

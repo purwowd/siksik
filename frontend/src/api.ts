@@ -87,7 +87,15 @@ export interface SessionProgress {
   recovery_bytes?: number;
   recovery_warning_count?: number;
   recovery_duration_ms?: number;
+  recovery_cache_sources?: number;
+  recovery_cache_captured?: number;
   recovery_error_category?: string;
+  ios_library_state?: string;
+  ios_hidden_captured?: number;
+  ios_recently_deleted_captured?: number;
+  ios_cache_captured?: number;
+  ios_deleted_metadata_captured?: number;
+  ios_library_warning_count?: number;
 }
 
 export interface TimingBreakdown {
@@ -214,6 +222,7 @@ export interface SocialReportAccount {
   profile_metrics: {
     posts?: number | null;
     followers?: number | null;
+    friends?: number | null;
     following?: number | null;
   };
   scope_counts: Record<string, number>;

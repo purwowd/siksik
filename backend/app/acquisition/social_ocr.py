@@ -84,6 +84,7 @@ METRIC_RESOURCES = {
         "profile_header_followers_stacked_familiar",
         "profile_header_followers_value",
     ),
+    "friends": ("friends_stat",),
     "following": (
         "profile_header_familiar_following_value",
         "profile_header_following_stacked_familiar",
@@ -93,6 +94,7 @@ METRIC_RESOURCES = {
 METRIC_LABELS = {
     "posts": ("posts", "postingan", "kiriman", "tweets", "tweet"),
     "followers": ("followers", "pengikut"),
+    "friends": ("friends", "friend", "teman"),
     "following": ("following", "mengikuti", "diikuti"),
 }
 PROFILE_LINK = re.compile(
@@ -350,7 +352,7 @@ def _profile_metadata(
         else {}
     )
     metrics: dict[str, int | None] = {}
-    for name in ("posts", "followers", "following"):
+    for name in ("posts", "followers", "friends", "following"):
         candidates = (
             _metric_from_nodes(nodes, name),
             _metric_from_regions(ocr_regions, name),

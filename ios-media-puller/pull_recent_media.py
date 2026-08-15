@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -29,6 +31,10 @@ logger = logging.getLogger("pull_recent_media")
 PHOTO_EXTS = {".jpg", ".jpeg", ".heic", ".heif", ".png", ".dng", ".tif", ".tiff", ".gif", ".webp"}
 VIDEO_EXTS = {".mov", ".mp4", ".m4v", ".avi", ".3gp"}
 DCIM_ROOT = "/DCIM"
+
+
+def _device_ref(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 @dataclass
@@ -84,7 +90,7 @@ async def _walk_dcim(afc) -> list[MediaFile]:
         try:
             names = await afc.listdir(folder)
         except Exception as exc:
-            logger.warning("Skip %s: %s", folder, exc)
+            logger.warning("Skip scope DCIM: %s", type(exc).__name__)
             continue
 
         for name in names:
@@ -146,19 +152,17 @@ async def _pull(afc, items: list[MediaFile], out_dir: Path) -> int:
 
         size_mb = item.size / (1024 * 1024)
         logger.info(
-            "[%d/%d] %s  %s  %.1f MB  %s",
+            "[%d/%d] %s  %.1f MB",
             i,
             len(items),
             item.kind.upper(),
-            item.mtime.strftime("%Y-%m-%d %H:%M"),
             size_mb,
-            item.name,
         )
         try:
             await afc.pull(item.remote_path, str(local_path), progress_bar=False)
             ok += 1
         except Exception as exc:
-            logger.error("Gagal download %s: %s", item.remote_path, exc)
+            logger.error("Gagal download item %d: %s", i, type(exc).__name__)
     return ok
 
 
@@ -187,6 +191,12 @@ Contoh:
         type=int,
         default=None,
         help="Hanya media dalam N hari terakhir (opsional)",
+    )
+    p.add_argument(
+        "--not-before-epoch-s",
+        type=float,
+        default=None,
+        help="Cutoff waktu absolut Unix epoch (dipakai flow SIKSIK).",
     )
     p.add_argument(
         "--type",
@@ -225,6 +235,12 @@ async def run(args: argparse.Namespace) -> int:
             return 2
         since = datetime.now().astimezone() - timedelta(days=args.days)
         logger.info("Filter: sejak %s", since.strftime("%Y-%m-%d %H:%M"))
+    if args.not_before_epoch_s is not None:
+        if args.not_before_epoch_s < 946_684_800:
+            logger.error("--not-before-epoch-s tidak valid")
+            return 2
+        since = datetime.fromtimestamp(args.not_before_epoch_s).astimezone()
+        logger.info("Filter cutoff: sejak %s", since.strftime("%Y-%m-%d %H:%M"))
 
     out_dir = args.output
     if out_dir is None:
@@ -232,30 +248,39 @@ async def run(args: argparse.Namespace) -> int:
 
     t0 = time.time()
     try:
-        lockdown = await create_using_usbmux()
+        lockdown = await create_using_usbmux(serial=os.environ.get("UDID") or None)
     except Exception as exc:
-        logger.error("Tidak bisa konek ke device: %s", exc)
+        logger.error("Tidak bisa konek ke device: %s", type(exc).__name__)
         logger.error("Pastikan: USB terhubung, Trust OK, device unlocked.")
         return 1
 
-    name = lockdown.display_name or lockdown.product_type
-    logger.info("Device: %s | iOS %s | UDID %s", name, lockdown.product_version, lockdown.udid)
+    try:
+        logger.info(
+            "Device iOS tersambung | version %s | ref %s",
+            lockdown.product_version,
+            _device_ref(lockdown.udid),
+        )
 
-    async with AfcService(lockdown) as afc:
-        logger.info("Scan DCIM untuk foto/video...")
-        all_media = await _walk_dcim(afc)
-        logger.info("Ditemukan %d file media di DCIM", len(all_media))
+        async with AfcService(lockdown) as afc:
+            logger.info("Scan DCIM untuk foto/video...")
+            all_media = await _walk_dcim(afc)
+            logger.info("Ditemukan %d file media di DCIM", len(all_media))
 
-        selected = _filter_media(all_media, args.type, args.count, since)
-        if not selected:
-            logger.warning("Tidak ada media yang cocok dengan filter.")
-            return 0
+            selected = _filter_media(all_media, args.type, args.count, since)
+            if not selected:
+                logger.warning("Tidak ada media yang cocok dengan filter.")
+                return 0
 
-        logger.info("Download %d file terbaru → %s", len(selected), out_dir.resolve())
-        ok = await _pull(afc, selected, out_dir)
+            logger.info("Download %d file terbaru", len(selected))
+            ok = await _pull(afc, selected, out_dir)
+    finally:
+        try:
+            await lockdown.close()
+        except Exception as exc:
+            logger.warning("Lockdown close gagal: %s", type(exc).__name__)
 
     elapsed = time.time() - t0
-    logger.info("Selesai: %d/%d file | %.1fs | %s", ok, len(selected), elapsed, out_dir.resolve())
+    logger.info("Selesai: %d/%d file | %.1fs", ok, len(selected), elapsed)
     return 0 if ok == len(selected) else 1
 
 

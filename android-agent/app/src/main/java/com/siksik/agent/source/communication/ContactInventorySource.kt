@@ -12,6 +12,7 @@ import com.siksik.agent.source.inventory.InventoryRecord
 import com.siksik.agent.source.inventory.InventorySource
 import com.siksik.agent.source.inventory.InventorySourceKind
 import com.siksik.agent.source.inventory.InventorySourceState
+import com.siksik.agent.source.inventory.InventoryTimeScope
 import com.siksik.agent.source.inventory.SourceAdapter
 import com.siksik.agent.source.inventory.SourceAvailability
 
@@ -40,6 +41,7 @@ class ContactInventorySource(
         documentGrantId: String?,
         checkpoint: String?,
         limit: Int,
+        timeScope: InventoryTimeScope,
         isCancelled: () -> Boolean,
     ): AdapterPage {
         if (limit !in 1..BuildConfig.MAX_INVENTORY_PAGE_SIZE) {
@@ -120,7 +122,7 @@ class ContactInventorySource(
             )
         } catch (_: IllegalArgumentException) {
             return AdapterPage(
-                contactRows.map { mapRecord(it, ContactDetails()) },
+                contactRows.map { mapRecord(it, ContactDetails()) }.filter(timeScope::includes),
                 lastScannedId?.toString() ?: checkpoint,
                 scanned,
                 InventorySourceState.PARTIAL,
@@ -138,7 +140,7 @@ class ContactInventorySource(
         }
         val records = contactRows.map { row ->
             mapRecord(row, detailPage.details[row.id] ?: ContactDetails())
-        }
+        }.filter(timeScope::includes)
         if (!detailPage.providerAvailable) {
             return AdapterPage(
                 records,

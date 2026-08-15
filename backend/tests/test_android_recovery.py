@@ -268,8 +268,9 @@ async def test_quick_recovery_is_bounded_hashed_and_idempotent(tmp_path: Path):
 
     assert result.item_count == 2
     assert gateway.transfer_calls == 2
-    assert gateway.cache_calls == 0
-    assert gateway.thumbnail_calls == 0
+    assert gateway.cache_calls == 1
+    assert gateway.thumbnail_calls == 1
+    assert result.manifest.stats.cache_scan_completed is True
     assert result.manifest.stats.candidates_discovered == 2
     assert result.manifest.stats.payloads_captured == 2
     assert all(item.relative_path.startswith("recovered_trash/trash/") for item in result.manifest.artifacts)
@@ -278,6 +279,7 @@ async def test_quick_recovery_is_bounded_hashed_and_idempotent(tmp_path: Path):
     assert "content://" not in manifest_text
     assert "camera.jpg" not in manifest_text
     assert progress[-1]["recovery_captured"] == 2
+    assert progress[-1]["recovery_cache_captured"] == 0
 
     resumed = await service.recover(
         session_id="session-1",
@@ -340,6 +342,8 @@ async def test_quick_item_budget_truncates_without_extra_transfer(
     assert result.item_count == 1
     assert gateway.transfer_calls == 1
     assert result.manifest.status == "partial"
+    assert result.manifest.stats.cache_scan_completed is True
+    assert gateway.cache_calls == 1
     assert "recovery_budget_truncated" in result.manifest.warnings
 
 
@@ -664,7 +668,11 @@ def test_recovered_image_uses_existing_finding_flow(
         "layer_origin": "L3",
         "evidence": "detektor lokal",
     }
-    monkeypatch.setattr(nudity, "analyze_image", lambda _path: [expected])
+    monkeypatch.setattr(
+        nudity,
+        "analyze_image_result",
+        lambda _path: nudity.NudityAnalysisResult((expected,), True),
+    )
     monkeypatch.setattr("app.services.vision.analyze_image_file", lambda _path, **_kw: [])
 
     findings = analysis.analyze_content(

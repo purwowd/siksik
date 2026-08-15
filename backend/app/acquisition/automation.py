@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -15,6 +16,8 @@ from app.acquisition.adb import SpecialAccessKind, SpecialAccessState
 from app.acquisition.agent_client import AutomationResultV1
 from app.acquisition.errors import AcquisitionError, ErrorCategory, acquisition_error
 from app.acquisition.process import ProcessResult
+from app.acquisition.time_scope import MIN_TIME_SCOPE_EPOCH_MS, build_time_scope
+from app.models.schemas import AcquisitionMode
 
 logger = logging.getLogger("siksik.acquisition.automation")
 ALLOWED_SOCIAL_TARGETS = frozenset(
@@ -103,10 +106,12 @@ class AndroidUiAutomationOrchestrator:
         config: AutomationConfig,
         adb: AutomationAdb,
         artifact_builder: ArtifactBuilder,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._config = config
         self._adb = adb
         self._artifact_builder = artifact_builder
+        self._clock = clock
 
     async def run(
         self,
@@ -117,6 +122,7 @@ class AndroidUiAutomationOrchestrator:
         token_expires_at_epoch_ms: int,
         crawl_id: str,
         mode: str,
+        not_before_epoch_ms: int | None = None,
         target_packages: Sequence[str],
         request_id: str | None,
         on_progress: AutomationProgressCallback | None = None,
@@ -141,6 +147,21 @@ class AndroidUiAutomationOrchestrator:
             raise acquisition_error(
                 ErrorCategory.VALIDATION_ERROR,
                 "Konfigurasi automation Android tidak valid.",
+            )
+        cutoff_epoch_ms = not_before_epoch_ms
+        if cutoff_epoch_ms is None:
+            cutoff_epoch_ms = build_time_scope(
+                AcquisitionMode(mode),
+                reference=self._clock(),
+            ).not_before_epoch_ms
+        if (
+            isinstance(cutoff_epoch_ms, bool)
+            or not isinstance(cutoff_epoch_ms, int)
+            or cutoff_epoch_ms < MIN_TIME_SCOPE_EPOCH_MS
+        ):
+            raise acquisition_error(
+                ErrorCategory.VALIDATION_ERROR,
+                "Batas waktu automation Android tidak valid.",
             )
         await self._artifact_builder.build_debug_apk(request_id)
         apk = self._validated_apk()
@@ -193,6 +214,7 @@ class AndroidUiAutomationOrchestrator:
                     session_id=session_id,
                     crawl_id=crawl_id,
                     mode=mode,
+                    not_before_epoch_ms=cutoff_epoch_ms,
                     target_package=target,
                     request_id=request_id,
                 )
@@ -382,6 +404,7 @@ class AndroidUiAutomationOrchestrator:
         session_id: str,
         crawl_id: str,
         mode: str,
+        not_before_epoch_ms: int,
         target_package: str,
         request_id: str | None,
     ) -> tuple[AutomationResultV1, bool, bool]:
@@ -436,6 +459,7 @@ class AndroidUiAutomationOrchestrator:
                         350 if target_package in TEXT_ONLY_SOCIAL_TARGETS else 300
                     ),
                     "navigation_deadline_ms": navigation_deadline_ms,
+                    "not_before_epoch_ms": not_before_epoch_ms,
                     "debug_snapshots": str(self._config.debug_snapshots).lower(),
                 },
                 timeout=self._config.target_timeout_seconds,

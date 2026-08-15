@@ -133,6 +133,7 @@ class RecoveryStatsV1(StrictRecoveryModel):
     bytes_captured: int = Field(ge=0)
     cache_sources_scanned: int = Field(ge=0)
     cache_candidates_recovered: int = Field(ge=0)
+    cache_scan_completed: bool = False
 
 
 class RecoveryManifestV1(StrictRecoveryModel):

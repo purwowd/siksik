@@ -119,8 +119,8 @@ class Settings(BaseSettings):
     android_agent_automation_install_timeout_s: float = 180.0
     android_agent_automation_target_timeout_s: float = 180.0
 
-    # Non-root Android trash/recycle recovery. QUICK scans bounded live trash;
-    # FULL also evaluates gallery cache and orphan thumbnail residue.
+    # Non-root Android trash/recycle recovery. Both modes inspect cache residue;
+    # QUICK stays bounded by its lower item/byte/time budgets.
     android_recovery_enabled: bool = True
     android_recovery_quick_max_items: int = Field(default=25, ge=1, le=500)
     android_recovery_full_max_items: int = Field(default=500, ge=1, le=10_000)
@@ -180,6 +180,40 @@ class Settings(BaseSettings):
     ios_afc_quick_docs_count: int = 30
     ios_afc_full_docs_count: int = 0
     ios_afc_timeout_s: float = 300.0
+    ios_photo_library_recovery_enabled: bool = True
+    ios_library_quick_hidden_count: int = Field(default=25, ge=1, le=500)
+    ios_library_full_hidden_count: int = Field(default=500, ge=1, le=5_000)
+    ios_library_quick_deleted_count: int = Field(default=25, ge=1, le=500)
+    ios_library_full_deleted_count: int = Field(default=500, ge=1, le=5_000)
+    ios_library_quick_cache_count: int = Field(default=40, ge=1, le=1_000)
+    ios_library_full_cache_count: int = Field(default=1_000, ge=1, le=10_000)
+    ios_library_quick_metadata_count: int = Field(default=100, ge=1, le=1_000)
+    ios_library_full_metadata_count: int = Field(default=2_000, ge=1, le=10_000)
+    ios_library_quick_max_bytes: int = Field(
+        default=512 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=8 * 1024 * 1024 * 1024,
+    )
+    ios_library_full_max_bytes: int = Field(
+        default=8 * 1024 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=32 * 1024 * 1024 * 1024,
+    )
+    ios_library_max_file_bytes: int = Field(
+        default=4 * 1024 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=4 * 1024 * 1024 * 1024,
+    )
+    ios_library_max_cache_source_bytes: int = Field(
+        default=256 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=1024 * 1024 * 1024,
+    )
+    ios_library_quick_cache_entry_limit: int = Field(default=5_000, ge=100, le=100_000)
+    ios_library_full_cache_entry_limit: int = Field(default=50_000, ge=100, le=500_000)
+    ios_library_quick_ithmb_sources: int = Field(default=2, ge=1, le=32)
+    ios_library_full_ithmb_sources: int = Field(default=16, ge=1, le=128)
+    ios_library_timeout_s: float = Field(default=900.0, ge=30.0, le=7200.0)
     # Selective backup2 --only sms/contacts (not full device backup).
     ios_sms_contacts_enabled: bool = True
     ios_sms_quick_messages: int = 200

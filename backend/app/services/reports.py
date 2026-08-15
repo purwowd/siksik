@@ -29,6 +29,10 @@ REPORT_CATEGORY_LABELS = {
 }
 REPORT_SOURCE_LABELS = {
     "recovered_trash": "Sampah / media terhapus",
+    "ios_hidden": "Photos Tersembunyi (iOS)",
+    "ios_recently_deleted": "Baru Dihapus (iOS)",
+    "ios_recovered_cache": "Cache / preview Photos (iOS)",
+    "ios_deleted_metadata": "Jejak hapus permanen Photos (iOS)",
 }
 REPORT_METHOD_LABELS = {
     "adb": "USB Android (ADB)",
@@ -44,6 +48,8 @@ REPORT_METHOD_LABELS = {
     "android_recovery_quick_partial": "Recovery sampah Android (Cepat, sebagian)",
     "android_recovery_full_complete": "Recovery sampah Android (Penuh)",
     "android_recovery_full_partial": "Recovery sampah Android (Penuh, sebagian)",
+    "ios_afc_media": "Media dan recovery Photos iOS",
+    "ios_photo_library_recovery": "Hidden/deleted/cache Photos iOS",
     "zip_upload": "Unggah ZIP",
     "simulated": "Simulasi lab",
     "unknown": "Tidak diketahui",
@@ -63,6 +69,11 @@ PROFILE_LINK = re.compile(
 ACCOUNT_MARKER = re.compile(r"^[A-Za-z0-9._]{2,30}$")
 NUMERIC_ACCOUNT_MARKER = re.compile(r"^[0-9._]+$")
 PROFILE_COUNT = re.compile(r"^(?:[0-9][0-9.,]*|[0-9:. ]+(?:am|pm)?)$")
+PROFILE_METRIC_TOKEN = re.compile(
+    r"(?i)(?<![A-Za-z0-9])([0-9][0-9.,]*\s*(?:k|m|b|rb|jt)?)\s*"
+    r"(friends?|teman|followers?|following|pengikut|mengikuti|posts?|postingan|kiriman)\b"
+)
+PROFILE_METRIC_SEPARATOR = re.compile(r"[\s·•|,;/]+")
 PROFILE_NOISE = {
     "add",
     "add banners",
@@ -254,6 +265,16 @@ def _ms(v: float) -> str:
 
 def _esc(value: object) -> str:
     return html.escape("" if value is None else str(value), quote=True)
+
+
+def _social_account_heading(account: dict) -> str:
+    platform = str(account.get("platform") or "Akun sosial")
+    display_name = str(account.get("display_name") or "").strip()
+    username = str(account.get("username") or "").strip().removeprefix("@")
+    if username:
+        identity = f"{display_name} · @{username}" if display_name else f"@{username}"
+        return f"{platform} · {identity}"
+    return f"{platform} · {display_name}" if display_name else platform
 
 
 def _report_label(value: object, labels: dict[str, str]) -> str:
@@ -532,18 +553,20 @@ def _profile_username(
     from_nodes = _profile_username_from_nodes(metadata)
     if from_nodes:
         return from_nodes
-    from_regions = _profile_username_from_ocr_regions(record)
-    if from_regions:
-        return from_regions
+    if package_name != "com.facebook.katana":
+        from_regions = _profile_username_from_ocr_regions(record)
+        if from_regions:
+            return from_regions
     ocr_blob = "\n".join(lines)
     preprocessing = record.get("preprocessing")
     if isinstance(preprocessing, dict):
         ocr = preprocessing.get("ocr")
         if isinstance(ocr, dict) and isinstance(ocr.get("text"), str):
             ocr_blob = f"{ocr_blob}\n{ocr['text']}"
-    recovered = _username_from_ocr_blob(ocr_blob)
-    if recovered:
-        return recovered
+    if package_name != "com.facebook.katana":
+        recovered = _username_from_ocr_blob(ocr_blob)
+        if recovered:
+            return recovered
     for line in lines:
         match = PROFILE_USERNAME.search(line)
         if match:
@@ -644,20 +667,17 @@ def _profile_bio(
 
 
 def _is_profile_metric_chrome(line: str) -> bool:
-    key = line.casefold().replace(" ", "")
-    return bool(
-        re.fullmatch(
-            r"\d[\d.,]*(k|m|b|rb|jt)?(followers?|following|pengikut|mengikuti|posts?|postingan|kiriman)",
-            key,
-        )
-    )
+    if PROFILE_METRIC_TOKEN.search(line) is None:
+        return False
+    remainder = PROFILE_METRIC_TOKEN.sub("", line)
+    return PROFILE_METRIC_SEPARATOR.sub("", remainder) == ""
 
 
 def _profile_metrics(metadata: dict, lines: list[str]) -> dict[str, int | None]:
     raw = metadata.get("profile_metrics")
     values = raw if isinstance(raw, dict) else {}
     output: dict[str, int | None] = {}
-    for key in ("posts", "followers", "following"):
+    for key in ("posts", "followers", "friends", "following"):
         value = values.get(key)
         output[key] = (
             value
@@ -681,6 +701,7 @@ def _profile_metric_from_lines(lines: list[str], name: str) -> int | None:
     labels = {
         "posts": {"posts", "postingan", "kiriman", "tweets", "tweet"},
         "followers": {"followers", "pengikut"},
+        "friends": {"friends", "friend", "teman"},
         "following": {"following", "mengikuti", "diikuti"},
     }[name]
     count_pattern = re.compile(r"^([0-9]+(?:[.,][0-9]+)?)\s*(k|m|b|rb|jt)?$", re.I)
@@ -889,7 +910,7 @@ def _apply_social_enrichment(record: dict, row) -> dict:
         if isinstance(derived_metrics, dict):
             existing_metrics = metadata.get("profile_metrics")
             merged_metrics = dict(existing_metrics) if isinstance(existing_metrics, dict) else {}
-            for name in ("posts", "followers", "following"):
+            for name in ("posts", "followers", "friends", "following"):
                 value = derived_metrics.get(name)
                 if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                     merged_metrics[name] = value
@@ -980,6 +1001,7 @@ async def _social_report_data(session_id: str) -> tuple[list[dict], int, bool]:
                 "profile_metrics": {
                     "posts": None,
                     "followers": None,
+                    "friends": None,
                     "following": None,
                 },
                 "scope_counts": {name: 0 for name in SOCIAL_SCOPES},
@@ -991,11 +1013,16 @@ async def _social_report_data(session_id: str) -> tuple[list[dict], int, bool]:
         if scope == "own_profile":
             username = _profile_username(package_name, record, metadata, lines)
             links = _profile_links(metadata, record.get("normalized_text"), record)
+            display_name = _profile_display_name(metadata)
             bio = _profile_bio(record, metadata, lines, username, links)
+            if (
+                bio
+                and display_name
+                and bio.strip().casefold() == display_name.strip().casefold()
+            ):
+                bio = None
             account["username"] = username or account["username"]
-            account["display_name"] = (
-                _profile_display_name(metadata) or account["display_name"]
-            )
+            account["display_name"] = display_name or account["display_name"]
             account["bio"] = bio or account["bio"]
             metrics = _profile_metrics(metadata, lines)
             account["profile_metrics"] = {
@@ -1133,7 +1160,19 @@ def report_to_html(report: dict) -> str:
             f"{_esc(progress.get('recovery_captured', 0))} item · "
             f"{_esc(progress.get('recovery_bytes', 0))} bytes · "
             f"{_esc(state_label)} · "
-            f"{_esc(progress.get('recovery_warning_count', 0))} peringatan</li>"
+            f"{_esc(progress.get('recovery_warning_count', 0))} peringatan · "
+            f"cache { _esc(progress.get('recovery_cache_captured', 0))} preview/"
+            f"{ _esc(progress.get('recovery_cache_sources', 0))} sumber</li>"
+        )
+    ios_library_metric = ""
+    if progress.get("ios_library_state"):
+        ios_library_metric = (
+            "<li>Recovery Photos iOS: "
+            f"Hidden {_esc(progress.get('ios_hidden_captured', 0))} · "
+            f"baru dihapus {_esc(progress.get('ios_recently_deleted_captured', 0))} · "
+            f"cache {_esc(progress.get('ios_cache_captured', 0))} · "
+            f"jejak purge {_esc(progress.get('ios_deleted_metadata_captured', 0))} · "
+            f"{_esc(progress.get('ios_library_warning_count', 0))} peringatan</li>"
         )
     rec = s["recommendation"] or "-"
     if s["recommendation"] == "TIDAK LULUS":
@@ -1146,7 +1185,7 @@ def report_to_html(report: dict) -> str:
     social_accounts = report.get("social_accounts", [])
     account_rows = "".join(
         "<div class=\"account\">"
-        f"<h3>{_esc(account['platform'])} · @{_esc(account.get('username') or '-')}</h3>"
+        f"<h3>{_esc(_social_account_heading(account))}</h3>"
         f"<div><b>Nama tampilan:</b> {_esc(account.get('display_name') or '-')}</div>"
         f"<div><b>Bio / profil terlihat:</b><br>{_esc(account.get('bio') or '-')}</div>"
         f"<div><b>Link profil:</b> {_esc(', '.join(account.get('profile_links', [])) or '-')}</div>"
@@ -1201,6 +1240,7 @@ th,td{{border-bottom:1px solid rgba(0,229,200,.15);padding:8px;text-align:left;v
     <li>Analyze: {_esc(_ms(m['timing'].get('t_analyze_ms',0)))}</li>
     <li>Total: {_esc(_ms(m['timing'].get('t_total_ms',0)))}</li>
     {recovery_metric}
+    {ios_library_metric}
   </ul>
   <h2>By category</h2>
   <ul>{cat}</ul>

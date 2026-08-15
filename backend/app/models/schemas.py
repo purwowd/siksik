@@ -202,7 +202,15 @@ class SessionProgress(ResponseModel):
     recovery_bytes: int | None = Field(default=None, ge=0)
     recovery_warning_count: int | None = Field(default=None, ge=0)
     recovery_duration_ms: float | None = Field(default=None, ge=0)
+    recovery_cache_sources: int | None = Field(default=None, ge=0)
+    recovery_cache_captured: int | None = Field(default=None, ge=0)
     recovery_error_category: str | None = Field(default=None, max_length=64)
+    ios_library_state: str | None = Field(default=None, max_length=32)
+    ios_hidden_captured: int | None = Field(default=None, ge=0)
+    ios_recently_deleted_captured: int | None = Field(default=None, ge=0)
+    ios_cache_captured: int | None = Field(default=None, ge=0)
+    ios_deleted_metadata_captured: int | None = Field(default=None, ge=0)
+    ios_library_warning_count: int | None = Field(default=None, ge=0)
 
 
 class AgentBootstrapStatus(ResponseModel):

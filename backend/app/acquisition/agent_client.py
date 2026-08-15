@@ -345,6 +345,7 @@ class VisibleNodeV1(StrictAgentModel):
 class SocialProfileMetricsV1(StrictAgentModel):
     posts: int | None = Field(default=None, ge=0, le=10**12)
     followers: int | None = Field(default=None, ge=0, le=10**12)
+    friends: int | None = Field(default=None, ge=0, le=10**12)
     following: int | None = Field(default=None, ge=0, le=10**12)
 
 

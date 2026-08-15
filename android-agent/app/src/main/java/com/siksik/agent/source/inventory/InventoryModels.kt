@@ -167,6 +167,7 @@ interface InventorySource {
         documentGrantId: String?,
         checkpoint: String?,
         limit: Int,
+        timeScope: InventoryTimeScope = InventoryTimeScope.UNBOUNDED,
         isCancelled: () -> Boolean,
     ): AdapterPage
 }

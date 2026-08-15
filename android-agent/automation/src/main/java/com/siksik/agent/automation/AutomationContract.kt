@@ -30,6 +30,9 @@ enum class SocialCaptureMode {
     VISUAL,
 }
 
+internal const val INSTAGRAM_ARCHIVE_SCROLL_LIMIT = 3
+internal const val INSTAGRAM_COMMENTS_SCROLL_LIMIT = 3
+
 data class ScopeCapture(
     val stored: Boolean,
     val screenshotId: String?,
@@ -81,8 +84,8 @@ class InstagramOwnAccountStrategy : TargetNavigationStrategy {
     override val scopes = listOf(
         SocialScope.OWN_PROFILE,
         SocialScope.OWN_POSTS,
-        SocialScope.OWN_STORY_ARCHIVE,
         SocialScope.OWN_COMMENTS,
+        SocialScope.OWN_STORY_ARCHIVE,
     )
 
     override fun scrollWeight(scope: SocialScope): Int = when (scope) {
@@ -94,17 +97,22 @@ class InstagramOwnAccountStrategy : TargetNavigationStrategy {
     }
 
     override fun additionalCaptureCount(scope: SocialScope): Int = when (scope) {
-        SocialScope.OWN_STORY_ARCHIVE -> 12
+        SocialScope.OWN_STORY_ARCHIVE -> INSTAGRAM_ARCHIVE_SCROLL_LIMIT
         SocialScope.OWN_POSTS -> 40
-        // Max 3 comment-list scrolls (initial capture + up to 3 pages).
-        SocialScope.OWN_COMMENTS -> 3
+        SocialScope.OWN_COMMENTS -> INSTAGRAM_COMMENTS_SCROLL_LIMIT
         else -> 0
     }
 
     override fun screenshotLimit(scope: SocialScope, totalLimit: Int): Int = when (scope) {
         SocialScope.OWN_PROFILE -> minOf(1, totalLimit)
-        SocialScope.OWN_STORY_ARCHIVE -> minOf(13, (totalLimit - 1).coerceAtLeast(0))
-        SocialScope.OWN_COMMENTS -> minOf(4, (totalLimit - 1).coerceAtLeast(0))
+        SocialScope.OWN_STORY_ARCHIVE -> minOf(
+            INSTAGRAM_ARCHIVE_SCROLL_LIMIT + 1,
+            (totalLimit - 1).coerceAtLeast(0),
+        )
+        SocialScope.OWN_COMMENTS -> minOf(
+            INSTAGRAM_COMMENTS_SCROLL_LIMIT + 1,
+            (totalLimit - 1).coerceAtLeast(0),
+        )
         SocialScope.OWN_POSTS -> (totalLimit - 9).coerceAtLeast(0)
         else -> 0
     }
