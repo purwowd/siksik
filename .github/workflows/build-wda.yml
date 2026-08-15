@@ -1,27 +1,110 @@
 name: Build WebDriverAgent IPA
 
 on:
-  workflow_dispatch:   # bisa dipicu manual dari tab Actions
+  workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-wda-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-wda:
-    runs-on: macos-latest   # runner macOS gratis dari GitHub, kamu tidak butuh Mac sendiri
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+
     steps:
-      - name: Checkout WebDriverAgent
+      - name: Checkout SIKSIK revision
         uses: actions/checkout@v4
         with:
-          repository: appium/WebDriverAgent
-          submodules: recursive
+          path: siksik
+          persist-credentials: false
 
-      - name: Select Xcode version
-        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-
-      # bootstrap.sh sudah dihapus dari WDA modern — deps sudah bundled
-
-      - name: Build for testing (unsigned)
+      - name: Resolve pinned WebDriverAgent source
+        id: wda-source
+        working-directory: siksik
         run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          source = json.loads(
+              Path("ios-media-puller/ios_automator/wda-source.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          if source.get("schema_version") != 1:
+              raise SystemExit("unsupported WDA source schema")
+          repository = source.get("repository")
+          commit = source.get("commit")
+          version = source.get("version")
+          if repository != "appium/WebDriverAgent":
+              raise SystemExit("unexpected WDA repository")
+          if (
+              not isinstance(commit, str)
+              or re.fullmatch(r"[0-9a-f]{40}", commit) is None
+          ):
+              raise SystemExit("invalid WDA commit pin")
+          if (
+              not isinstance(version, str)
+              or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None
+          ):
+              raise SystemExit("invalid WDA version")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"repository={repository}\n")
+              output.write(f"commit={commit}\n")
+              output.write(f"version={version}\n")
+          PY
+
+      - name: Checkout pinned WebDriverAgent
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.wda-source.outputs.repository }}
+          ref: ${{ steps.wda-source.outputs.commit }}
+          path: wda
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify source revisions
+        env:
+          EXPECTED_WDA_SHA: ${{ steps.wda-source.outputs.commit }}
+          EXPECTED_WDA_VERSION: ${{ steps.wda-source.outputs.version }}
+        run: |
+          test "$(git -C siksik rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C wda rev-parse HEAD)" = "$EXPECTED_WDA_SHA"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          actual = json.loads(
+              Path("wda/package.json").read_text(encoding="utf-8")
+          )["version"]
+          expected = os.environ["EXPECTED_WDA_VERSION"]
+          if actual != expected:
+              raise SystemExit(
+                  f"WDA version mismatch: expected {expected}, found {actual}"
+              )
+          PY
+
+      - name: Verify pinned Xcode
+        run: |
+          xcodebuild -version
+          xcodebuild -version | grep -qx 'Xcode 16.4'
+
+      - name: Build WebDriverAgent for testing
+        working-directory: wda
+        run: |
+          set -euo pipefail
           xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
@@ -30,16 +113,74 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
 
-      - name: Package into IPA
+      - name: Package and verify unsigned IPA
+        env:
+          SIKSIK_REPOSITORY: ${{ github.repository }}
+          SIKSIK_SHA: ${{ github.sha }}
+          WDA_REPOSITORY: ${{ steps.wda-source.outputs.repository }}
+          WDA_SHA: ${{ steps.wda-source.outputs.commit }}
+          WDA_VERSION: ${{ steps.wda-source.outputs.version }}
         run: |
-          cd build/Build/Products/Debug-iphoneos
-          mkdir -p Payload
-          cp -r WebDriverAgentRunner-Runner.app Payload/
-          zip -r WebDriverAgentRunner.ipa Payload
+          set -euo pipefail
+          app="$GITHUB_WORKSPACE/wda/build/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app"
+          package="$RUNNER_TEMP/wda-package"
+          artifact="$GITHUB_WORKSPACE/artifact"
+          test -d "$app"
+          rm -rf "$package" "$artifact"
+          mkdir -p "$package/Payload" "$artifact"
+          cp -R "$app" "$package/Payload/"
 
-      - name: Upload artifact
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = {
+              "schema_version": 1,
+              "artifact": "WebDriverAgentRunner.ipa",
+              "signed": False,
+              "siksik": {
+                  "repository": os.environ["SIKSIK_REPOSITORY"],
+                  "revision": os.environ["SIKSIK_SHA"],
+              },
+              "webdriveragent": {
+                  "repository": os.environ["WDA_REPOSITORY"],
+                  "revision": os.environ["WDA_SHA"],
+                  "version": os.environ["WDA_VERSION"],
+              },
+              "github_actions": {
+                  "run_id": os.environ["GITHUB_RUN_ID"],
+                  "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                  "workflow": os.environ["GITHUB_WORKFLOW"],
+              },
+          }
+          encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+          artifact = Path(os.environ["GITHUB_WORKSPACE"]) / "artifact"
+          embedded = (
+              Path(os.environ["RUNNER_TEMP"])
+              / "wda-package"
+              / "Payload"
+              / "WebDriverAgentRunner-Runner.app"
+              / "siksik-build-provenance.json"
+          )
+          (artifact / "build-provenance.json").write_text(encoded, encoding="utf-8")
+          embedded.write_text(encoded, encoding="utf-8")
+          PY
+
+          bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$package/Payload/WebDriverAgentRunner-Runner.app/Info.plist")"
+          test "$bundle_id" = "com.facebook.WebDriverAgentRunner.xctrunner"
+          (cd "$package" && zip -qry "$artifact/WebDriverAgentRunner.ipa" Payload)
+          unzip -tq "$artifact/WebDriverAgentRunner.ipa"
+          unzip -p "$artifact/WebDriverAgentRunner.ipa" \
+            'Payload/WebDriverAgentRunner-Runner.app/siksik-build-provenance.json' \
+            | cmp - "$artifact/build-provenance.json"
+          (cd "$artifact" && shasum -a 256 WebDriverAgentRunner.ipa > SHA256SUMS)
+
+      - name: Upload IPA with build provenance
         uses: actions/upload-artifact@v4
         with:
           name: WebDriverAgentRunner-ipa
-          path: build/Build/Products/Debug-iphoneos/WebDriverAgentRunner.ipa
+          path: artifact/
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 90

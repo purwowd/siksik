@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "repository": "appium/WebDriverAgent",
+  "version": "16.2.0",
+  "commit": "cd3efe0c27b0924cc34488843e8cd7b6c6f775fa"
+}

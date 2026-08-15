@@ -1,10 +1,36 @@
 # SIKSIK Flow Implementation Changelog
 
-- Work period: 2026-07-16 to 2026-08-14
+- Work period: 2026-07-16 to 2026-08-15
 - Status: Unreleased local changes
 - Git baseline: `9f0d91c`
 - Android agent: `0.7.0`, API `1.0`
 - Primary project: `/Users/macbook/Documents/Product1/siksik`
+
+## 2026-08-15: Reproducible WebDriverAgent IPA artifacts
+
+- Changed the GitHub Actions WDA build from `main`-only to every pushed branch,
+  with per-ref concurrency so a newer revision cancels an obsolete build.
+- Pinned the runner to `macos-15` with Xcode 16.4 and pinned Appium
+  WebDriverAgent 16.2.0 to commit
+  `cd3efe0c27b0924cc34488843e8cd7b6c6f775fa` instead of building an
+  unversioned moving upstream branch.
+- The workflow now checks out and verifies the triggering SIKSIK SHA before
+  building WDA. Each unsigned IPA embeds a versioned provenance record with
+  the SIKSIK revision, WDA revision/version, repository, and Actions run
+  identity. The uploaded artifact also includes the same sidecar record and a
+  SHA-256 checksum, and the workflow verifies both copies before upload.
+- Clarified that WDA is the iOS UI bridge; acquisition, selectors, crawl limits,
+  and ingestion changes remain host-side SIKSIK code and are not compiled into
+  the IPA. Signing/install remains the existing local AltServer step.
+- The setup now identifies the tracked IPA as a legacy fallback and prefers a
+  verified download in `~/wda`. When both the regular IPA and a stripped-dSYM
+  cache exist, install/runtime selection uses the newer file so a stale cache
+  cannot silently override a newly downloaded Actions artifact.
+- Verification: `actionlint` 1.7.7, YAML and source-pin JSON parsing, Bash
+  syntax and newest-IPA selection smoke, workflow diff checks, IPA
+  ZIP/checksum validation, and embedded-versus-sidecar provenance comparison
+  passed. The macOS/Xcode compile remains the workflow's required release gate
+  after these local changes are committed and pushed.
 
 ## 2026-08-14: Reliable deleted/cache nudity and bounded iOS Photos recovery
 

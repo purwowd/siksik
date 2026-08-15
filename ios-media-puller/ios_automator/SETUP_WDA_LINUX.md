@@ -34,13 +34,30 @@ idevicepair pair       # kalau belum pair
 
 1. Buka workflow di monorepo:  
    https://github.com/purwowd/siksik/actions/workflows/build-wda.yml  
-2. Pakai run terbaru yang sukses, atau **Run workflow** (manual) di branch `main`
-3. Download artifact **`WebDriverAgentRunner-ipa`** → extract `WebDriverAgentRunner.ipa`
-4. Simpan lokal (contoh `ios-media-puller/WebDriverAgentRunner.ipa` atau `~/wda/`) — file ini di-gitignore
+2. Pilih run sukses untuk commit SIKSIK yang akan dipakai. Push ke branch mana pun
+   memicu build; `Run workflow` tetap tersedia untuk rebuild manual.
+3. Download artifact **`WebDriverAgentRunner-ipa`**. Artifact berisi IPA unsigned,
+   `SHA256SUMS`, dan `build-provenance.json`.
+4. Verifikasi checksum dan pastikan `siksik.revision` pada provenance sama dengan
+   SHA commit dari run GitHub Actions tersebut.
+5. Simpan hasil yang sudah diverifikasi sebagai
+   `~/wda/WebDriverAgentRunner.ipa`; lokasi ini diprioritaskan oleh runtime.
+   IPA yang sudah ada di root `ios-media-puller` adalah fallback lama, bukan
+   bukti bahwa commit SIKSIK terbaru sudah melewati build GitHub Actions.
 
 ```bash
-ls -lh WebDriverAgentRunner.ipa
+sha256sum -c SHA256SUMS
+unzip -p WebDriverAgentRunner.ipa \
+  Payload/WebDriverAgentRunner-Runner.app/siksik-build-provenance.json \
+  | cmp - build-provenance.json
+python3 -m json.tool build-provenance.json
 ```
+
+IPA hanya memuat WebDriverAgent sebagai jembatan UI. Flow, selector, batas crawl,
+dan ingestion terbaru tetap dijalankan dari kode host SIKSIK; provenance mengikat
+IPA ke revisi host yang divalidasi saat build. Toolchain CI dipin ke macOS 15,
+Xcode 16.4, dan WDA 16.2.0 agar rebuild tidak diam-diam berubah versi.
+
 ---
 
 ## 2. Pasang AltServer-Linux

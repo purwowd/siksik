@@ -14,10 +14,15 @@ export ALTSERVER_ANISETTE_SERVER="${ALTSERVER_ANISETTE_SERVER:-https://ani.sides
 
 IPA="${1:-}"
 if [[ -z "$IPA" ]]; then
-  if [[ -f "$DEFAULT_IPA_NODSYM" ]]; then
+  if [[
+    -f "$DEFAULT_IPA_NODSYM" &&
+    ( ! -f "$DEFAULT_IPA" || "$DEFAULT_IPA_NODSYM" -nt "$DEFAULT_IPA" )
+  ]]; then
     IPA="$DEFAULT_IPA_NODSYM"
   elif [[ -f "$DEFAULT_IPA" ]]; then
     IPA="$DEFAULT_IPA"
+  elif [[ -f "$DEFAULT_IPA_NODSYM" ]]; then
+    IPA="$DEFAULT_IPA_NODSYM"
   elif [[ -f "$REPO_IPA" ]]; then
     IPA="$REPO_IPA"
   fi

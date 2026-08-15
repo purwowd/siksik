@@ -108,18 +108,27 @@ find_altserver() {
 
 prepare_wda_ipa() {
   mkdir -p "$WDA_DIR"
-  if [[ -f "$WDA_DIR/WebDriverAgentRunner-nodsym.ipa" ]]; then
-    echo "$WDA_DIR/WebDriverAgentRunner-nodsym.ipa"
+  local ipa="$WDA_DIR/WebDriverAgentRunner.ipa"
+  local nodsym_ipa="$WDA_DIR/WebDriverAgentRunner-nodsym.ipa"
+  if [[
+    -f "$nodsym_ipa" &&
+    ( ! -f "$ipa" || "$nodsym_ipa" -nt "$ipa" )
+  ]]; then
+    echo "$nodsym_ipa"
     return 0
   fi
-  if [[ -f "$WDA_DIR/WebDriverAgentRunner.ipa" ]]; then
-    echo "$WDA_DIR/WebDriverAgentRunner.ipa"
+  if [[ -f "$ipa" ]]; then
+    echo "$ipa"
+    return 0
+  fi
+  if [[ -f "$nodsym_ipa" ]]; then
+    echo "$nodsym_ipa"
     return 0
   fi
   if [[ -f "$REPO_IPA" ]]; then
-    log "salin IPA repo → $WDA_DIR/WebDriverAgentRunner.ipa"
-    cp "$REPO_IPA" "$WDA_DIR/WebDriverAgentRunner.ipa"
-    echo "$WDA_DIR/WebDriverAgentRunner.ipa"
+    log "salin IPA repo → $ipa"
+    cp "$REPO_IPA" "$ipa"
+    echo "$ipa"
     return 0
   fi
   return 1
