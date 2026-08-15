@@ -77,6 +77,7 @@ class MutableStats:
     bytes_captured: int = 0
     cache_sources_scanned: int = 0
     cache_candidates_recovered: int = 0
+    cache_scan_completed: bool = False
 
     def freeze(self) -> RecoveryStatsV1:
         return RecoveryStatsV1.model_validate(asdict(self))
@@ -118,6 +119,7 @@ class AndroidRecoveryService:
             and len(existing.artifacts) <= policy.max_items
             and existing.stats.bytes_captured <= policy.max_bytes
             and all(item.size_bytes <= policy.max_file_bytes for item in existing.artifacts)
+            and (not policy.recover_cache or existing.stats.cache_scan_completed)
         ):
             return RecoveryRunResult(root, existing, (time.perf_counter() - started) * 1000)
 
@@ -164,7 +166,7 @@ class AndroidRecoveryService:
             if artifact is not None:
                 artifacts.append(artifact)
 
-        if policy.recover_cache and len(artifacts) < policy.max_items:
+        if policy.recover_cache:
             await self._recover_cache_previews(
                 serial,
                 roots,
@@ -176,6 +178,7 @@ class AndroidRecoveryService:
                 known_hashes,
                 warnings,
             )
+            stats.cache_scan_completed = True
 
         partial = bool(warnings or stats.payloads_failed or stats.payloads_skipped)
         manifest = RecoveryManifestV1(
@@ -198,6 +201,8 @@ class AndroidRecoveryService:
             recovery_bytes=stats.bytes_captured,
             recovery_warning_count=len(warnings),
             recovery_duration_ms=round(duration_ms, 1),
+            recovery_cache_sources=stats.cache_sources_scanned,
+            recovery_cache_captured=stats.cache_candidates_recovered,
         )
         logger.info(
             "android_recovery_completed",
@@ -236,7 +241,7 @@ class AndroidRecoveryService:
             ),
             query_timeout_s=settings.android_recovery_query_timeout_s,
             transfer_timeout_s=settings.android_recovery_transfer_timeout_s,
-            recover_cache=not quick,
+            recover_cache=True,
         )
 
     async def _trash_candidates(

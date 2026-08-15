@@ -205,6 +205,7 @@ class InventoryController(
         } else {
             requestedLimit
         }
+        val timeScope = InventoryTimeScope.forRun(run.mode, run.startedAtEpochMs)
         store.startSource(crawlId, source, clock())
         val adapterPage = try {
             sources.getValue(source).page(
@@ -212,6 +213,7 @@ class InventoryController(
                 run.documentGrantId,
                 checkpoint,
                 adapterLimit,
+                timeScope,
             ) { store.isCancellationRequested(crawlId) }
         } catch (exception: ApiException) {
             store.finishPage(
@@ -254,7 +256,7 @@ class InventoryController(
         }
         val accepted = ArrayList<InventoryRecord>(adapterPage.records.size)
         var duplicates = 0
-        adapterPage.records.forEach { record ->
+        adapterPage.records.filter(timeScope::includes).forEach { record ->
             if (
                 store.claimIdentity(
                     crawlId,

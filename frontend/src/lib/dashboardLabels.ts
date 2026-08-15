@@ -33,6 +33,10 @@ const SOURCE_LABELS: Record<string, string> = {
   dcim: "Kamera HP",
   download: "Folder unduhan",
   recovered_trash: "Sampah / media terhapus",
+  ios_hidden: "Photos Tersembunyi (iOS)",
+  ios_recently_deleted: "Baru Dihapus (iOS)",
+  ios_recovered_cache: "Cache / preview Photos (iOS)",
+  ios_deleted_metadata: "Jejak hapus permanen Photos (iOS)",
 };
 
 const METHOD_LABELS: Record<string, string> = {

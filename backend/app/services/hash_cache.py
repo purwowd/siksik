@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from contextvars import ContextVar
 
 from app.core.config import settings
@@ -30,7 +31,7 @@ def engine_fingerprint() -> str:
     mode = get_analysis_mode()
     return "|".join(
         [
-            "v13",  # add mode-aware explicit-nudity enrichment
+            "v14",  # do not persist incomplete nudity runs as clean media
             f"mode={mode.value if mode else 'none'}",
             f"ocr={int(bool(settings.ocr_enabled))}",
             f"mt={int(bool(settings.media_text_enabled))}",
@@ -61,6 +62,11 @@ def engine_fingerprint() -> str:
                 f"{settings.nudity_video_frames_full}:"
                 f"{settings.nudity_video_min_positive_frames}:"
                 f"{settings.nudity_frame_max_edge_px}"
+            ),
+            (
+                "nudity_codec="
+                f"{int(shutil.which('ffmpeg') is not None)}:"
+                f"{int(shutil.which('ffprobe') is not None)}"
             ),
         ]
     )

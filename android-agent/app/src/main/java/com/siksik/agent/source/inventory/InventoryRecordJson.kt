@@ -200,15 +200,16 @@ object InventoryRecordJson {
         val packageName = metadata.optString("package_name")
         val username = profileUsernameFromNodes(nodes, packageName)
             ?: profileUsername(packageName, text)
+        val displayName = profileDisplayName(nodes, username)
         metadata.put("profile_username", username ?: JSONObject.NULL)
         metadata.put(
             "profile_display_name",
-            profileDisplayName(nodes, username) ?: JSONObject.NULL,
+            displayName ?: JSONObject.NULL,
         )
         metadata.put(
             "profile_bio",
-            profileBioFromNodes(nodes, username, links)
-                ?: profileBio(text, username, links)
+            profileBioFromNodes(nodes, username, displayName, links)
+                ?: profileBio(text, username, displayName, links)
                 ?: JSONObject.NULL,
         )
         metadata.put("profile_metrics", profileMetrics(nodes, text))
@@ -328,6 +329,7 @@ object InventoryRecordJson {
     private fun profileBio(
         value: String,
         username: String?,
+        displayName: String?,
         links: List<String>,
     ): String? {
         val linkSet = links.map { it.lowercase(Locale.ROOT) }
@@ -338,6 +340,7 @@ object InventoryRecordJson {
             .filter { line ->
                 val normalized = line.lowercase(Locale.ROOT)
                 normalized != username?.lowercase(Locale.ROOT) &&
+                    normalized != displayName?.lowercase(Locale.ROOT) &&
                     normalized !in PROFILE_NOISE &&
                     normalized !in POST_LABELS &&
                     !PROFILE_COUNT.matches(normalized) &&
@@ -372,6 +375,7 @@ object InventoryRecordJson {
     private fun profileBioFromNodes(
         nodes: JSONArray?,
         username: String?,
+        displayName: String?,
         links: List<String>,
     ): String? {
         val linkKeys = links.map { value -> value.lowercase(Locale.ROOT) }
@@ -384,6 +388,7 @@ object InventoryRecordJson {
             .map(ProfileNodeValue::text)
             .map(String::trim)
             .filter { value -> profileTextCandidate(value, username) }
+            .filterNot { value -> value.equals(displayName, ignoreCase = true) }
             .filter { value ->
                 val normalized = value.lowercase(Locale.ROOT)
                 linkKeys.none(normalized::contains) && !isProfileMetricLine(normalized)
@@ -417,6 +422,15 @@ object InventoryRecordJson {
                     textValues,
                     FOLLOWER_METRIC_LABELS,
                     FOLLOWER_METRIC_RESOURCES,
+                ) ?: JSONObject.NULL,
+            )
+            .put(
+                "friends",
+                profileMetric(
+                    values,
+                    textValues,
+                    FRIEND_METRIC_LABELS,
+                    FRIEND_METRIC_RESOURCES,
                 ) ?: JSONObject.NULL,
             )
             .put(
@@ -612,18 +626,21 @@ object InventoryRecordJson {
     private val FOLLOWER_METRIC_LABELS = setOf(
         "followers",
         "pengikut",
+    )
+    private val FRIEND_METRIC_LABELS = setOf(
         "friends",
         "teman",
         "friend",
     )
     private val FOLLOWING_METRIC_LABELS = setOf("following", "mengikuti", "diikuti")
     private val PROFILE_METRIC_LABELS =
-        POST_METRIC_LABELS + FOLLOWER_METRIC_LABELS + FOLLOWING_METRIC_LABELS
+        POST_METRIC_LABELS + FOLLOWER_METRIC_LABELS + FRIEND_METRIC_LABELS +
+            FOLLOWING_METRIC_LABELS
     private val PROFILE_COUNT_VALUE = Regex(
         "^([0-9]+(?:[.,][0-9]+)?|[0-9][0-9., ]*)\\s*(k|m|b|rb|jt)?$",
     )
     private val PACKED_METRIC_LINE = Regex(
-        "^\\d[\\d.,]*(k|m|b|rb|jt)?(followers?|following|pengikut|mengikuti|posts?|postingan|kiriman)$",
+        "^\\d[\\d.,]*(k|m|b|rb|jt)?(friends?|teman|followers?|following|pengikut|mengikuti|posts?|postingan|kiriman)$",
     )
     private val PROFILE_USERNAME_RESOURCES = setOf(
         "action_bar_title",
@@ -645,6 +662,8 @@ object InventoryRecordJson {
         "profile_header_followers_stacked_familiar",
         "profile_header_followers_value",
         "followers_stat",
+    )
+    private val FRIEND_METRIC_RESOURCES = setOf(
         "friends_stat",
     )
     private val FOLLOWING_METRIC_RESOURCES = setOf(

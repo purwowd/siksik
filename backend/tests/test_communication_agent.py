@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -263,6 +264,7 @@ class FakeAutomationAdb:
         self.results = results
         self.installs: list[Path] = []
         self.instrumented: list[str] = []
+        self.instrumentation_arguments: list[dict[str, object]] = []
         self.restarted: list[tuple[str, dict[str, str | int]]] = []
         self.restart_failure = False
         self.force_stopped = False
@@ -276,6 +278,7 @@ class FakeAutomationAdb:
     async def run_instrumentation(self, _serial, **kwargs) -> ProcessResult:
         target = kwargs["arguments"]["target_package"]
         self.instrumented.append(target)
+        self.instrumentation_arguments.append(kwargs["arguments"])
         payload = self.results[target].model_dump_json()
         return ProcessResult(("adb",), 0, RESULT_PREFIX + payload, "")
 
@@ -327,7 +330,20 @@ def automation_config(apk: Path) -> AutomationConfig:
 
 
 @pytest.mark.unit
-async def test_orchestrator_builds_installs_and_reports_missing_target(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("mode", "cutoff_month", "expected_scrolls", "expected_screenshots"),
+    [
+        ("quick", 5, 3, 3),
+        ("full", 2, 12, 8),
+    ],
+)
+async def test_orchestrator_builds_installs_and_reports_missing_target(
+    tmp_path: Path,
+    mode: str,
+    cutoff_month: int,
+    expected_scrolls: int,
+    expected_screenshots: int,
+) -> None:
     apk = tmp_path / "automation-debug.apk"
     apk.write_bytes(b"fixture")
     instagram = AutomationResultV1(
@@ -341,7 +357,15 @@ async def test_orchestrator_builds_installs_and_reports_missing_target(tmp_path:
     )
     adb = FakeAutomationAdb({"com.instagram.android": instagram})
     builder = FakeBuilder()
-    orchestrator = AndroidUiAutomationOrchestrator(automation_config(apk), adb, builder)
+    orchestrator = AndroidUiAutomationOrchestrator(
+        automation_config(apk),
+        adb,
+        builder,
+        clock=lambda: datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc),
+    )
+    expected_cutoff = int(
+        datetime(2026, cutoff_month, 14, 10, 0, tzinfo=timezone.utc).timestamp() * 1000
+    )
 
     results = await orchestrator.run(
         serial="serial-fixture",
@@ -349,7 +373,8 @@ async def test_orchestrator_builds_installs_and_reports_missing_target(tmp_path:
         session_token=SESSION_TOKEN,
         token_expires_at_epoch_ms=TOKEN_EXPIRY_EPOCH_MS,
         crawl_id=CRAWL_ID,
-        mode="quick",
+        mode=mode,
+        not_before_epoch_ms=expected_cutoff if mode == "full" else None,
         target_packages=("com.instagram.android", "com.facebook.katana"),
         request_id="request-fixture",
     )
@@ -357,6 +382,9 @@ async def test_orchestrator_builds_installs_and_reports_missing_target(tmp_path:
     assert builder.calls == 1
     assert adb.installs == [apk]
     assert adb.instrumented == ["com.instagram.android"]
+    assert adb.instrumentation_arguments[0]["not_before_epoch_ms"] == expected_cutoff
+    assert adb.instrumentation_arguments[0]["max_scrolls"] == expected_scrolls
+    assert adb.instrumentation_arguments[0]["max_screenshots"] == expected_screenshots
     assert adb.restarted == [
         (
             "com.siksik.agent/.session.BootstrapActivity",
@@ -368,6 +396,34 @@ async def test_orchestrator_builds_installs_and_reports_missing_target(tmp_path:
         ),
     ]
     assert [result.state for result in results] == ["complete", "target_missing"]
+
+
+@pytest.mark.unit
+async def test_orchestrator_rejects_invalid_time_cutoff(tmp_path: Path) -> None:
+    apk = tmp_path / "automation-debug.apk"
+    apk.write_bytes(b"fixture")
+    builder = FakeBuilder()
+    orchestrator = AndroidUiAutomationOrchestrator(
+        automation_config(apk),
+        FakeAutomationAdb({}),
+        builder,
+    )
+
+    with pytest.raises(AcquisitionError) as captured:
+        await orchestrator.run(
+            serial="serial-fixture",
+            session_id=SESSION_ID,
+            session_token=SESSION_TOKEN,
+            token_expires_at_epoch_ms=TOKEN_EXPIRY_EPOCH_MS,
+            crawl_id=CRAWL_ID,
+            mode="quick",
+            not_before_epoch_ms=True,
+            target_packages=("com.instagram.android",),
+            request_id="request-fixture",
+        )
+
+    assert captured.value.category == ErrorCategory.VALIDATION_ERROR
+    assert builder.calls == 0
 
 
 @pytest.mark.unit

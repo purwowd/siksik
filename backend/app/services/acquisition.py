@@ -9,6 +9,7 @@ import os
 import shutil
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.acquisition.adb import AsyncAdbTransport
@@ -889,8 +890,10 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
     files: list[tuple] = []
     from app.acquisition.android_recovery.paths import is_recovery_namespace_path
     from app.acquisition.android_recovery.service import recovery_metadata
+    from app.acquisition.ios_afc import is_ios_library_path, ios_library_metadata
 
     recovered_artifacts = await asyncio.to_thread(recovery_metadata, staging)
+    ios_library_artifacts = await asyncio.to_thread(ios_library_metadata, staging)
     paths = [
         p
         for p in staging.rglob("*")
@@ -902,6 +905,10 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
         and (
             not is_recovery_namespace_path(p.relative_to(staging).as_posix())
             or p.relative_to(staging).as_posix() in recovered_artifacts
+        )
+        and (
+            not is_ios_library_path(p.relative_to(staging).as_posix())
+            or p.relative_to(staging).as_posix() in ios_library_artifacts
         )
     ]
     total = len(paths)
@@ -952,25 +959,42 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
             rel = str(p.relative_to(staging))
             artifact = crawl_artifacts.get(rel)
             recovered = recovered_artifacts.get(rel)
+            ios_artifact = ios_library_artifacts.get(rel)
             source = (
                 artifact["source_kind"]
                 if artifact is not None
+                else ios_artifact.source
+                if ios_artifact is not None
                 else Path(rel).parts[0] if Path(rel).parts else "other"
             )
             digest = (
                 artifact["sha256"]
                 if artifact is not None
+                else ios_artifact.sha256
+                if ios_artifact is not None
                 else recovered.sha256 if recovered is not None else await hash_file(p)
             )
             mime = (
                 artifact["mime_type"]
                 if artifact is not None
+                else ios_artifact.mime_type
+                if ios_artifact is not None
                 else recovered.mime_type if recovered is not None else guess_mime(p)
             )
             if recovered is not None and p.stat().st_size != recovered.size_bytes:
                 raise RuntimeError("artifact recovery Android gagal verifikasi")
             if artifact is not None:
                 capture = crawl_capture_meta[str(artifact["record_id"])]
+            elif ios_artifact is not None and ios_artifact.captured_epoch_s is not None:
+                captured = datetime.fromtimestamp(
+                    ios_artifact.captured_epoch_s,
+                    tz=timezone.utc,
+                ).isoformat()
+                capture = {
+                    "captured_at": captured,
+                    "captured_year": int(captured[:4]),
+                    "date_source": "ios_photos_database",
+                }
             else:
                 from app.services.media_dates import capture_meta
 
@@ -995,6 +1019,16 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         "recovery_classification": recovered.classification,
                         "recovery_confidence": recovered.confidence,
                         "recovery_expires_epoch_s": recovered.expires_epoch_s,
+                    }
+                )
+            if ios_artifact is not None:
+                meta.update(
+                    {
+                        "acquisition_method": "ios_photo_library_recovery_v1",
+                        "ios_library_classification": ios_artifact.classification,
+                        "ios_library_capture_method": ios_artifact.capture_method,
+                        "ios_source_uuid": ios_artifact.source_uuid,
+                        "ios_original_filename": ios_artifact.original_filename,
                     }
                 )
             if mime == "application/vnd.siksik.crawl-record+json":
@@ -1029,7 +1063,7 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                 existing_file_ids.get(rel)
                 or (
                     stable_file_id(session_id, rel)
-                    if artifact is not None or recovered is not None
+                    if artifact is not None or recovered is not None or ios_artifact is not None
                     else str(uuid.uuid4())
                 )
             )

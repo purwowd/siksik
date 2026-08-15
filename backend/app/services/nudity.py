@@ -59,6 +59,13 @@ class FrameSample:
     extractor: str
 
 
+@dataclass(frozen=True)
+class NudityAnalysisResult:
+    findings: tuple[dict[str, Any], ...]
+    cacheable: bool
+    warning: str | None = None
+
+
 @dataclass
 class _DetectorState:
     attempted: bool = False
@@ -201,33 +208,43 @@ def _engine_label() -> str:
     return f"NudeNet {_package_version()}/{MODEL_NAME}"
 
 
-def analyze_image(path: Path) -> list[dict]:
-    """Return at most one pending-compatible L3 finding for an image."""
+def analyze_image_result(path: Path) -> NudityAnalysisResult:
+    """Analyze an image and retain whether an empty result is safe to cache."""
+    if not settings.nudity_detection_enabled:
+        return NudityAnalysisResult((), True)
     detector = _get_detector()
     if detector is None:
-        return []
+        return NudityAnalysisResult((), False, _state.error or "detector_unavailable")
     try:
         matches = _triggering(_detect_one(detector, path))
     except Exception as exc:
         log.debug("Nudity image analysis skipped: %s", type(exc).__name__)
-        return []
+        return NudityAnalysisResult((), False, "image_inference_failed")
     if not matches:
-        return []
+        return NudityAnalysisResult((), True)
 
     top = matches[: settings.nudity_max_evidence_items]
     evidence_items = [
         f"{item.label}={item.score:.3f}{_box_text(item.box)}"
         for item in top
     ]
-    return [
-        {
-            "category": CATEGORY,
-            "label": f"Ketelanjangan terdeteksi pada gambar: {_class_summary(matches)}",
-            "confidence": round(matches[0].score, 3),
-            "layer_origin": Layer.L3.value,
-            "evidence": f"{_engine_label()} | {'; '.join(evidence_items)}"[:320],
-        }
-    ]
+    return NudityAnalysisResult(
+        (
+            {
+                "category": CATEGORY,
+                "label": f"Ketelanjangan terdeteksi pada gambar: {_class_summary(matches)}",
+                "confidence": round(matches[0].score, 3),
+                "layer_origin": Layer.L3.value,
+                "evidence": f"{_engine_label()} | {'; '.join(evidence_items)}"[:320],
+            },
+        ),
+        True,
+    )
+
+
+def analyze_image(path: Path) -> list[dict]:
+    """Return at most one pending-compatible L3 finding for an image."""
+    return list(analyze_image_result(path).findings)
 
 
 def _video_frame_limit() -> int:
@@ -477,16 +494,18 @@ def _sample_video_frames(
         ) from opencv_error
 
 
-def analyze_video(path: Path) -> list[dict]:
-    """Return at most one pending-compatible L4 finding for sampled video frames."""
+def analyze_video_result(path: Path) -> NudityAnalysisResult:
+    """Analyze sampled frames and distinguish clean media from an incomplete run."""
+    if not settings.nudity_detection_enabled:
+        return NudityAnalysisResult((), True)
     detector = _get_detector()
     if detector is None:
-        return []
+        return NudityAnalysisResult((), False, _state.error or "detector_unavailable")
     try:
         with _sample_video_frames(path, _video_frame_limit()) as frames:
             raw_batches = _detect_many(detector, [frame.path for frame in frames])
             if len(raw_batches) != len(frames):
-                return []
+                return NudityAnalysisResult((), False, "video_batch_incomplete")
             evidence: list[tuple[FrameSample, Detection]] = []
             positive_frames: set[int] = set()
             for frame, raw in zip(frames, raw_batches):
@@ -496,10 +515,11 @@ def analyze_video(path: Path) -> list[dict]:
                     evidence.extend((frame, match) for match in matches)
     except Exception as exc:
         log.debug("Nudity video analysis skipped: %s", type(exc).__name__)
-        return []
+        warning = str(exc) if isinstance(exc, VideoSamplingError) else "video_inference_failed"
+        return NudityAnalysisResult((), False, warning[:128])
 
     if len(positive_frames) < settings.nudity_video_min_positive_frames:
-        return []
+        return NudityAnalysisResult((), True)
     evidence.sort(key=lambda item: item[1].score, reverse=True)
     top = evidence[: settings.nudity_max_evidence_items]
     detections = [item[1] for item in evidence]
@@ -513,15 +533,23 @@ def analyze_video(path: Path) -> list[dict]:
         f"{_engine_label()} | sampled={len(frames)} positive={len(positive_frames)} "
         f"sampler={samplers} | "
     )
-    return [
-        {
-            "category": CATEGORY,
-            "label": f"Ketelanjangan terdeteksi pada video: {_class_summary(detections)}",
-            "confidence": round(evidence[0][1].score, 3),
-            "layer_origin": Layer.L4.value,
-            "evidence": f"{prefix}{'; '.join(evidence_items)}"[:320],
-        }
-    ]
+    return NudityAnalysisResult(
+        (
+            {
+                "category": CATEGORY,
+                "label": f"Ketelanjangan terdeteksi pada video: {_class_summary(detections)}",
+                "confidence": round(evidence[0][1].score, 3),
+                "layer_origin": Layer.L4.value,
+                "evidence": f"{prefix}{'; '.join(evidence_items)}"[:320],
+            },
+        ),
+        True,
+    )
+
+
+def analyze_video(path: Path) -> list[dict]:
+    """Return at most one pending-compatible L4 finding for sampled video frames."""
+    return list(analyze_video_result(path).findings)
 
 
 def status() -> dict[str, Any]:

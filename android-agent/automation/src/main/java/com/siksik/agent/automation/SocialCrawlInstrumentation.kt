@@ -34,6 +34,13 @@ class SocialCrawlInstrumentation {
             15_000,
             175_000,
         )
+        val now = System.currentTimeMillis()
+        val notBeforeEpochMs = boundedLong(
+            arguments,
+            "not_before_epoch_ms",
+            MIN_TIME_SCOPE_EPOCH_MS,
+            now - 1,
+        )
         val debugSnapshots = arguments.getString("debug_snapshots") == "true"
         val testContext = instrumentation.targetContext
         val context = testContext.createPackageContext("com.siksik.agent", 0)
@@ -44,6 +51,7 @@ class SocialCrawlInstrumentation {
             instrumentation.uiAutomation,
             sessionId,
             crawlId,
+            notBeforeEpochMs = notBeforeEpochMs,
             debugSnapshotsEnabled = debugSnapshots,
             navigationDeadlineAtMs = System.currentTimeMillis() + navigationDeadlineMs,
         )
@@ -93,5 +101,6 @@ class SocialCrawlInstrumentation {
     companion object {
         const val RESULT_KEY = "siksik_result"
         private const val RESULT_STATUS_CODE = 2
+        private const val MIN_TIME_SCOPE_EPOCH_MS = 946_684_800_000L
     }
 }

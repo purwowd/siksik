@@ -14,7 +14,10 @@ import com.siksik.agent.source.communication.ContactProviderGateway
 import com.siksik.agent.source.communication.SMS_PROJECTION
 import com.siksik.agent.source.communication.SmsInventorySource
 import com.siksik.agent.source.communication.SmsProviderGateway
+import com.siksik.agent.source.inventory.InventoryMode
 import com.siksik.agent.source.inventory.InventorySourceState
+import com.siksik.agent.source.inventory.InventoryTimeScope
+import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -66,6 +69,19 @@ class CommunicationProviderSourceTest {
         assertEquals(InventorySourceState.UNSUPPORTED, unsupported.state)
         assertEquals(SmsFixtureGateway.requiredProjection, SMS_PROJECTION.toSet())
         assertFalse(first.records.single().sourceLocator.contains("+620000000"))
+
+        val bounded = source.page(
+            "session_fixture",
+            null,
+            null,
+            10,
+            InventoryTimeScope.forRun(
+                InventoryMode.QUICK,
+                Instant.parse("2024-02-14T20:00:00Z").toEpochMilli(),
+            ),
+        ) { false }
+        assertEquals(1, bounded.records.size)
+        assertEquals("fixture body", bounded.records.single().normalizedText)
     }
 
     @Test
@@ -140,11 +156,13 @@ class CommunicationProviderSourceTest {
             mapOf<String, Any?>(Telephony.Sms._ID to null),
         )
 
-        override fun query(lastId: Long?, limit: Int): Cursor = matrix(
+        override fun query(lastId: Long?, notBeforeEpochMs: Long, limit: Int): Cursor = matrix(
             SMS_PROJECTION,
             rows.filter { row ->
                 val id = row[Telephony.Sms._ID] as? Long
-                lastId == null || id == null || id < lastId
+                val timestamp = row[Telephony.Sms.DATE] as? Long
+                (timestamp == null || timestamp <= 0 || timestamp >= notBeforeEpochMs) &&
+                    (lastId == null || id == null || id < lastId)
             }.take(limit),
         )
 

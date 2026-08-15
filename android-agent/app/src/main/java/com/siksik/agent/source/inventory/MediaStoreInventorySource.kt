@@ -64,6 +64,7 @@ class MediaStoreInventorySource(
         documentGrantId: String?,
         checkpoint: String?,
         limit: Int,
+        timeScope: InventoryTimeScope,
         isCancelled: () -> Boolean,
     ): AdapterPage {
         if (limit !in 1..BuildConfig.MAX_INVENTORY_PAGE_SIZE) {
@@ -74,7 +75,7 @@ class MediaStoreInventorySource(
             return AdapterPage(emptyList(), null, 0, available.state, available.reason)
         }
         val lastId = decodeCheckpoint(checkpoint)
-        val spec = querySpec(lastId, limit)
+        val spec = querySpec(lastId, limit, timeScope)
         val signal = CancellationSignal()
         val records = mutableListOf<InventoryRecord>()
         var scanned = 0
@@ -146,7 +147,11 @@ class MediaStoreInventorySource(
         )
     }
 
-    private fun querySpec(lastId: Long?, limit: Int): QuerySpec {
+    private fun querySpec(
+        lastId: Long?,
+        limit: Int,
+        timeScope: InventoryTimeScope,
+    ): QuerySpec {
         val collection = when (adapter) {
             SourceAdapter.MEDIA_IMAGE -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
             SourceAdapter.MEDIA_VIDEO -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
@@ -168,6 +173,7 @@ class MediaStoreInventorySource(
             clauses.add("${MediaStore.MediaColumns._ID} < ?")
             selectionArgs.add(lastId.toString())
         }
+        addTimeFilter(clauses, selectionArgs, timeScope)
         when (adapter) {
             SourceAdapter.PUBLIC_WHATSAPP -> addPublicPathFilter(
                 clauses,
@@ -198,6 +204,43 @@ class MediaStoreInventorySource(
             putInt(ContentResolver.QUERY_ARG_LIMIT, limit)
         }
         return QuerySpec(collection, projection(), bundle)
+    }
+
+    private fun addTimeFilter(
+        clauses: MutableList<String>,
+        arguments: MutableList<String>,
+        timeScope: InventoryTimeScope,
+    ) {
+        if (!timeScope.isBounded) return
+        val dateAdded = MediaStore.MediaColumns.DATE_ADDED
+        val dateModified = MediaStore.MediaColumns.DATE_MODIFIED
+        val seconds = Math.floorDiv(timeScope.notBeforeEpochMs, 1000L).toString()
+        val supportsDateTaken = adapter in setOf(
+            SourceAdapter.MEDIA_IMAGE,
+            SourceAdapter.MEDIA_VIDEO,
+            SourceAdapter.PUBLIC_WHATSAPP,
+            SourceAdapter.PUBLIC_TELEGRAM,
+        )
+        if (supportsDateTaken) {
+            val dateTaken = MediaStore.Images.ImageColumns.DATE_TAKEN
+            clauses.add(
+                "($dateTaken >= ? OR $dateAdded >= ? OR $dateModified >= ? OR " +
+                    "(($dateTaken IS NULL OR $dateTaken <= 0) AND " +
+                    "($dateAdded IS NULL OR $dateAdded <= 0) AND " +
+                    "($dateModified IS NULL OR $dateModified <= 0)))",
+            )
+            arguments.add(timeScope.notBeforeEpochMs.toString())
+            arguments.add(seconds)
+            arguments.add(seconds)
+        } else {
+            clauses.add(
+                "($dateAdded >= ? OR $dateModified >= ? OR " +
+                    "(($dateAdded IS NULL OR $dateAdded <= 0) AND " +
+                    "($dateModified IS NULL OR $dateModified <= 0)))",
+            )
+            arguments.add(seconds)
+            arguments.add(seconds)
+        }
     }
 
     private fun projection(): Array<String> = buildList {

@@ -12,6 +12,7 @@ import com.siksik.agent.source.inventory.InventoryRecord
 import com.siksik.agent.source.inventory.InventorySource
 import com.siksik.agent.source.inventory.InventorySourceKind
 import com.siksik.agent.source.inventory.InventorySourceState
+import com.siksik.agent.source.inventory.InventoryTimeScope
 import com.siksik.agent.source.inventory.SourceAdapter
 import com.siksik.agent.source.inventory.SourceAvailability
 
@@ -41,6 +42,7 @@ class SmsInventorySource(
         documentGrantId: String?,
         checkpoint: String?,
         limit: Int,
+        timeScope: InventoryTimeScope,
         isCancelled: () -> Boolean,
     ): AdapterPage {
         if (limit !in 1..BuildConfig.MAX_INVENTORY_PAGE_SIZE) {
@@ -55,7 +57,7 @@ class SmsInventorySource(
         var scanned = 0
         var lastScannedId: Long? = null
         try {
-            provider.query(lastId, limit)?.use { cursor ->
+            provider.query(lastId, timeScope.notBeforeEpochMs, limit)?.use { cursor ->
                 while (scanned < limit && cursor.moveToNext()) {
                     if (isCancelled()) {
                         return AdapterPage(

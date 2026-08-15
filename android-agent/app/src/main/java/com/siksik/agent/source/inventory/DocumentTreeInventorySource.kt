@@ -69,6 +69,7 @@ class DocumentTreeInventorySource(
         documentGrantId: String?,
         checkpoint: String?,
         limit: Int,
+        timeScope: InventoryTimeScope,
         isCancelled: () -> Boolean,
     ): AdapterPage {
         if (limit !in 1..BuildConfig.MAX_INVENTORY_PAGE_SIZE) {
@@ -123,10 +124,9 @@ class DocumentTreeInventorySource(
                     )
                 }
                 cursor.use {
-                    var skipped = 0
-                    while (skipped < node.offset && cursor.moveToNext()) {
+                    if (node.offset > 0) {
                         if (isCancelled()) {
-                            state.queue.addFirst(node.copy(offset = skipped))
+                            state.queue.addFirst(node)
                             activeNode = null
                             return AdapterPage(
                                 records,
@@ -136,9 +136,9 @@ class DocumentTreeInventorySource(
                                 "crawl_cancelled",
                             )
                         }
-                        skipped += 1
+                        cursor.moveToPosition(node.offset - 1)
                     }
-                    while (cursor.moveToNext()) {
+                    while (!stopForPage && cursor.moveToNext()) {
                         if (isCancelled()) {
                             state.queue.addFirst(node.copy(offset = cursor.position))
                             activeNode = null
@@ -151,6 +151,13 @@ class DocumentTreeInventorySource(
                             )
                         }
                         scanned += 1
+                        if (scanned >= limit) {
+                            if (!cursor.isLast) {
+                                state.queue.addFirst(node.copy(offset = cursor.position + 1))
+                            }
+                            activeNode = null
+                            stopForPage = true
+                        }
                         val documentId = cursor.text(
                             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                         ) ?: continue
@@ -169,17 +176,30 @@ class DocumentTreeInventorySource(
                         }
                         val mime = InventoryPolicy.normalizedMime(rawMime, name) ?: continue
                         val kind = InventoryPolicy.sourceKind(mime, name) ?: continue
+                        val modified = cursor.long(
+                            DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+                        )?.takeIf { it > 0 }
+                        if (
+                            kind != InventorySourceKind.MEDIA_IMAGE &&
+                            !timeScope.includesTimestamp(modified)
+                        ) {
+                            continue
+                        }
                         val uri = DocumentsContract.buildDocumentUriUsingTree(
                             node.treeUri,
                             documentId,
                         )
-                        records.add(mapRecord(node, cursor, documentId, uri, name, mime, kind))
-                        if (records.size >= limit) {
-                            state.queue.addFirst(node.copy(offset = cursor.position + 1))
-                            activeNode = null
-                            stopForPage = true
-                            break
-                        }
+                        val record = mapRecord(
+                            node,
+                            cursor,
+                            documentId,
+                            uri,
+                            name,
+                            mime,
+                            kind,
+                            modified,
+                        )
+                        if (timeScope.includes(record)) records.add(record)
                     }
                 }
                 activeNode = null
@@ -287,12 +307,11 @@ class DocumentTreeInventorySource(
         name: String,
         mime: String,
         kind: InventorySourceKind,
+        modified: Long?,
     ): InventoryRecord {
         val identityHash = InventoryPolicy.identityHash(
             "tree:${node.treeUri.authority}:$documentId",
         )
-        val modified = cursor.long(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
-            ?.takeIf { it > 0 }
         val exif = if (kind == InventorySourceKind.MEDIA_IMAGE) exifReader.read(uri, mime) else null
         val binary = binaryReader.read(uri, kind)
         val capture = exif?.capturedAtEpochMs ?: modified

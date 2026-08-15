@@ -5,6 +5,7 @@ import json
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,12 @@ from app.services.acquisition import IMG_EXT, TEXT_EXT, VID_EXT
 from app.services import vision as vis
 
 CANONICAL_CRAWL_RECORD_MIME = "application/vnd.siksik.crawl-record+json"
+
+
+@dataclass(frozen=True)
+class ContentAnalysisResult:
+    findings: tuple[dict[str, Any], ...]
+    cacheable: bool
 
 
 def _skip_heavy_ocr_for_gallery(path: Path, source: str) -> bool:
@@ -179,7 +186,7 @@ from app.services.hash_cache import (
 )
 
 
-def analyze_content(
+def analyze_content_result(
     path: Path,
     mime: str,
     source: str,
@@ -188,11 +195,13 @@ def analyze_content(
     *,
     precomputed_ocr_text: str | None = None,
     precomputed_ocr_backend: str | None = None,
-) -> list[dict]:
+) -> ContentAnalysisResult:
     ext = path.suffix.lower()
     if mime == CANONICAL_CRAWL_RECORD_MIME:
-        return analyze_text_l1_l2(text, keywords) if text.strip() else []
+        findings = analyze_text_l1_l2(text, keywords) if text.strip() else []
+        return ContentAnalysisResult(tuple(findings), True)
     findings: list[dict] = []
+    cacheable = True
     findings.extend(analyze_path_signals(str(path), keywords))
 
     is_image = ext in IMG_EXT or mime.startswith("image/") or (
@@ -205,11 +214,15 @@ def analyze_content(
     if is_image and ext != ".imgmeta":
         from app.services import nudity
 
-        findings.extend(nudity.analyze_image(path))
+        outcome = nudity.analyze_image_result(path)
+        findings.extend(outcome.findings)
+        cacheable = cacheable and outcome.cacheable
     elif is_video and ext != ".vidmeta":
         from app.services import nudity
 
-        findings.extend(nudity.analyze_video(path))
+        outcome = nudity.analyze_video_result(path)
+        findings.extend(outcome.findings)
+        cacheable = cacheable and outcome.cacheable
 
     if ext == ".imgmeta":
         findings.extend(analyze_image_meta_l3(text))
@@ -256,7 +269,31 @@ def analyze_content(
         if key not in seen:
             seen.add(key)
             uniq.append(f)
-    return uniq
+    return ContentAnalysisResult(tuple(uniq), cacheable)
+
+
+def analyze_content(
+    path: Path,
+    mime: str,
+    source: str,
+    text: str,
+    keywords: list[str],
+    *,
+    precomputed_ocr_text: str | None = None,
+    precomputed_ocr_backend: str | None = None,
+) -> list[dict]:
+    """Compatibility wrapper for callers that only need findings."""
+    return list(
+        analyze_content_result(
+            path,
+            mime,
+            source,
+            text,
+            keywords,
+            precomputed_ocr_text=precomputed_ocr_text,
+            precomputed_ocr_backend=precomputed_ocr_backend,
+        ).findings
+    )
 
 
 async def analyze_session(
@@ -457,8 +494,8 @@ async def _analyze_session_body(
                     or (row["mime"] or "").startswith(("video/", "image/"))
                 )
                 if is_heavy:
-                    results = await asyncio.to_thread(
-                        analyze_content,
+                    outcome = await asyncio.to_thread(
+                        analyze_content_result,
                         path,
                         row["mime"] or "",
                         row["source"],
@@ -468,10 +505,11 @@ async def _analyze_session_body(
                         precomputed_ocr_backend=precomputed[1] if precomputed else None,
                     )
                 else:
-                    results = analyze_content(
+                    outcome = analyze_content_result(
                         path, row["mime"] or "", row["source"], text, keywords
                     )
-                if row["sha256"]:
+                results = list(outcome.findings)
+                if row["sha256"] and outcome.cacheable:
                     await set_cached(row["sha256"], results)
 
             media_year = None

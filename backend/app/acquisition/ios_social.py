@@ -292,6 +292,7 @@ def _build_visible_record(
         metrics = {
             "posts": _as_int(profile.get("posts")),
             "followers": _as_int(profile.get("followers")),
+            "friends": _as_int(profile.get("friends")),
             "following": _as_int(profile.get("following")),
         }
         if any(value is not None for value in metrics.values()):

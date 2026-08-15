@@ -20,6 +20,7 @@ from app.acquisition.live_ingestion import live_selected_ingestor
 from app.acquisition.direct_transfer import direct_crawl_transfer
 from app.acquisition.errors import AcquisitionError, ErrorCategory, acquisition_error
 from app.acquisition.runtime import AgentRuntimeSecrets
+from app.acquisition.time_scope import build_time_scope
 from app.models.schemas import SessionStatus
 from app.core.config import settings
 from app.selection.contracts import SelectionPolicyV1
@@ -77,7 +78,20 @@ class InventoryClient(Protocol):
 
 
 class AutomationRunner(Protocol):
-    async def run(self, **kwargs) -> list[AutomationResultV1]: ...
+    async def run(
+        self,
+        *,
+        serial: str,
+        session_id: str,
+        session_token: str,
+        token_expires_at_epoch_ms: int,
+        crawl_id: str,
+        mode: str,
+        not_before_epoch_ms: int,
+        target_packages: tuple[str, ...],
+        request_id: str | None,
+        on_progress: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> list[AutomationResultV1]: ...
 
 
 class SelectionSnapshotRepository(Protocol):
@@ -370,6 +384,10 @@ class Phase7AndroidAgentRunner:
                     token_expires_at_epoch_ms=self._token_expiry_epoch_ms(runtime),
                     crawl_id=run.crawl_id,
                     mode=context.mode.value,
+                    not_before_epoch_ms=build_time_scope(
+                        context.mode,
+                        reference=datetime.fromisoformat(run.started_at),
+                    ).not_before_epoch_ms,
                     target_packages=self._target_packages,
                     request_id=context.request_id,
                     on_progress=on_social_progress,

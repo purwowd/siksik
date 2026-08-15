@@ -85,6 +85,7 @@ class UiAutomatorDriver(
     private val uiAutomation: UiAutomation,
     private val sessionId: String,
     private val crawlId: String,
+    private val notBeforeEpochMs: Long,
     debugSnapshotsEnabled: Boolean = false,
     private val navigationDeadlineAtMs: Long =
         System.currentTimeMillis() + DEFAULT_NAVIGATION_BUDGET_MS,
@@ -123,6 +124,7 @@ class UiAutomatorDriver(
     private val fbVisitedViewportSignatures = mutableMapOf<SocialScope, MutableSet<String>>()
     private val fbCurrentViewportSignatures = mutableMapOf<SocialScope, String>()
     private val fbStoredItemSignatures = mutableMapOf<SocialScope, MutableSet<String>>()
+    private val temporalBoundaryScopes = mutableSetOf<SocialScope>()
     private var failureReason: String? = null
     private var cachedShellDump: String? = null
     private var cachedShellDumpAtMs: Long = 0L
@@ -130,6 +132,9 @@ class UiAutomatorDriver(
     private var shellDumpDisabledUntilMs: Long = 0L
 
     init {
+        require(notBeforeEpochMs in 1 until System.currentTimeMillis()) {
+            "social_time_scope_invalid"
+        }
         Configurator.getInstance()
             .setWaitForIdleTimeout(UI_AUTOMATOR_IDLE_TIMEOUT_MS)
             .setWaitForSelectorTimeout(UI_AUTOMATOR_SELECTOR_TIMEOUT_MS)
@@ -148,6 +153,7 @@ class UiAutomatorDriver(
         fbVisitedViewportSignatures.clear()
         fbCurrentViewportSignatures.clear()
         fbStoredItemSignatures.clear()
+        temporalBoundaryScopes.clear()
         fbOwnAccountMarker = null
         fbFeedActive = false
         failureReason = null
@@ -244,6 +250,7 @@ class UiAutomatorDriver(
     override fun scrollForward(): Boolean {
         if (navigationExpired()) return fail("navigation_deadline")
         if (activeScope == SocialScope.OWN_PROFILE) return false
+        if (activeScope in temporalBoundaryScopes) return false
         if (activePackage == INSTAGRAM_PACKAGE) {
             when (activeScope) {
                 SocialScope.OWN_POSTS -> return advanceInstagramOwnPost()
@@ -283,7 +290,7 @@ class UiAutomatorDriver(
             scope == SocialScope.OWN_STORY_ARCHIVE && activePackage == INSTAGRAM_PACKAGE ->
                 instagramArchiveScrollBudget
             scope == SocialScope.OWN_COMMENTS && activePackage == INSTAGRAM_PACKAGE ->
-                INSTAGRAM_COMMENTS_ADDITIONAL_CAPTURES
+                INSTAGRAM_COMMENTS_SCROLL_LIMIT
             else -> null
         }
 
@@ -421,6 +428,11 @@ class UiAutomatorDriver(
                 captureNodes,
             )
         }
+        val temporal = temporalDecision(scope, captureNodes, normalizedText)
+        if (temporal.outOfScope) {
+            temporalBoundaryScopes.add(scope)
+            return ScopeCapture(true, null)
+        }
         val profileLinks = if (scope == SocialScope.OWN_PROFILE) {
             CommunicationPolicy.profileLinks(captureNodes)
         } else {
@@ -458,7 +470,7 @@ class UiAutomatorDriver(
             windowId = -1,
             activityContext = activityContext,
             eventType = AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
-            eventTime = now,
+            eventTime = temporal.sourceTimeEpochMs ?: now,
             nodes = captureNodes.ifEmpty {
                 listOf(
                     VisibleNodeRecord(
@@ -487,6 +499,27 @@ class UiAutomatorDriver(
         if (!stored) screenshotFile?.delete()
         if (!stored) failureReason = "snapshot_store_rejected"
         return ScopeCapture(stored, retainedScreenshotId.takeIf { stored })
+    }
+
+    private fun temporalDecision(
+        scope: SocialScope,
+        nodes: List<VisibleNodeRecord>,
+        normalizedText: String?,
+    ): SocialTimeDecision {
+        if (scope == SocialScope.OWN_PROFILE) {
+            return SocialTimeDecision(sourceTimeEpochMs = null, outOfScope = false)
+        }
+        return SocialTimeScope.evaluate(
+            labels = buildList {
+                nodes.forEach { node ->
+                    add(node.text)
+                    add(node.contentDescription)
+                }
+                add(normalizedText)
+            },
+            notBeforeEpochMs = notBeforeEpochMs,
+            nowEpochMs = System.currentTimeMillis(),
+        )
     }
 
     private fun captureXTimelineScope(
@@ -533,18 +566,26 @@ class UiAutomatorDriver(
             return ScopeCapture(false, null)
         }
         // TEXT_ONLY: never attach screenshots even if caller asks.
+        val evaluatedRows = rows.map { row ->
+            row to temporalDecision(scope, row.nodes, row.normalizedText)
+        }
+        val eligibleRows = evaluatedRows.filterNot { (_, temporal) -> temporal.outOfScope }
+        if (evaluatedRows.isNotEmpty() && eligibleRows.isEmpty()) {
+            temporalBoundaryScopes.add(scope)
+            return ScopeCapture(true, null)
+        }
         val known = xStoredItemSignatures.getOrPut(scope) { mutableSetOf() }
         var storedAny = false
         var rejected = false
         val now = System.currentTimeMillis()
-        rows.forEachIndexed { index, row ->
+        eligibleRows.forEachIndexed { index, (row, temporal) ->
             if (row.contentHash in known) return@forEachIndexed
             val stored = store.recordVisibleSnapshot(
                 packageName = X_PACKAGE,
                 windowId = -1,
                 activityContext = row.nodes.firstNotNullOfOrNull(VisibleNodeRecord::className),
                 eventType = AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
-                eventTime = now + index,
+                eventTime = temporal.sourceTimeEpochMs ?: now + index,
                 nodes = row.nodes.take(BuildConfig.MAX_UI_NODES),
                 normalizedText = row.normalizedText,
                 contentHash = row.contentHash,
@@ -564,7 +605,7 @@ class UiAutomatorDriver(
                 )
             }
         }
-        val alreadyKnown = rows.all { row -> row.contentHash in known }
+        val alreadyKnown = eligibleRows.all { (row, _) -> row.contentHash in known }
         val accepted = storedAny || alreadyKnown
         if (!accepted) {
             failureReason = if (rejected) "snapshot_store_rejected" else "x_own_content_not_visible"
@@ -1298,7 +1339,7 @@ class UiAutomatorDriver(
         }
         instagramArchiveEndReached = false
         instagramLastArchiveCaptureSignature = null
-        instagramArchiveScrollBudget = MAX_ARCHIVE_SCROLLS
+        instagramArchiveScrollBudget = INSTAGRAM_ARCHIVE_SCROLL_LIMIT
         instagramArchiveListActive = true
         logInstagramArchiveNavigation("stories_verified", started)
         debugMapper.capture(
@@ -2931,18 +2972,26 @@ class UiAutomatorDriver(
             )
             return ScopeCapture(false, null)
         }
+        val evaluatedRows = rows.map { row ->
+            row to temporalDecision(scope, row.nodes, row.normalizedText)
+        }
+        val eligibleRows = evaluatedRows.filterNot { (_, temporal) -> temporal.outOfScope }
+        if (evaluatedRows.isNotEmpty() && eligibleRows.isEmpty()) {
+            temporalBoundaryScopes.add(scope)
+            return ScopeCapture(true, null)
+        }
         val known = fbStoredItemSignatures.getOrPut(scope) { mutableSetOf() }
         var storedAny = false
         var rejected = false
         val now = System.currentTimeMillis()
-        rows.forEachIndexed { index, row ->
+        eligibleRows.forEachIndexed { index, (row, temporal) ->
             if (row.contentHash in known) return@forEachIndexed
             val stored = store.recordVisibleSnapshot(
                 packageName = FACEBOOK_PACKAGE,
                 windowId = -1,
                 activityContext = row.nodes.firstNotNullOfOrNull(VisibleNodeRecord::className),
                 eventType = AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
-                eventTime = now + index,
+                eventTime = temporal.sourceTimeEpochMs ?: now + index,
                 nodes = row.nodes.take(BuildConfig.MAX_UI_NODES),
                 normalizedText = row.normalizedText,
                 contentHash = row.contentHash,
@@ -2957,7 +3006,7 @@ class UiAutomatorDriver(
                 rejected = true
             }
         }
-        val accepted = storedAny || rows.all { it.contentHash in known }
+        val accepted = storedAny || eligibleRows.all { (row, _) -> row.contentHash in known }
         if (!accepted) {
             failureReason =
                 if (rejected) "snapshot_store_rejected" else "facebook_own_content_not_visible"
@@ -3199,13 +3248,13 @@ class UiAutomatorDriver(
         val lower = value.lowercase(Locale.ROOT)
         if (lower in FB_POST_NOISE) return true
         if (FB_SHARED_WITH_PATTERN.containsMatchIn(value)) return true
-        if (FB_METRIC_PATTERN.matches(value.trim())) return true
+        if (FacebookProfileMetricParser.isMetricLine(value)) return true
         return FACEBOOK_POST_ACTION_DESC.any { lower == it.lowercase(Locale.ROOT) }
     }
 
     private fun isFacebookCommentNoise(value: String): Boolean {
         val lower = value.lowercase(Locale.ROOT)
-        return lower in FB_COMMENT_NOISE || FB_METRIC_PATTERN.matches(value.trim())
+        return lower in FB_COMMENT_NOISE || FacebookProfileMetricParser.isMetricLine(value)
     }
 
     private fun fbFeedTop(): Int {
@@ -3451,7 +3500,7 @@ class UiAutomatorDriver(
         if (lower.contains("remove friend") || lower.contains("hapus saran")) return null
         if (lower.contains("profile picture") || lower.contains("foto profil")) return null
         if (lower == "add" || lower == "remove" || lower == "camera") return null
-        if (FB_METRIC_PATTERN.matches(trimmed)) return null
+        if (FacebookProfileMetricParser.isMetricLine(trimmed)) return null
         // Status-bar clock often sits above Edit profile (e.g. "5:33" / "5:33 PM").
         if (FB_CLOCK_PATTERN.containsMatchIn(trimmed)) return null
         if (trimmed.contains("tab", ignoreCase = true)) return null
@@ -3506,28 +3555,19 @@ class UiAutomatorDriver(
                     scrollable = false,
                 )
             }
-            (
-                device.findObjects(By.clazz("android.widget.TextView")).asSequence() +
-                    device.findObjects(By.clazz("android.view.ViewGroup")).asSequence()
-                ).filter { value ->
-                (safeBounds(value)?.top ?: Int.MAX_VALUE) < (device.displayHeight * 2) / 3
-            }
-            .forEach { obj ->
-                val text = obj.text?.toString()?.trim()
-                val desc = obj.contentDescription?.toString()?.trim()
-                val blob = listOfNotNull(text, desc).joinToString(" ")
-                if (blob.isBlank()) return@forEach
-                val lower = blob.lowercase(Locale.ROOT)
-                val viewId = when {
-                    "friend" in lower || "teman" in lower ->
-                        "$FACEBOOK_PACKAGE:id/friends_stat"
-                    "following" in lower || "mengikuti" in lower ->
-                        "$FACEBOOK_PACKAGE:id/following_stat"
-                    "post" in lower || "postingan" in lower || "kiriman" in lower ->
-                        "$FACEBOOK_PACKAGE:id/posts_stat"
-                    else -> return@forEach
+            val seenKinds = mutableSetOf<FacebookProfileMetricKind>()
+            facebookProfileMetricObjects().forEach { obj ->
+                val blob = listOfNotNull(obj.text, obj.contentDescription).joinToString(" ")
+                FacebookProfileMetricParser.parse(blob).forEach { metric ->
+                    if (seenKinds.add(metric.kind)) {
+                        addNode(
+                            metric.value,
+                            null,
+                            safeBounds(obj),
+                            facebookProfileMetricViewId(metric.kind),
+                        )
+                    }
                 }
-                addNode(text, desc, safeBounds(obj), viewId)
             }
             fbOwnAccountMarker?.let { marker ->
                 device.findObjects(By.text(marker)).firstOrNull()?.let { obj ->
@@ -3571,17 +3611,74 @@ class UiAutomatorDriver(
                 addSynthetic(marker, "$FACEBOOK_PACKAGE:id/profile_display_name", 10, 5)
             }
         }
-        if (out.none { it.viewId?.endsWith("_stat") == true }) {
+        val missingMetricKinds = setOf(
+            FacebookProfileMetricKind.FRIENDS,
+            FacebookProfileMetricKind.POSTS,
+        ).filter { kind ->
+            out.none { node -> node.viewId == facebookProfileMetricViewId(kind) }
+        }.toSet()
+        if (missingMetricKinds.isNotEmpty()) {
             val xml = readShellUiDump()
-            val metricLine = Regex(
-                """(?:text|content-desc)="([^"]*(?:friends|teman|following|mengikuti|posts|postingan)[^"]*)"""",
-                RegexOption.IGNORE_CASE,
-            ).find(xml)?.groupValues?.getOrNull(1)?.trim()
-            if (!metricLine.isNullOrBlank()) {
-                addSynthetic(metricLine, "$FACEBOOK_PACKAGE:id/posts_stat", 5, 4)
+            val shellMetrics = FB_XML_LABEL_ATTRIBUTE.findAll(xml)
+                .flatMap { match ->
+                    val value = match.groupValues[1]
+                    if (FacebookProfileMetricParser.isMetricLine(value)) {
+                        FacebookProfileMetricParser.parse(value).asSequence()
+                    } else {
+                        emptySequence()
+                    }
+                }
+                .filter { metric -> metric.kind in missingMetricKinds }
+                .distinctBy(FacebookProfileMetricToken::kind)
+                .toList()
+            shellMetrics.forEach { metric ->
+                addSynthetic(
+                    metric.value,
+                    facebookProfileMetricViewId(metric.kind),
+                    5,
+                    4,
+                )
             }
         }
         return out
+    }
+
+    private fun facebookProfileMetricObjects(): List<UiObject2> = safeUi(emptyList()) {
+        buildList {
+            addAll(device.findObjects(By.clazz("android.widget.TextView")))
+            addAll(device.findObjects(By.clazz("android.view.ViewGroup")))
+            FACEBOOK_METRIC_HINTS.forEach { hint ->
+                addAll(device.findObjects(By.textContains(hint)))
+                addAll(device.findObjects(By.descContains(hint)))
+            }
+        }
+            .asSequence()
+            .filter { obj ->
+                (safeBounds(obj)?.top ?: Int.MAX_VALUE) < (device.displayHeight * 2) / 3
+            }
+            .filter { obj ->
+                val blob = listOfNotNull(obj.text, obj.contentDescription).joinToString(" ")
+                FacebookProfileMetricParser.isMetricLine(blob)
+            }
+            .distinctBy { obj ->
+                val bounds = safeBounds(obj)
+                listOf(
+                    obj.text,
+                    obj.contentDescription,
+                    bounds?.left,
+                    bounds?.top,
+                    bounds?.right,
+                    bounds?.bottom,
+                )
+            }
+            .take(MAX_FACEBOOK_PROFILE_METRIC_OBJECTS)
+            .toList()
+    }
+
+    private fun facebookProfileMetricViewId(kind: FacebookProfileMetricKind): String = when (kind) {
+        FacebookProfileMetricKind.FRIENDS -> "$FACEBOOK_PACKAGE:id/friends_stat"
+        FacebookProfileMetricKind.FOLLOWING -> "$FACEBOOK_PACKAGE:id/following_stat"
+        FacebookProfileMetricKind.POSTS -> "$FACEBOOK_PACKAGE:id/posts_stat"
     }
 
     private fun scopeStillVisible(packageName: String, scope: SocialScope): Boolean {
@@ -4885,9 +4982,7 @@ class UiAutomatorDriver(
         if (!isForeground(FACEBOOK_PACKAGE)) return false
         val editVisible = hasExactLabel(EDIT_PROFILE_LABELS)
         if (!editVisible) return false
-        val metricVisible = FACEBOOK_METRIC_HINTS.any { hint ->
-            device.hasObject(By.descContains(hint)) || device.hasObject(By.textContains(hint))
-        }
+        val metricVisible = facebookProfileMetricObjects().isNotEmpty()
         // Require profile-only chrome (About / All filter), not Home labels like Reels/Posts.
         val profileChrome = hasExactLabel(listOf("About", "Tentang")) ||
             hasFacebookAllFilter() ||
@@ -4942,11 +5037,7 @@ class UiAutomatorDriver(
             .toList()
         if (labels.isEmpty()) return false
         if (marker != null && labels.any { it.equals(marker, ignoreCase = true) }) return true
-        if (labels.any { value -> FACEBOOK_METRIC_HINTS.any { hint ->
-                value.contains(hint, ignoreCase = true)
-            }
-            }
-        ) {
+        if (labels.any(FacebookProfileMetricParser::isMetricLine)) {
             return true
         }
         return labels.any { value ->
@@ -5137,8 +5228,6 @@ class UiAutomatorDriver(
         private const val VISIBLE_GRID_POSTS = 3
         private const val GRID_SCROLL_MIN_POSTS = 3
         private const val MAX_GRID_SCROLLS = 40
-        private const val MAX_ARCHIVE_SCROLLS = 12
-        private const val INSTAGRAM_COMMENTS_ADDITIONAL_CAPTURES = 3
         private const val MAX_INSTAGRAM_PROBE_NODES = 512
         private const val MAX_INSTAGRAM_PROFILE_BACK_STEPS = 8
         private const val INSTAGRAM_MENU_OPEN_ATTEMPTS = 2
@@ -5634,8 +5723,7 @@ class UiAutomatorDriver(
             "learn more",
             "not all of your items may appear here. learn more.",
         )
-        private val FB_METRIC_PATTERN =
-            Regex("""^\d[\d.,]*\s*(friends?|teman|following|mengikuti|posts?|postingan|kiriman)$""", RegexOption.IGNORE_CASE)
+        private val FB_XML_LABEL_ATTRIBUTE = Regex("""(?:text|content-desc)="([^"]*)"""")
         private val FB_CLOCK_PATTERN =
             Regex(
                 """(?i)^\d{1,2}:\d{2}(\s*[ap]m)?$|^\d{1,2}\s*[ap]m$""",
@@ -5648,5 +5736,6 @@ class UiAutomatorDriver(
             Regex("""shared with|dibagikan ke|•""", RegexOption.IGNORE_CASE)
         private const val FB_CONTENT_WAIT_ATTEMPTS = 4
         private const val FB_SCROLL_IDLE_MS = 450L
+        private const val MAX_FACEBOOK_PROFILE_METRIC_OBJECTS = 32
     }
 }

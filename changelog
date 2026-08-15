@@ -6,6 +6,73 @@
 - Android agent: `0.7.0`, API `1.0`
 - Primary project: `/Users/macbook/Documents/Product1/siksik`
 
+## 2026-08-14: Reliable deleted/cache nudity and bounded iOS Photos recovery
+
+- Fixed a false-clean cache path in nudity analysis. Detector, inference, and
+  video-codec failures now return a non-cacheable outcome, while a completed
+  analysis with no trigger remains cacheable. The analysis fingerprint is now
+  `v14` and includes local `ffmpeg`/`ffprobe` availability, so an earlier run
+  without a usable sampler cannot suppress a later valid video result.
+- QUICK and FULL Android recovery now both inspect deleted-media cache sources
+  using their existing mode-specific limits. A versioned
+  `cache_scan_completed` marker prevents an older trash-only manifest from
+  being reused as though cache discovery had run. Cache source/capture counts
+  are additive progress and HTML-report fields.
+- A code-only smoke against the connected Infinix completed QUICK cache
+  discovery with 1 gallery-cache source and 25 bounded preview artifacts; the
+  expected budget warning was reported and the temporary smoke output was
+  removed. Re-analysis of the previously recovered video produced a pending L4
+  nudity finding at confidence 0.514. No media was displayed manually.
+- Reimplemented the useful additions from the separate `ios-media-puller`
+  donor inside SIKSIK: Photos Hidden, Recently Deleted, V2 thumbnails, video
+  keyframes, bounded `.ithmb` JPEG carving, and metadata-only ACHANGE/SQLite-WAL
+  purge evidence. The donor remains reference-only; production has no import,
+  runtime path, subprocess, symlink, or dependency outside the SIKSIK tree.
+- Current DCIM and recovered Photos sources use the same QUICK 3-month and FULL
+  6-month cutoff. Recovery has explicit UDID binding, count/byte/file/traversal
+  limits, timeouts, hashed names, a strict manifest, hash verification, source
+  provenance, and fail-soft composition with the existing AFC media flow.
+  Prior-session output is never searched or copied into a new session.
+- Hidden, recently deleted, recovered-cache, and purge-metadata artifacts enter
+  the existing index, analysis (including image/video nudity), review,
+  recommendation, timeline, dashboard labels, and report flow. Existing DCIM,
+  documents, backup communications, and social acquisition remain additive and
+  unchanged.
+- API changes are backward-compatible optional progress fields; no database
+  migration was required. Verification: backend 259 passed/4 conditional
+  skips, Android app/automation unit-test and Kotlin compile tasks succeeded,
+  frontend production build passed, Python compilation passed, and diff checks
+  passed. Physical iOS acquisition was not run because no iPhone was detected.
+
+## 2026-08-14: Bound Instagram Archive and correct Facebook profile reporting
+
+- Restored Instagram scope priority to profile, posts, comments, then Story
+  Archive so Archive work cannot starve Comments. Story Archive is centrally
+  capped at 3 additional scrolls and 4 captures including the initial viewport
+  in QUICK and FULL; Comments remains capped at the same 3-scroll policy.
+- Added a bounded Facebook profile-metric parser for combined English and
+  Indonesian labels such as `2 friends · 5 posts`. Only numeric metric-only
+  labels are accepted, so onboarding prose containing `friends` is no longer
+  misclassified as profile evidence.
+- Added optional `friends` profile metadata across the Android inventory,
+  strict backend agent contract, iOS profile adapter, report builder, HTML
+  report, and dashboard type/label. Friends is no longer folded into
+  `followers`, while the existing `posts` metric remains distinct.
+- Facebook report identity no longer invents dotted usernames from adjacent
+  prose such as `the stuff`. Explicit or structured handles remain supported;
+  otherwise the dashboard and HTML report show the verified display name only.
+  A display name identical to the derived profile bio is no longer emitted as
+  bio.
+- No database migration or endpoint semantic change was required; the new
+  `friends` field is optional for existing records. Added Android parser,
+  capture-policy, and inventory regression tests plus backend report/contract
+  tests.
+- Verification: 67 Android JVM tests passed and both Android modules compiled;
+  frontend production build passed; 5 focused backend tests passed. The full
+  backend run produced 251 passed and 4 skipped with one cache-performance
+  jitter failure, which passed on immediate isolated rerun. A new physical
+  device crawl was not run in this change.
+
 ## 2026-08-14: Native Android trash/deleted-preview recovery in QUICK + FULL
 
 - Reimplemented the useful non-root recovery behavior as native SIKSIK modules.

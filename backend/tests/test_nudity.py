@@ -116,6 +116,34 @@ def test_image_inference_failure_isolated(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setattr(nudity, "_get_detector", lambda: FakeDetector(fail=True))
 
     assert nudity.analyze_image(target) == []
+    assert nudity.analyze_image_result(target).cacheable is False
+
+
+@pytest.mark.unit
+def test_incomplete_nudity_enrichment_is_not_cacheable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    target = tmp_path / "recovered_trash" / "broken.jpg"
+    target.parent.mkdir()
+    target.write_bytes(b"fake")
+    monkeypatch.setattr(
+        nudity,
+        "analyze_image_result",
+        lambda _path: nudity.NudityAnalysisResult((), False, "detector_unavailable"),
+    )
+    monkeypatch.setattr("app.services.vision.analyze_image_file", lambda _path, **_kw: [])
+
+    result = analysis.analyze_content_result(
+        target,
+        "image/jpeg",
+        "recovered_trash",
+        "",
+        [],
+    )
+
+    assert result.findings == ()
+    assert result.cacheable is False
 
 
 @pytest.mark.unit
@@ -206,7 +234,11 @@ def test_quick_gallery_bypass_still_runs_nudity(
         "layer_origin": "L3",
         "evidence": "fake detector",
     }
-    monkeypatch.setattr(nudity, "analyze_image", lambda _path: [flag])
+    monkeypatch.setattr(
+        nudity,
+        "analyze_image_result",
+        lambda _path: nudity.NudityAnalysisResult((flag,), True),
+    )
     monkeypatch.setattr("app.services.vision._analyze_pil_image", lambda _path: [])
 
     token = set_analysis_mode(AcquisitionMode.QUICK)
@@ -245,7 +277,11 @@ def test_video_analysis_adds_nudity_without_replacing_existing_vision(
         "layer_origin": "L4",
         "evidence": "existing",
     }
-    monkeypatch.setattr(nudity, "analyze_video", lambda _path: [nude_flag])
+    monkeypatch.setattr(
+        nudity,
+        "analyze_video_result",
+        lambda _path: nudity.NudityAnalysisResult((nude_flag,), True),
+    )
     monkeypatch.setattr("app.services.vision.analyze_video_file", lambda _path: [old_flag])
 
     findings = analysis.analyze_content(target, "video/mp4", "video", "", [])

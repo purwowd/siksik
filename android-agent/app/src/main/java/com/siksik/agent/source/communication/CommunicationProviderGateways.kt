@@ -8,20 +8,27 @@ import android.provider.ContactsContract
 import android.provider.Telephony
 
 interface SmsProviderGateway {
-    fun query(lastId: Long?, limit: Int): Cursor?
+    fun query(lastId: Long?, notBeforeEpochMs: Long, limit: Int): Cursor?
 }
 
 class AndroidSmsProviderGateway(
     private val resolver: ContentResolver,
 ) : SmsProviderGateway {
-    override fun query(lastId: Long?, limit: Int): Cursor? = resolver.query(
+    override fun query(lastId: Long?, notBeforeEpochMs: Long, limit: Int): Cursor? = resolver.query(
         Telephony.Sms.CONTENT_URI,
         SMS_PROJECTION,
         Bundle().apply {
+            val clauses = mutableListOf(
+                "(${Telephony.Sms.DATE} >= ? OR ${Telephony.Sms.DATE} IS NULL OR " +
+                    "${Telephony.Sms.DATE} <= 0)",
+            )
+            val arguments = mutableListOf(notBeforeEpochMs.toString())
             if (lastId != null) {
-                putString(ContentResolver.QUERY_ARG_SQL_SELECTION, "${Telephony.Sms._ID} < ?")
-                putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, arrayOf(lastId.toString()))
+                clauses.add("${Telephony.Sms._ID} < ?")
+                arguments.add(lastId.toString())
             }
+            putString(ContentResolver.QUERY_ARG_SQL_SELECTION, clauses.joinToString(" AND "))
+            putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, arguments.toTypedArray())
             putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, "${Telephony.Sms._ID} DESC")
             putInt(ContentResolver.QUERY_ARG_LIMIT, limit)
         },

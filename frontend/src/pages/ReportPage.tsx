@@ -23,6 +23,7 @@ const REVIEW_LABEL = {
 const PROFILE_METRIC_LABEL: Record<string, string> = {
   posts: "Post / tweet",
   followers: "Followers",
+  friends: "Friends",
   following: "Following",
 };
 
@@ -221,7 +222,7 @@ export function ReportPage({
                       <p className="dash-section-copy">
                         {account.username
                           ? `${account.display_name ? `${account.display_name} · ` : ""}@${account.username}`
-                          : "Username tidak terbaca"}
+                          : account.display_name || "Username tidak terbaca"}
                       </p>
                     </div>
                     <div className="report-meta">
