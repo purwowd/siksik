@@ -30,6 +30,7 @@ from app.acquisition.bootstrap import (
     AndroidAgentBootstrapService,
     InstallAction,
 )
+from app.acquisition.bootstrap_contracts import special_access_for_inventory_mode
 from app.acquisition.errors import AcquisitionError, ErrorCategory, acquisition_error
 from app.acquisition.runtime import (
     AgentRuntimeRegistry,
@@ -832,6 +833,47 @@ async def test_optional_all_files_denial_continues_with_explicit_capability_stat
     assert record.state == AgentRuntimeState.READY
     assert adb.opened_access == [access]
     assert record.details["special_access"][access.value] == SpecialAccessState.DENIED.value
+    await service.teardown(SESSION_ID)
+    await database.close()
+
+
+@pytest.mark.unit
+def test_quick_and_full_wait_for_all_files_access() -> None:
+    for mode in ("quick", "full"):
+        required, optional = special_access_for_inventory_mode(mode)
+        assert required == (SpecialAccessKind.ACCESSIBILITY,)
+        assert SpecialAccessKind.MANAGE_ALL_FILES in optional
+        assert SpecialAccessKind.NOTIFICATION_LISTENER in optional
+
+
+@pytest.mark.unit
+async def test_optional_all_files_wait_uses_operator_prompt(tmp_path: Path) -> None:
+    access = SpecialAccessKind.MANAGE_ALL_FILES
+    service, adb, database, _artifacts, _behavior = await make_service(tmp_path)
+    adb.special_sequences[access] = [
+        SpecialAccessState.NOT_GRANTED,
+        SpecialAccessState.GRANTED,
+    ]
+    progress: list[tuple[object, str, object]] = []
+
+    async def publish(phase, _percent, message, **fields) -> None:
+        progress.append((phase, message, fields.get("bootstrap_state")))
+
+    record = await service.bootstrap(
+        session_id=SESSION_ID,
+        serial=SERIAL,
+        request_id=REQUEST_ID,
+        on_progress=publish,
+        optional_special_access=(access,),
+    )
+
+    assert record.state == AgentRuntimeState.READY
+    assert adb.opened_access == [access]
+    assert any(
+        state == "awaiting_access" and "Semua file" in message
+        for _phase, message, state in progress
+    )
+    assert record.details["special_access"][access.value] == SpecialAccessState.GRANTED.value
     await service.teardown(SESSION_ID)
     await database.close()
 

@@ -32,7 +32,7 @@ class SocialCrawlInstrumentation {
             arguments,
             "navigation_deadline_ms",
             15_000,
-            175_000,
+            240_000,
         )
         val now = System.currentTimeMillis()
         val notBeforeEpochMs = boundedLong(

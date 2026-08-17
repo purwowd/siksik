@@ -176,35 +176,7 @@ class InventoryController(
             throw ApiException("invalid_cursor", "Cursor inventory tidak sesuai status sumber.", 422)
         }
         val checkpoint = cursor?.let { store.resolveCursor(crawlId, source, it) }
-        val remainingQuickRows = BuildConfig.QUICK_INVENTORY_ITEMS_PER_SOURCE -
-            progress.scannedCount
-        if (
-            run.mode == InventoryMode.QUICK &&
-            remainingQuickRows <= 0 &&
-            progress.resumeCursor != null
-        ) {
-            store.finishPage(
-                crawlId,
-                source,
-                InventorySourceState.COMPLETE,
-                scannedDelta = 0,
-                discoveredDelta = 0,
-                duplicateDelta = 0,
-                sampled = true,
-                reason = QUICK_SAMPLE_REASON,
-                resumeCursor = progress.resumeCursor,
-                now = clock(),
-            )
-            return emptyPage(
-                crawlId,
-                store.sourceProgress(crawlId, source),
-            )
-        }
-        val adapterLimit = if (run.mode == InventoryMode.QUICK) {
-            minOf(requestedLimit, remainingQuickRows.coerceAtLeast(1))
-        } else {
-            requestedLimit
-        }
+        val adapterLimit = requestedLimit
         val timeScope = InventoryTimeScope.forRun(run.mode, run.startedAtEpochMs)
         store.startSource(crawlId, source, clock())
         val adapterPage = try {
@@ -298,25 +270,19 @@ class InventoryController(
         }
         val cancelled = store.isCancellationRequested(crawlId) ||
             adapterPage.terminalState == InventorySourceState.CANCELLED
-        val quickLimitReached = run.mode == InventoryMode.QUICK &&
-            nextCursor != null &&
-            progress.scannedCount + adapterPage.scannedCount >=
-            BuildConfig.QUICK_INVENTORY_ITEMS_PER_SOURCE
         val sourceState = when {
             cancelled -> InventorySourceState.CANCELLED
             adapterPage.terminalState != InventorySourceState.COMPLETE ->
                 adapterPage.terminalState
-            quickLimitReached -> InventorySourceState.COMPLETE
             nextCursor != null -> InventorySourceState.CRAWLING
             else -> InventorySourceState.COMPLETE
         }
         val reason = when {
             cancelled -> "crawl_cancelled"
-            quickLimitReached -> QUICK_SAMPLE_REASON
             sourceState == InventorySourceState.CRAWLING -> null
             else -> adapterPage.terminalReason?.take(MAX_SOURCE_REASON_LENGTH)
         }
-        val sampled = progress.sampled || quickLimitReached
+        val sampled = progress.sampled
         val resumeCursor = nextCursor ?: cursor.takeIf {
             sourceState in setOf(
                 InventorySourceState.CANCELLED,
@@ -380,7 +346,6 @@ class InventoryController(
 
     companion object {
         private const val LOG_TAG = "SIKSIKAgent"
-        private const val QUICK_SAMPLE_REASON = "quick_sample_limit"
         private const val MAX_SOURCE_REASON_LENGTH = 128
         private val ACTIVE_RUN_STATES = setOf(
             InventoryRunState.READY,

@@ -1,10 +1,62 @@
 # SIKSIK Flow Implementation Changelog
 
-- Work period: 2026-07-16 to 2026-08-15
+- Work period: 2026-07-16 to 2026-08-17
 - Status: Unreleased local changes
-- Git baseline: `9f0d91c`
+- Git baseline: `ac8d1fc`
 - Android agent: `0.7.0`, API `1.0`
 - Primary project: `/Users/macbook/Documents/Product1/siksik`
+
+## 2026-08-17: Document grant wait, Instagram archive before comments, 3/6-month inventory
+
+Bootstrap and documents:
+
+- QUICK now waits for Semua file (`MANAGE_EXTERNAL_STORAGE`) the same way FULL
+  already did: Settings opens on the device and the operator console enters
+  `awaiting_access`. The progress message names the permission
+  (“Menunggu izin Semua file pada perangkat”). Accessibility remains required.
+  Timeout or deny is fail-soft — acquisition continues without documents rather
+  than aborting the session.
+- Granting Semua file is the path that unlocks `shared_storage_document`.
+  `document_tree` stays a SAF fallback and is marked not-required once All files
+  is granted. Runtime photo/video/SMS/contacts grants are unchanged.
+
+Instagram Story Archive and comments:
+
+- Scope order is now profile → posts → **archive** → comments, so Archive is
+  attempted before comments consume the deadline.
+- Settings clicks target the visible Compose row (icon/row coordinates) as soon
+  as “Archive” or “Your activity” is on screen. The old 1.2s settle plus
+  Search-first path is the fallback. Settings Search runs only if ≥12s remain.
+- Inner navigation deadline is 240s; host instrumentation timeout is 250s
+  (was 175s / 180s). Posts still do not extra-scroll when count is below three.
+  Comments and archive remain initial plus three extra viewports. Parsed UI
+  dates (`4mo`, `13 Mei`) still stop posts/archive/comments at the 3/6-month
+  window. Profile stays unwindowed.
+
+Non-social inventory and analysis:
+
+- QUICK inventory no longer stops at 200 rows per source after the time filter.
+  The 3-month (QUICK) / 6-month (FULL) query is the bound. Contacts stay
+  unbounded. Notifications remain the live listener buffer, not a 90-day archive.
+- Analysis image caps are 0 (uncapped) so in-window gallery files are not
+  skipped during Analisis.
+- iOS SMS/iMessage parsing applies the same 3/6-month cutoff; unknown dates
+  stay.
+- Media inventory still accepts a row if `date_taken`, `date_added`, **or**
+  `date_modified` is inside the window. That OR was reviewed and left unchanged.
+
+Operator console:
+
+- MASUK `9 / 7` was audited as a display mix (`files_pulled` after recovery vs
+  `transfer_artifacts`). The formula was not changed in this batch.
+
+Tests: backend bootstrap (all-files wait + QUICK/FULL policy), iOS SMS cutoff,
+Instagram capture-order unit test, and social crawl contract (archive before
+comments, three archive scrolls). Physical recrawl was not run; the next
+JALANKAN AKUISISI rebuilds and reinstalls the agent APK.
+
+Cursor rules + `AGENTS.md` record the same runtime authority (code, then this
+changelog).
 
 ## 2026-08-15: Reproducible WebDriverAgent IPA artifacts
 

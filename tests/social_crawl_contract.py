@@ -56,7 +56,16 @@ def main() -> None:
     frontend_api = read("frontend/src/api.ts")
     report_page = read("frontend/src/pages/ReportPage.tsx")
 
-    require(driver, "private const val MAX_ARCHIVE_SCROLLS = 3", "archive must stop after three scrolls")
+    require(
+        contract,
+        "internal const val INSTAGRAM_ARCHIVE_SCROLL_LIMIT = 3",
+        "archive must stop after three scrolls",
+    )
+    require(
+        contract,
+        "SocialScope.OWN_STORY_ARCHIVE,\n        SocialScope.OWN_COMMENTS",
+        "Instagram archive must run before comments",
+    )
     require(driver, "if (postCount <= VISIBLE_GRID_POSTS) return 0", "small Instagram grids must not scroll")
     require(driver, "swipeInstagramGrid()", "Instagram must use an overlapping grid gesture")
     require(driver, "activeWindowBounds()", "coordinate fallback must use active-window bounds")

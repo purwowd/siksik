@@ -35,8 +35,8 @@ class Settings(BaseSettings):
     lab_demo_mode: bool = False
 
     # Performance knobs — gallery-first
-    image_cap_quick: int = 800
-    image_cap_full: int = 3000
+    image_cap_quick: int = 0
+    image_cap_full: int = 0  # 0 = tanpa batas (dalam window 3/6 bulan)
     video_cap_quick: int = 80
     video_cap_full: int = 0  # 0 = tanpa batas (FULL)
     max_file_size_mb: int = 50
@@ -117,7 +117,7 @@ class Settings(BaseSettings):
         "com.siksik.agent.automation.SocialCrawlInstrumentation"
     )
     android_agent_automation_install_timeout_s: float = 180.0
-    android_agent_automation_target_timeout_s: float = 180.0
+    android_agent_automation_target_timeout_s: float = 250.0
 
     # Non-root Android trash/recycle recovery. Both modes inspect cache residue;
     # QUICK stays bounded by its lower item/byte/time budgets.

@@ -5,15 +5,15 @@ import org.junit.Test
 
 class InstagramCapturePolicyTest {
     @Test
-    fun commentsPrecedeArchiveAndArchiveUsesThreeScrolls() {
+    fun archivePrecedesCommentsAndArchiveUsesThreeScrolls() {
         val strategy = InstagramOwnAccountStrategy()
 
         assertEquals(
             listOf(
-                SocialScope.OWN_PROFILE,
-                SocialScope.OWN_POSTS,
-                SocialScope.OWN_COMMENTS,
-                SocialScope.OWN_STORY_ARCHIVE,
+        SocialScope.OWN_PROFILE,
+        SocialScope.OWN_POSTS,
+        SocialScope.OWN_STORY_ARCHIVE,
+        SocialScope.OWN_COMMENTS,
             ),
             strategy.scopes,
         )

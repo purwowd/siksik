@@ -84,8 +84,8 @@ class InstagramOwnAccountStrategy : TargetNavigationStrategy {
     override val scopes = listOf(
         SocialScope.OWN_PROFILE,
         SocialScope.OWN_POSTS,
-        SocialScope.OWN_COMMENTS,
         SocialScope.OWN_STORY_ARCHIVE,
+        SocialScope.OWN_COMMENTS,
     )
 
     override fun scrollWeight(scope: SocialScope): Int = when (scope) {

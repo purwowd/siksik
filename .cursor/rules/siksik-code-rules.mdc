@@ -1,0 +1,30 @@
+---
+description: SIKSIK coding standards — Python, Kotlin, React, logging, tests
+alwaysApply: false
+---
+
+# Code rules
+
+- Inspect git status before editing. Modify only siksik. Do not import, symlink, or depend on donor trees (`lpdp`, external pullers) at runtime.
+- Cohesive modules; typed contracts at subsystem boundaries; no global mutable state; close resources; no dead code or pass-only production branches.
+- No AI attribution, emoji, tutorial comments, or comments that restate the next line. Comments only for invariants, protocol, or platform workarounds.
+
+## Python
+
+Target 3.11+. FastAPI, Pydantic 2, aiosqlite, async pipeline. No `shell=True` / `os.system` / interpolated commands. Subprocess = argv list, timeout, bounded output. Blocking ADB/FS/hash/model work off the event loop. Catch known failures; do not swallow `Exception`. No SQL identifiers from untrusted input. Repeatable migrations.
+
+## Kotlin
+
+Separate adapters, domain, crawlers, preprocessing, selection, staging, HTTP. Bound coroutines, node walks, cursor reads. Close Cursor/streams/PFD. Never log token, content, phone, OCR, raw path, or serial. Explicit service lifecycle. No silent fake models in production paths.
+
+## React / API
+
+TypeScript strict. Optional fields for backward compatibility. Android-only UI gated on device type. Errors via toast/banner with actionable Indonesian text. Public models forbid unexpected request fields. Never expose agent token, content URI, absolute device path, or unredacted serial.
+
+## Logging
+
+Structured events (`agent_*`, `crawl_*`, `selection_*`, `transfer_*`, `ingestion_committed`). Include request/session/crawl ids, hashed device ref, phase, counts, `error_category`. Never log tokens, serials, SMS/OCR/UI content, credentials, or binaries. No `print` for runtime logs.
+
+## Tests
+
+Do not skip/xfail/rewrite tests to hide regressions. Cover failure, cancel, retry, idempotency, cleanup. No real private user data. Device scripts report state/counts/hashes/scope names only.

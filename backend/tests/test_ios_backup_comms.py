@@ -95,6 +95,16 @@ def test_parse_messages_distinguishes_sms_and_imessage(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_parse_messages_applies_not_before_cutoff(tmp_path: Path) -> None:
+    db_path = tmp_path / "sms.db"
+    _make_sms_db(db_path)
+    kept = parse_messages_db(db_path, limit=None, not_before_epoch_s=1_600_000_000)
+    dropped = parse_messages_db(db_path, limit=None, not_before_epoch_s=1_900_000_000)
+    assert len(kept) == 2
+    assert dropped == []
+
+
+@pytest.mark.unit
 def test_parse_contacts_and_inventory_records(tmp_path: Path) -> None:
     db_path = tmp_path / "AddressBook.sqlitedb"
     _make_contacts_db(db_path)

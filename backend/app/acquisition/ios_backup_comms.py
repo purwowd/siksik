@@ -26,6 +26,7 @@ from app.acquisition.agent_client import InventoryRecordV1
 from app.acquisition.contracts import ProgressCallback
 from app.acquisition.errors import AcquisitionError, ErrorCategory, acquisition_error
 from app.acquisition.process import run_process
+from app.acquisition.time_scope import build_time_scope
 from app.core.config import settings
 from app.core.db import db, utcnow
 from app.models.schemas import AcquisitionMode, SessionStatus
@@ -209,6 +210,7 @@ def parse_messages_db(
     db_path: Path,
     *,
     limit: int | None,
+    not_before_epoch_s: float | None = None,
 ) -> list[dict[str, Any]]:
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
@@ -260,6 +262,15 @@ def parse_messages_db(
         address = str(row["handle_id"] or "").strip() or None
         is_from_me = bool(row["is_from_me"])
         sent_at = _apple_ts_to_iso(row["date"])
+        if not_before_epoch_s is not None and sent_at is not None:
+            try:
+                sent_epoch = datetime.fromisoformat(
+                    sent_at.replace("Z", "+00:00")
+                ).timestamp()
+            except ValueError:
+                sent_epoch = None
+            if sent_epoch is not None and sent_epoch < not_before_epoch_s:
+                continue
         body = text or ""
         prefix = "[iMessage]" if service == "imessage" else "[SMS]"
         normalized = f"{prefix} {address or ''} {body}".strip()[:65536]
@@ -611,8 +622,13 @@ async def acquire_ios_backup_comms(
 
     crawl_id = f"ios_comms_{uuid.uuid4().hex[:24]}"
     records: list[InventoryRecordV1] = []
+    sms_not_before = build_time_scope(mode).not_before.timestamp()
     if sms_path is not None:
-        for item in parse_messages_db(sms_path, limit=msg_limit):
+        for item in parse_messages_db(
+            sms_path,
+            limit=msg_limit,
+            not_before_epoch_s=sms_not_before,
+        ):
             records.append(
                 _message_record(session_id=session_id, crawl_id=crawl_id, item=item)
             )

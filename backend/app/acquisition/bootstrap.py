@@ -304,7 +304,7 @@ class AndroidAgentBootstrapService:
                     work,
                 )
 
-                async def publish_awaiting() -> None:
+                async def publish_awaiting(message: str | None = None) -> None:
                     await self._publish(
                         session_id,
                         serial,
@@ -312,6 +312,7 @@ class AndroidAgentBootstrapService:
                         request_id,
                         on_progress,
                         work,
+                        message=message,
                     )
 
                 await self._access.verify_special_access(
@@ -707,6 +708,7 @@ class AndroidAgentBootstrapService:
         work: BootstrapWorkingState,
         *,
         error: AcquisitionError | None = None,
+        message: str | None = None,
     ) -> AgentRuntimeRecord:
         details = work.safe_details()
         record = await self._repository.upsert(
@@ -754,7 +756,7 @@ class AndroidAgentBootstrapService:
         await on_progress(
             phase,
             percent,
-            STATE_MESSAGES[state],
+            message or STATE_MESSAGES[state],
             bootstrap_state=state.value,
             agent_state=state.value,
             agent_version=record.agent_version,

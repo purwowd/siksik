@@ -17,6 +17,7 @@ from app.acquisition.adb import (
     SpecialAccessState,
 )
 from app.acquisition.bootstrap_contracts import (
+    SPECIAL_ACCESS_WAIT_MESSAGES,
     AgentBootstrapConfig,
     AgentClientFactory,
     BootstrapWorkingState,
@@ -334,7 +335,7 @@ class AgentAccessCoordinator:
         serial: str,
         request_id: str | None,
         work: BootstrapWorkingState,
-        publish_awaiting: Callable[[], Awaitable[None]],
+        publish_awaiting: Callable[..., Awaitable[None]],
         required_access: tuple[SpecialAccessKind, ...] | None = None,
         optional_access: tuple[SpecialAccessKind, ...] = (),
     ) -> None:
@@ -465,7 +466,9 @@ class AgentAccessCoordinator:
                 access,
                 user_id=user_id,
             )
-            await publish_awaiting()
+            await publish_awaiting(
+                message=SPECIAL_ACCESS_WAIT_MESSAGES.get(access),
+            )
             logger.info(
                 "agent_access_waiting",
                 extra={

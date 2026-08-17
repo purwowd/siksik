@@ -1,0 +1,19 @@
+---
+description: Operator UI routes, roles, progress fields, report copy
+globs: frontend/src/**/*.{ts,tsx}
+alwaysApply: false
+---
+
+# Frontend (code, 2026-08-17)
+
+Routes (`routes.ts`): `/operator` `sessions:start`, `/temuan` `findings:read`, `/laporan` `report:read`, `/dasbor` `dashboard`. Query `?sesi=` (UUID or 8-char prefix), findings `?filter=pending|confirmed|rejected`.
+
+Roles (`auth.py`): operator starts sessions + candidate review, cannot dashboard/confirm findings; analis reviews findings + dashboard; pimpinan authorizes report; admin union. Operator `start()` does **not** send `review_candidates`.
+
+Pipeline track groups `preparing_agent` / `awaiting_access` / `acquiring` / `selecting` / `awaiting_review` under **Akuisisi**. Poll ACTIVE statuses; refresh findings when `progress.findings_count` increases (including during `acquiring`).
+
+Operator Masuk (`OperatorPage.tsx`): numerator `max(files_pulled, transfer_completed)`; denominator `max(transfer_artifacts, transfer_records)` else inventoried (`files_listed` / `crawl_discovered` / preprocessing / selection). During agent pull, prefer `transfer_artifacts` (manifest total). Do not “fix” 9/7 by mixing recovery `files_pulled` into the formula unless product asks.
+
+Report page: social section is **data laporan, bukan temuan**. Block pimpinan authorize while recommendation is `MENUNGGU REVIEW`.
+
+`LAYER_LABELS` L3/L4 do not match NudeNet (image L3 / video L4). `METHOD_LABELS` omit several iOS/recovery method strings that exist in `reports.REPORT_METHOD_LABELS`. Keep Indonesian operator copy; no emoji; no `console.log` in production UI.

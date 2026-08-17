@@ -1,0 +1,46 @@
+---
+description: Source of truth for SIKSIK — trust running code, not stale docs
+alwaysApply: true
+---
+
+# SIKSIK code authority (verified 2026-08-17)
+
+Authority is **running code**, then dated `changelog` entries (newest first). Do **not** treat `Flow.md`, `docs/*.md`, ios-media-puller READMEs, or changelog **Phase 00–12 / Open Limitations** as contracts.
+
+## Repo map
+
+- `backend/` — FastAPI (`app/main.py` → `/api/v1`). Data root is `backend/data/` (staging, `poc.db`, reports). Env prefix `SADT_`.
+- `android-agent/` — Kotlin agent `0.7.0`, API `1.0` (`app` + `automation`). Host Gradle, not Actions.
+- `ios-media-puller/` — subprocess scripts + WDA automator. **Never import as a Python package.**
+- `frontend/` — Vite React operator UI.
+- `tests/` — host/device contracts (no private content in output).
+- WDA IPA CI: repo-root `.github/workflows/build-wda.yml` only.
+
+## Pipeline
+
+`POST /api/v1/sessions` → `SessionManager._run_pipeline` → detect → `acquire_dispatch` → `index_staging` → `analyze_session` → `apply_recommendation` → `save_session_report` → Android `agent_bootstrap.teardown`.
+
+ZIP: `_run_zip_pipeline` (no detect, no recovery, no agent teardown). One live session at a time.
+
+Statuses: `pending → detecting → preparing_agent → awaiting_access → acquiring → selecting → awaiting_review → indexing → analyzing → completed|failed|cancelled`. Percent is monotonic max.
+
+Providers (`AcquisitionProviderRegistry.provider_for`):
+- Android live → `Phase7AndroidAgentRunner` if `SADT_ANDROID_AGENT_ENABLED` (default on)
+- Android fallback → `acquire_android_adb` gallery paths
+- iOS → `IOSProvider` (AFC+Photos recovery+docs+SMS/contacts+WDA IG/X)
+- ZIP / simulator as coded; simulator requires `SADT_LAB_DEMO_MODE=1`
+
+## Hard mismatches vs old docs (do not revive)
+
+- QUICK **does wait** for Semua file (`MANAGE_EXTERNAL_STORAGE`), same as FULL; grant is **optional / fail-soft**
+- Instagram scopes: profile → posts → **archive → comments** (archive before comments)
+- QUICK has **no 200-row inventory cap** (`BuildConfig.QUICK_INVENTORY_ITEMS_PER_SOURCE` is unused)
+- Screenshot budget QUICK **24** / FULL **46**, not 6/16
+- Facebook **is** an Android social target (`com.facebook.katana`); iOS social is IG+X only
+- Instagram captures **viewports**; does not open posts or archive thumbnails
+- JALANKAN AKUISISI always `adb install -r` unless `SADT_ANDROID_AGENT_FORCE_REINSTALL=0`
+- `image_cap_*` default **0** (uncapped in-window); UI hint 800 is stale until `/health`
+- WDA IPA is a root Actions artifact (gitignored); prefer `~/wda` over a stale tree IPA
+- Android APK is **host Gradle** during bootstrap, not Actions
+
+Preserve working crawl/selection/report paths. Prefer additive fail-soft sources. Never import donor projects at runtime. Do not commit APK/IPA/`.env`/EasyOCR caches/`backend/data/`. If code and these rules disagree, fix the rule after verifying the function.

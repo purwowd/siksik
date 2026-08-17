@@ -163,6 +163,11 @@ STATE_MESSAGES = {
     AgentRuntimeState.CLOSED: "Sesi Android agent ditutup",
 }
 
+SPECIAL_ACCESS_WAIT_MESSAGES = {
+    SpecialAccessKind.ACCESSIBILITY: "Menunggu konfirmasi Aksesibilitas pada perangkat",
+    SpecialAccessKind.MANAGE_ALL_FILES: "Menunggu izin Semua file pada perangkat",
+}
+
 
 def runtime_permissions_for_api(api_level: int) -> tuple[RuntimePermissionRequirement, ...]:
     if api_level >= 33:
@@ -195,8 +200,7 @@ def special_access_for_inventory_mode(
     if mode not in {"quick", "full"}:
         raise ValueError("Android inventory mode is invalid")
     optional = (
-        (SpecialAccessKind.MANAGE_ALL_FILES, SpecialAccessKind.NOTIFICATION_LISTENER)
-        if mode == "full"
-        else (SpecialAccessKind.NOTIFICATION_LISTENER,)
+        SpecialAccessKind.MANAGE_ALL_FILES,
+        SpecialAccessKind.NOTIFICATION_LISTENER,
     )
     return (SpecialAccessKind.ACCESSIBILITY,), optional

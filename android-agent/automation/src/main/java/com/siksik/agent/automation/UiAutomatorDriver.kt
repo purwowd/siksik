@@ -1283,14 +1283,9 @@ class UiAutomatorDriver(
         if (!clickInstagramOptions()) return fail("instagram_options_not_found")
         instagramSubpageActive = true
         debugMapper.capture("instagram_archive_settings_open", SocialScope.OWN_STORY_ARCHIVE)
-        // Settings Compose can paint before UiDevice sees rows — settle then retry clicks.
-        SystemClock.sleep(INSTAGRAM_SETTINGS_LOAD_SETTLE_MS)
-        // Live mapping showed Settings opened already scrolled to bottom (Log out /
-        // Also from Meta). Archive lives under "How you use Instagram" near the top.
-        ensureInstagramSettingsNearTop()
+        revealInstagramSettingsRow(ARCHIVE_LABELS)
         if (!clickInstagramArchiveMenuEntry()) {
-            SystemClock.sleep(INSTAGRAM_SETTINGS_LOAD_SETTLE_MS)
-            ensureInstagramSettingsNearTop()
+            revealInstagramSettingsRow(ARCHIVE_LABELS)
             if (!clickInstagramArchiveMenuEntry()) {
                 debugMapper.capture(
                     "instagram_archive_entry_not_found",
@@ -1759,29 +1754,16 @@ class UiAutomatorDriver(
             return fail("instagram_options_not_found")
         }
         instagramSubpageActive = true
-        SystemClock.sleep(INSTAGRAM_SETTINGS_LOAD_SETTLE_MS)
-        // After Archive, Settings often resumes at the bottom (Log out). Your activity
-        // sits near the top under "How you use Instagram".
-        ensureInstagramSettingsNearTop()
+        revealInstagramSettingsRow(YOUR_ACTIVITY_LABELS)
         dismissInstagramCommentsCoachmark()
-        if (!clickInstagramSettingsLabel(YOUR_ACTIVITY_LABELS) &&
-            !clickInstagramLabelViaShellDump(YOUR_ACTIVITY_LABELS) &&
-            !clickInstagramLabelViaSettingsSearch(
-                queries = listOf("Your activity", "Aktivitas Anda"),
-                labels = YOUR_ACTIVITY_LABELS,
-                eventPrefix = "instagram_activity",
-            )
+        if (!clickInstagramVisibleSettingsRow(YOUR_ACTIVITY_LABELS) &&
+            !clickInstagramSettingsLabel(YOUR_ACTIVITY_LABELS) &&
+            !clickInstagramCommentsActivityFallback()
         ) {
-            // One retry after settle — Compose rows often lag behind the header paint.
-            SystemClock.sleep(INSTAGRAM_SETTINGS_LOAD_SETTLE_MS)
-            ensureInstagramSettingsNearTop()
-            if (!clickInstagramSettingsLabel(YOUR_ACTIVITY_LABELS) &&
-                !clickInstagramLabelViaShellDump(YOUR_ACTIVITY_LABELS) &&
-                !clickInstagramLabelViaSettingsSearch(
-                    queries = listOf("Your activity", "Aktivitas Anda"),
-                    labels = YOUR_ACTIVITY_LABELS,
-                    eventPrefix = "instagram_activity",
-                )
+            revealInstagramSettingsRow(YOUR_ACTIVITY_LABELS)
+            if (!clickInstagramVisibleSettingsRow(YOUR_ACTIVITY_LABELS) &&
+                !clickInstagramSettingsLabel(YOUR_ACTIVITY_LABELS) &&
+                !clickInstagramCommentsActivityFallback()
             ) {
                 return fail("instagram_activity_not_found")
             }
@@ -2164,8 +2146,88 @@ class UiAutomatorDriver(
         return true
     }
 
+    private fun revealInstagramSettingsRow(labels: List<String>) {
+        if (hasExactLabel(labels)) return
+        val remaining = navigationRemainingMs()
+        if (remaining > 800L) {
+            SystemClock.sleep(minOf(INSTAGRAM_SETTINGS_VISIBLE_SETTLE_MS, remaining))
+        }
+        if (hasExactLabel(labels)) return
+        if (navigationRemainingMs() > INSTAGRAM_SETTINGS_NEAR_TOP_MIN_REMAINING_MS) {
+            ensureInstagramSettingsNearTop()
+        }
+    }
+
+    private fun clickInstagramVisibleSettingsRow(labels: List<String>): Boolean {
+        val expected = labels.map { it.trim().lowercase(Locale.ROOT) }.toSet()
+        val deviceBounds = safeUi(null as Rect?) {
+            for (label in labels) {
+                val obj = device.findObject(By.text(label))
+                    ?: device.findObject(By.desc(label))
+                    ?: continue
+                val raw = sequenceOf(obj.text, obj.contentDescription)
+                    .filterNotNull()
+                    .map { it.trim() }
+                    .firstOrNull()
+                    .orEmpty()
+                if (raw.isNotEmpty() &&
+                    expected.none { value -> raw.equals(value, ignoreCase = true) }
+                ) {
+                    continue
+                }
+                return@safeUi safeBounds(obj)
+            }
+            null
+        }
+        if (deviceBounds != null && clickInstagramSettingsRowBounds(deviceBounds)) {
+            Log.i(LOG_TAG, "event=instagram_settings_row_click via=uidevice")
+            return true
+        }
+        if (navigationRemainingMs() < SHELL_DUMP_JOIN_MS) return false
+        invalidateShellDumpCache()
+        val dumpBounds = shellDumpProbeNodes(labels)
+            .minByOrNull { node ->
+                node.bounds.width().toLong().coerceAtLeast(1L) *
+                    node.bounds.height().toLong().coerceAtLeast(1L)
+            }
+            ?.bounds
+        if (dumpBounds != null && clickInstagramSettingsRowBounds(dumpBounds)) {
+            Log.i(LOG_TAG, "event=instagram_settings_row_click via=shell_dump")
+            return true
+        }
+        return false
+    }
+
+    private fun clickInstagramSettingsRowBounds(labelBounds: Rect): Boolean {
+        if (labelBounds.width() <= 0 || labelBounds.height() <= 0) return false
+        val density = context.resources.displayMetrics.density
+        val window = activeWindowBounds()
+        val iconX = (labelBounds.left - (36 * density).toInt())
+            .coerceIn(window.left + 16, (labelBounds.centerX()).coerceAtLeast(window.left + 16))
+        val y = labelBounds.centerY().coerceIn(window.top + 1, window.bottom - 1)
+        if (safeClickPoint(iconX, y)) return true
+        val centerX = ((window.left + window.right) / 2)
+            .coerceIn(window.left + 8, window.right - 8)
+        return safeClickPoint(centerX, y)
+    }
+
+    private fun clickInstagramCommentsActivityFallback(): Boolean {
+        if (clickInstagramLabelViaShellDump(YOUR_ACTIVITY_LABELS)) return true
+        if (navigationRemainingMs() < INSTAGRAM_SETTINGS_SEARCH_MIN_REMAINING_MS) {
+            return false
+        }
+        return clickInstagramLabelViaSettingsSearch(
+            queries = listOf("Your activity", "Aktivitas Anda"),
+            labels = YOUR_ACTIVITY_LABELS,
+            eventPrefix = "instagram_activity",
+        )
+    }
+
     private fun clickInstagramArchiveMenuEntry(): Boolean {
-        ensureInstagramSettingsNearTop()
+        if (clickInstagramVisibleSettingsRow(ARCHIVE_LABELS)) {
+            SystemClock.sleep(INSTAGRAM_ARCHIVE_LOAD_SETTLE_MS)
+            return true
+        }
         // Probe order: UiDevice/shell (no downward scroll) → Search (visible on Settings).
         if (clickInstagramSettingsLabel(ARCHIVE_LABELS)) {
             SystemClock.sleep(INSTAGRAM_ARCHIVE_LOAD_SETTLE_MS)
@@ -2179,8 +2241,9 @@ class UiAutomatorDriver(
             SystemClock.sleep(INSTAGRAM_ARCHIVE_LOAD_SETTLE_MS)
             return true
         }
-        // Settings Search is on-screen at the top — more reliable than scrolling down.
-        if (clickInstagramArchiveViaSettingsSearch()) {
+        if (navigationRemainingMs() >= INSTAGRAM_SETTINGS_SEARCH_MIN_REMAINING_MS &&
+            clickInstagramArchiveViaSettingsSearch()
+        ) {
             return true
         }
         val nodes = waitForInstagramOptionsMenuNodes()
@@ -5105,6 +5168,9 @@ class UiAutomatorDriver(
     private fun navigationExpired(): Boolean =
         System.currentTimeMillis() >= navigationDeadlineAtMs
 
+    private fun navigationRemainingMs(): Long =
+        (navigationDeadlineAtMs - System.currentTimeMillis()).coerceAtLeast(0L)
+
     private fun waitBudgetMs(requested: Long): Long {
         val remaining = navigationDeadlineAtMs - System.currentTimeMillis()
         if (remaining <= 0L) return 0L
@@ -5196,6 +5262,9 @@ class UiAutomatorDriver(
         private const val PROFILE_LATE_SETTLE_MS = 500L
         private const val INSTAGRAM_ACTION_SETTLE_MS = 300L
         private const val INSTAGRAM_SETTINGS_LOAD_SETTLE_MS = 1_200L
+        private const val INSTAGRAM_SETTINGS_VISIBLE_SETTLE_MS = 350L
+        private const val INSTAGRAM_SETTINGS_NEAR_TOP_MIN_REMAINING_MS = 3_000L
+        private const val INSTAGRAM_SETTINGS_SEARCH_MIN_REMAINING_MS = 12_000L
         private const val INSTAGRAM_OPTIONS_MENU_WAIT_MS = 12_000L
         private const val INSTAGRAM_SETTINGS_SEARCH_SETTLE_MS = 900L
         private const val INSTAGRAM_SCROLL_SETTLE_MS = 250L

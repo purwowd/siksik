@@ -441,7 +441,7 @@ class AndroidUiAutomationOrchestrator:
             },
         )
         navigation_deadline_ms = int(
-            min(175.0, max(15.0, self._config.target_timeout_seconds - 10.0)) * 1000,
+            min(240.0, max(15.0, self._config.target_timeout_seconds - 10.0)) * 1000,
         )
         try:
             result = await self._adb.run_instrumentation(
