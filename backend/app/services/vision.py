@@ -142,6 +142,7 @@ def analyze_image_file(
     *,
     precomputed_ocr_text: str | None = None,
     precomputed_ocr_backend: str | None = None,
+    origin_hint: str | None = None,
 ) -> list[dict]:
     from app.services import clip_tokoh
     from app.services import gpu_stack
@@ -167,7 +168,7 @@ def analyze_image_file(
                 ocr_findings = ocr_mod.ocr_findings_from_text(ocr_text, backend=ocr_backend or "ocr")
         else:
             # media_text best-effort (EasyOCR/Paddle tanpa SADT_OCR_ENABLED)
-            mt = media_text.ocr_image_best_effort(path)
+            mt = media_text.ocr_image_best_effort(path, origin_hint=origin_hint)
             ocr_findings.extend(mt)
             # Ambil cuplikan teks dari evidence jika ada
             for f in mt:

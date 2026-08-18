@@ -539,7 +539,9 @@ class UiAutomatorDriver(
         }
         repeat(X_CONTENT_WAIT_ATTEMPTS) {
             if (rows.isNotEmpty()) return@repeat
-            if (hasLabelContaining(X_EMPTY_TIMELINE_LABELS)) return ScopeCapture(true, null)
+            if (hasLabelContaining(X_EMPTY_TIMELINE_LABELS)) {
+                return ScopeCapture(stored = true, screenshotId = null, exhausted = true)
+            }
             if (navigationExpired()) return@repeat
             SystemClock.sleep(X_SCROLL_IDLE_MS)
             rows = xTimelineRowsFromUiDevice(marker, scope)
@@ -552,6 +554,9 @@ class UiAutomatorDriver(
             if (root.packageName?.toString() != X_PACKAGE) return@repeat
             nodes = snapshotVisibleNodes(root)
             rows = xOwnedTimelineRows(nodes, marker, scope)
+        }
+        if (rows.isEmpty() && hasLabelContaining(X_EMPTY_TIMELINE_LABELS)) {
+            return ScopeCapture(stored = true, screenshotId = null, exhausted = true)
         }
         if (rows.isEmpty()) {
             buildXTimelineRow(nodes, marker, scope)?.let { rows = listOf(it) }
@@ -616,20 +621,37 @@ class UiAutomatorDriver(
                     "new=$storedAny mode=text_only",
             )
         }
-        return ScopeCapture(accepted, null)
+        return ScopeCapture(accepted, null, exhausted = accepted && !storedAny)
     }
 
     override fun lastFailureReason(): String? = failureReason
 
     private fun navigateInstagram(scope: SocialScope): Boolean {
+        if (scope == SocialScope.OWN_COMMENTS) {
+            return navigateInstagramComments()
+        }
         if (!openInstagramOwnProfile()) return false
         return when (scope) {
             SocialScope.OWN_PROFILE -> true
             SocialScope.OWN_POSTS -> openInstagramOwnPost()
             SocialScope.OWN_STORY_ARCHIVE -> openInstagramStoryArchive()
-            SocialScope.OWN_COMMENTS -> openInstagramComments()
             else -> false
         }
+    }
+
+    private fun navigateInstagramComments(): Boolean {
+        shellDumpDisabledUntilMs = 0L
+        invalidateShellDumpCache()
+        if (instagramOnStoriesArchive()) {
+            if (!leaveInstagramArchiveForComments()) return false
+        } else if (instagramCommentsListChromeVisible()) {
+            return true
+        }
+        if (instagramOptionsMenuAlreadyOpen()) {
+            return openInstagramComments()
+        }
+        if (!openInstagramOwnProfile()) return false
+        return openInstagramComments()
     }
 
     private fun snapshotVisibleNodes(root: android.view.accessibility.AccessibilityNodeInfo): List<VisibleNodeRecord> =
@@ -759,6 +781,9 @@ class UiAutomatorDriver(
         logInstagramProfileNavigation("start", started)
         debugMapper.capture("instagram_profile_before_navigation", activeScope)
         dismissInstagramProfileCoachmarks()
+        if (isInstagramArchiveListSurface()) {
+            instagramSubpageActive = true
+        }
         scrollInstagramProfileToHeaderIfNeeded()
         // Already on own profile — UiDevice selectors first (probe-proven).
         if (instagramOwnProfileVisibleOnDevice()) {
@@ -768,7 +793,7 @@ class UiAutomatorDriver(
             var restored = false
             for (step in 0 until MAX_INSTAGRAM_PROFILE_BACK_STEPS) {
                 dismissInstagramCommentsFilterSheet()
-                device.pressBack()
+                clickInstagramSubpageBack()
                 SystemClock.sleep(PROFILE_PROBE_INTERVAL_MS)
                 if (instagramOwnProfileVisibleOnDevice()) {
                     return acceptInstagramOwnProfile(started, "restored_from_subpage")
@@ -1334,7 +1359,7 @@ class UiAutomatorDriver(
         }
         instagramArchiveEndReached = false
         instagramLastArchiveCaptureSignature = null
-        instagramArchiveScrollBudget = INSTAGRAM_ARCHIVE_SCROLL_LIMIT
+        instagramArchiveScrollBudget = instagramArchiveScrollsForRemainingTime()
         instagramArchiveListActive = true
         logInstagramArchiveNavigation("stories_verified", started)
         debugMapper.capture(
@@ -1748,48 +1773,349 @@ class UiAutomatorDriver(
         return visible
     }
 
+    /**
+     * Stories archive intercepts pressBack on some OEM builds. Click the header
+     * Back control, then open Comments from Settings if that sheet is still up.
+     */
+    private fun leaveInstagramArchiveForComments(): Boolean {
+        if (!instagramOnStoriesArchive()) {
+            return true
+        }
+        Log.i(LOG_TAG, "event=instagram_archive_back stage=start")
+        debugMapper.capture("instagram_archive_back_start", SocialScope.OWN_COMMENTS)
+        var previousVia: String? = null
+        repeat(MAX_INSTAGRAM_PROFILE_BACK_STEPS) { step ->
+            invalidateShellDumpCache()
+            if (instagramOptionsMenuAlreadyOpen()) {
+                markInstagramArchiveLeft()
+                debugMapper.capture(
+                    "instagram_archive_back_cleared",
+                    SocialScope.OWN_COMMENTS,
+                    "observed",
+                )
+                return true
+            }
+            val dumpShowsArchive = shellDumpHasAnyLabel(STORY_ARCHIVE_LABELS)
+            if (!dumpShowsArchive && previousVia != null && previousVia != "geometry") {
+                markInstagramArchiveLeft()
+                debugMapper.capture(
+                    "instagram_archive_back_cleared",
+                    SocialScope.OWN_COMMENTS,
+                    previousVia,
+                )
+                return true
+            }
+            if (!dumpShowsArchive && !isInstagramArchiveListSurface()) {
+                markInstagramArchiveLeft()
+                return true
+            }
+            val via = clickInstagramHeaderBack()
+            previousVia = via
+            invalidateShellDumpCache()
+            SystemClock.sleep(INSTAGRAM_ARCHIVE_LOAD_SETTLE_MS)
+            debugMapper.capture(
+                "instagram_archive_back_$step",
+                SocialScope.OWN_COMMENTS,
+                via,
+            )
+        }
+        invalidateShellDumpCache()
+        if (instagramOptionsMenuAlreadyOpen()) {
+            markInstagramArchiveLeft()
+            debugMapper.capture(
+                "instagram_archive_back_cleared",
+                SocialScope.OWN_COMMENTS,
+                "observed",
+            )
+            return true
+        }
+        if (!shellDumpHasAnyLabel(STORY_ARCHIVE_LABELS) &&
+            previousVia != null &&
+            previousVia != "geometry"
+        ) {
+            markInstagramArchiveLeft()
+            debugMapper.capture(
+                "instagram_archive_back_cleared",
+                SocialScope.OWN_COMMENTS,
+                previousVia,
+            )
+            return true
+        }
+        debugMapper.capture("instagram_archive_back_failed", SocialScope.OWN_COMMENTS, "failed")
+        return fail("instagram_archive_back_failed")
+    }
+
+    /** Flag is cleared on scope switch; dump title is the live signal. */
+    private fun instagramOnStoriesArchive(): Boolean {
+        if (shellDumpHasAnyLabel(STORY_ARCHIVE_LABELS)) return true
+        return isInstagramArchiveListSurface()
+    }
+
+    private fun markInstagramArchiveLeft() {
+        instagramArchiveListActive = false
+        instagramSubpageActive = instagramOptionsMenuAlreadyOpen()
+    }
+
+    private fun clickInstagramSubpageBack(): Boolean {
+        clickInstagramHeaderBack()
+        return true
+    }
+
+    /**
+     * Portable header Back: accessibility and bounded UiDevice first.
+     * Compressed dump + `input tap` is fallback when those miss or hang
+     * (Infinix/IG Compose). Live bounds from the dump, not a device pixel map.
+     */
+    private fun clickInstagramHeaderBack(): String {
+        if (clickInstagramHeaderBackAccessibility()) return "a11y"
+        if (clickInstagramHeaderBackUiDevice()) return "uidevice"
+        if (clickInstagramHeaderBackViaShellDump()) return "dump"
+        val x = (device.displayWidth * 8 / 100).coerceAtLeast(24)
+        val y = (device.displayHeight * 7 / 100).coerceAtLeast(48)
+        Log.i(LOG_TAG, "event=instagram_header_back via=geometry x=$x y=$y")
+        shellTap(x, y)
+        return "geometry"
+    }
+
+    private fun clickInstagramHeaderBackAccessibility(): Boolean {
+        val maxTop = (device.displayHeight / 5).coerceAtLeast(1)
+        val maxRight = (device.displayWidth / 3).coerceAtLeast(1)
+        val backLabels = INSTAGRAM_HEADER_BACK_LABELS
+            .map { value -> value.lowercase(Locale.ROOT) }
+            .toSet()
+        return performAccessibilityClick { node, bounds ->
+            if (bounds.top >= maxTop || bounds.left >= maxRight) return@performAccessibilityClick false
+            val resourceId = node.viewIdResourceName.orEmpty()
+            resourceId.endsWith("/$INSTAGRAM_HEADER_BACK_RESOURCE") ||
+                accessibilityLabels(node).any(backLabels::contains)
+        }
+    }
+
+    private fun clickInstagramHeaderBackUiDevice(): Boolean = uiQueryBounded(false) {
+        val byRes = device.wait(
+            Until.findObject(By.res(INSTAGRAM_PACKAGE, INSTAGRAM_HEADER_BACK_RESOURCE)),
+            UI_DEVICE_SELECTOR_WAIT_MS,
+        )
+        if (byRes != null && safeClick(byRes)) return@uiQueryBounded true
+        val maxTop = (device.displayHeight / 5).coerceAtLeast(1)
+        val maxRight = (device.displayWidth / 3).coerceAtLeast(1)
+        for (label in INSTAGRAM_HEADER_BACK_LABELS) {
+            val obj = device.wait(Until.findObject(By.desc(label)), UI_DEVICE_SELECTOR_WAIT_MS)
+                ?: continue
+            val bounds = safeBounds(obj) ?: continue
+            if (bounds.top < maxTop && bounds.left < maxRight && safeClick(obj)) {
+                return@uiQueryBounded true
+            }
+        }
+        false
+    }
+
+    private fun clickInstagramHeaderBackViaShellDump(): Boolean {
+        invalidateShellDumpCache()
+        val fromResource = shellDumpProbeByResourceSuffix(INSTAGRAM_HEADER_BACK_RESOURCE)
+        if (fromResource != null && shellTap(fromResource.centerX(), fromResource.centerY())) {
+            Log.i(
+                LOG_TAG,
+                "event=instagram_header_back via=dump_resource " +
+                    "bounds=${fromResource.toShortString()}",
+            )
+            return true
+        }
+        val maxTop = (device.displayHeight / 5).coerceAtLeast(1)
+        val maxRight = (device.displayWidth / 3).coerceAtLeast(1)
+        val fromLabel = shellDumpProbeNodes(INSTAGRAM_HEADER_BACK_LABELS)
+            .map { node -> node.bounds }
+            .filter { bounds -> bounds.top < maxTop && bounds.left < maxRight }
+            .minByOrNull { bounds -> bounds.left }
+        if (fromLabel != null && shellTap(fromLabel.centerX(), fromLabel.centerY())) {
+            Log.i(
+                LOG_TAG,
+                "event=instagram_header_back via=dump_label bounds=${fromLabel.toShortString()}",
+            )
+            return true
+        }
+        return false
+    }
+
     private fun openInstagramComments(): Boolean {
-        // Settings may already be open (e.g. after archive); don't re-open/thrash.
         if (!instagramOptionsMenuAlreadyOpen() && !clickInstagramOptions()) {
             return fail("instagram_options_not_found")
         }
         instagramSubpageActive = true
-        revealInstagramSettingsRow(YOUR_ACTIVITY_LABELS)
-        dismissInstagramCommentsCoachmark()
-        if (!clickInstagramVisibleSettingsRow(YOUR_ACTIVITY_LABELS) &&
-            !clickInstagramSettingsLabel(YOUR_ACTIVITY_LABELS) &&
+        shellDumpDisabledUntilMs = 0L
+        invalidateShellDumpCache()
+        // Compose Settings rows are clickable=false. Dump+input tap first; a11y can
+        // return true without leaving Settings (Samsung d1beba46, Infinix 726a823a).
+        if (!clickInstagramActivitySubpageRow(YOUR_ACTIVITY_LABELS) &&
+            !clickInstagramLabeledRow(YOUR_ACTIVITY_LABELS) &&
             !clickInstagramCommentsActivityFallback()
         ) {
-            revealInstagramSettingsRow(YOUR_ACTIVITY_LABELS)
-            if (!clickInstagramVisibleSettingsRow(YOUR_ACTIVITY_LABELS) &&
-                !clickInstagramSettingsLabel(YOUR_ACTIVITY_LABELS) &&
-                !clickInstagramCommentsActivityFallback()
-            ) {
-                return fail("instagram_activity_not_found")
-            }
+            return fail("instagram_activity_not_found")
         }
-        SystemClock.sleep(INSTAGRAM_ACTION_SETTLE_MS)
-        if (clickInstagramSettingsLabel(COMMENTS_LABELS)) {
+        debugMapper.capture("instagram_your_activity_opening", SocialScope.OWN_COMMENTS)
+        if (!waitForInstagramYourActivityScreen()) {
+            debugMapper.capture(
+                "instagram_your_activity_not_ready",
+                SocialScope.OWN_COMMENTS,
+                "failed",
+            )
+            return fail("instagram_activity_not_ready")
+        }
+        debugMapper.capture("instagram_your_activity_ready", SocialScope.OWN_COMMENTS, "observed")
+        invalidateShellDumpCache()
+        if (clickInstagramActivitySubpageRow(COMMENTS_LABELS) ||
+            clickInstagramLabeledRow(COMMENTS_LABELS)
+        ) {
             return finalizeInstagramCommentsSurface()
         }
-        if (!clickInstagramSettingsLabel(INTERACTIONS_LABELS)) {
-            return fail("instagram_interactions_not_found")
+        if (clickInstagramActivitySubpageRow(INTERACTIONS_LABELS) ||
+            clickInstagramLabeledRow(INTERACTIONS_LABELS)
+        ) {
+            if (!waitForInstagramAnyLabel(COMMENTS_LABELS, INSTAGRAM_YOUR_ACTIVITY_WAIT_MS)) {
+                return fail("instagram_comments_not_found")
+            }
+            if (clickInstagramActivitySubpageRow(COMMENTS_LABELS) ||
+                clickInstagramLabeledRow(COMMENTS_LABELS)
+            ) {
+                return finalizeInstagramCommentsSurface()
+            }
         }
-        SystemClock.sleep(INSTAGRAM_ACTION_SETTLE_MS)
-        if (!clickInstagramSettingsLabel(COMMENTS_LABELS)) {
-            return fail("instagram_comments_not_found")
+        return fail("instagram_interactions_not_found")
+    }
+
+    /**
+     * Your activity is ready when Comments / Interactions is visible via UiDevice,
+     * accessibility, or dump. Dump-only wait failed on Samsung while Comments was
+     * already on screen (d1beba46 `your_activity_not_ready`).
+     */
+    private fun waitForInstagramYourActivityScreen(): Boolean {
+        if (instagramYourActivityPageVisible()) return true
+        val deadline = SystemClock.elapsedRealtime() + INSTAGRAM_YOUR_ACTIVITY_WAIT_MS
+        var retriedActivity = false
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (instagramYourActivityPageVisible()) return true
+            if (!retriedActivity && instagramOptionsMenuAlreadyOpen()) {
+                clickInstagramActivitySubpageRow(YOUR_ACTIVITY_LABELS)
+                retriedActivity = true
+            }
+            SystemClock.sleep(INSTAGRAM_SHELL_POLL_MS)
         }
-        return finalizeInstagramCommentsSurface()
+        return instagramYourActivityPageVisible()
+    }
+
+    private fun instagramYourActivityPageVisible(): Boolean {
+        if (instagramCommentsListChromeVisible()) return true
+        return instagramAnyLabelVisible(COMMENTS_LABELS + INTERACTIONS_LABELS)
+    }
+
+    private fun waitForInstagramAnyLabel(labels: List<String>, timeoutMs: Long): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (instagramAnyLabelVisible(labels)) return true
+            SystemClock.sleep(INSTAGRAM_SHELL_POLL_MS)
+        }
+        return instagramAnyLabelVisible(labels)
+    }
+
+    private fun instagramAnyLabelVisible(labels: List<String>): Boolean {
+        if (uiQueryBounded(false) { hasExactLabel(labels) }) return true
+        if (accessibilityHasAnyLabel(labels)) return true
+        return shellDumpHasAnyLabel(labels)
+    }
+
+    private fun clickInstagramActivitySubpageRow(labels: List<String>): Boolean {
+        invalidateShellDumpCache()
+        val hits = shellDumpProbeNodes(labels)
+        val target = pickInstagramShellRowTarget(hits)
+        if (target != null) {
+            Log.i(
+                LOG_TAG,
+                "event=instagram_activity_row_click via=dump label=${labels.firstOrNull()} " +
+                    "bounds=${target.bounds.toShortString()} class=${target.className}",
+            )
+            debugMapper.capture(
+                "instagram_activity_row_" +
+                    labels.firstOrNull().orEmpty().lowercase(Locale.ROOT).replace(' ', '_'),
+                SocialScope.OWN_COMMENTS,
+                "dump",
+            )
+            return shellTap(target.bounds.centerX(), target.bounds.centerY()) ||
+                safeClickPoint(target.bounds.centerX(), target.bounds.centerY())
+        }
+        if (uiQueryBounded(false) { clickInstagramVisibleSettingsRow(labels) }) {
+            debugMapper.capture(
+                "instagram_activity_row_" +
+                    labels.firstOrNull().orEmpty().lowercase(Locale.ROOT).replace(' ', '_'),
+                SocialScope.OWN_COMMENTS,
+                "uidevice",
+            )
+            return true
+        }
+        val normalized = labels.map { value -> value.trim().lowercase(Locale.ROOT) }.toSet()
+        if (performAccessibilityClick { node, _ ->
+                accessibilityLabels(node).any(normalized::contains)
+            }
+        ) {
+            debugMapper.capture(
+                "instagram_activity_row_" +
+                    labels.firstOrNull().orEmpty().lowercase(Locale.ROOT).replace(' ', '_'),
+                SocialScope.OWN_COMMENTS,
+                "a11y",
+            )
+            return true
+        }
+        return clickInstagramLabelViaShellDump(labels)
+    }
+
+    private fun pickInstagramShellRowTarget(
+        hits: List<InstagramProbeNode>,
+    ): InstagramProbeNode? {
+        if (hits.isEmpty()) return null
+        val screenArea = device.displayWidth.toLong() * device.displayHeight.coerceAtLeast(1)
+        val rowCandidates = hits.filter { node ->
+            val area = node.bounds.width().toLong() * node.bounds.height()
+            area <= screenArea / 3
+        }
+        val pool = rowCandidates.ifEmpty { hits }
+        return pool.sortedWith(
+            compareByDescending<InstagramProbeNode> { node ->
+                if (node.className.contains("Button", ignoreCase = true)) 1 else 0
+            }.thenBy { node ->
+                node.bounds.width().toLong() * node.bounds.height()
+            },
+        ).firstOrNull()
+    }
+
+    /** Accessibility / bounded UiDevice first; dump+input tap only if those miss. */
+    private fun clickInstagramLabeledRow(labels: List<String>): Boolean {
+        val normalized = labels.map { value -> value.trim().lowercase(Locale.ROOT) }.toSet()
+        if (performAccessibilityClick { node, _ ->
+                accessibilityLabels(node).any(normalized::contains)
+            }
+        ) {
+            return true
+        }
+        if (uiQueryBounded(false) { clickInstagramVisibleSettingsRow(labels) }) {
+            return true
+        }
+        return clickInstagramLabelViaShellDump(labels)
     }
 
     private fun finalizeInstagramCommentsSurface(): Boolean {
-        dismissInstagramCommentsCoachmark()
-        val ready = waitForHeader(COMMENTS_LABELS) ||
-            device.hasObject(By.text("Comments")) ||
-            device.hasObject(By.text("Komentar"))
-        if (!ready) return fail("instagram_comments_not_ready")
-        dismissInstagramCommentsCoachmark()
-        return true
+        val deadline = SystemClock.elapsedRealtime() + INSTAGRAM_COMMENTS_LIST_WAIT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            SystemClock.sleep(INSTAGRAM_ACTION_SETTLE_MS)
+            invalidateShellDumpCache()
+            if (instagramCommentsListChromeVisible()) {
+                debugMapper.capture(
+                    "instagram_comments_list_ready",
+                    SocialScope.OWN_COMMENTS,
+                    "verified",
+                )
+                return true
+            }
+        }
+        return fail("instagram_comments_not_ready")
     }
 
     private fun advanceInstagramComments(): Boolean {
@@ -1826,13 +2152,23 @@ class UiAutomatorDriver(
     /** True when Comments list (not Filter-by-date sheet) is showing. */
     private fun isInstagramCommentsListSurface(): Boolean {
         if (instagramCommentsFilterSheetVisible()) return false
-        return hasExactLabel(COMMENTS_LABELS) ||
-            device.hasObject(By.text("Comments")) ||
-            device.hasObject(By.text("Komentar"))
+        return instagramCommentsListChromeVisible()
+    }
+
+    /** Comments list chrome: UiDevice first, dump fallback. */
+    private fun instagramCommentsListChromeVisible(): Boolean {
+        val viaDevice = uiQueryBounded(false) {
+            hasExactLabel(COMMENTS_LABELS) &&
+                hasExactLabel(INSTAGRAM_COMMENTS_LIST_CHROME_LABELS)
+        }
+        if (viaDevice) return true
+        invalidateShellDumpCache()
+        if (!shellDumpHasAnyLabel(COMMENTS_LABELS)) return false
+        return shellDumpHasAnyLabel(INSTAGRAM_COMMENTS_LIST_CHROME_LABELS)
     }
 
     private fun instagramCommentsFilterSheetVisible(): Boolean =
-        hasExactLabel(
+        shellDumpHasAnyLabel(
             listOf(
                 "Filter by date",
                 "Filter by Date",
@@ -1851,11 +2187,12 @@ class UiAutomatorDriver(
         Log.i(LOG_TAG, "event=instagram_comments_filter_sheet_dismiss")
         device.pressBack()
         SystemClock.sleep(INSTAGRAM_ACTION_SETTLE_MS)
+        invalidateShellDumpCache()
         if (!instagramCommentsFilterSheetVisible()) return true
-        // Tap above the sheet (dimmed area) as fallback.
         val bounds = activeWindowBounds()
         safeClickPoint(bounds.centerX(), bounds.top + bounds.height() / 8)
         SystemClock.sleep(INSTAGRAM_ACTION_SETTLE_MS)
+        invalidateShellDumpCache()
         return !instagramCommentsFilterSheetVisible()
     }
 
@@ -1868,20 +2205,34 @@ class UiAutomatorDriver(
             device.hasObject(By.desc("Beranda"))
     }
 
-    private fun dismissInstagramCommentsCoachmark(): Boolean = safeUi(false) {
-        val tip = device.findObject(By.text("Delete multiple comments."))
-            ?: device.findObject(By.textContains("Delete multiple comments"))
-            ?: device.findObject(By.textContains("Hapus beberapa komentar"))
-        if (tip != null) {
-            // Tap outside the tip (list area) or back-dismiss by tapping Select's coachmark once.
-            val bounds = safeBounds(tip)
-            if (bounds != null) {
-                safeClickPoint(bounds.centerX(), (bounds.bottom + 48).coerceAtMost(device.displayHeight - 2))
-                SystemClock.sleep(150L)
-                return@safeUi true
-            }
+    private fun dismissInstagramCommentsCoachmark(): Boolean {
+        if (!shellDumpHasAnyLabel(
+                listOf(
+                    "Delete multiple comments.",
+                    "Delete multiple comments",
+                    "Hapus beberapa komentar",
+                ),
+            )
+        ) {
+            return false
         }
-        false
+        return safeUi(false) {
+            val tip = device.findObject(By.text("Delete multiple comments."))
+                ?: device.findObject(By.textContains("Delete multiple comments"))
+                ?: device.findObject(By.textContains("Hapus beberapa komentar"))
+            if (tip != null) {
+                val bounds = safeBounds(tip)
+                if (bounds != null) {
+                    safeClickPoint(
+                        bounds.centerX(),
+                        (bounds.bottom + 48).coerceAtMost(device.displayHeight - 2),
+                    )
+                    SystemClock.sleep(150L)
+                    return@safeUi true
+                }
+            }
+            false
+        }
     }
 
     /** Prefer UiDevice / shell dump for Compose Settings rows (same idea as Archive). */
@@ -1950,7 +2301,8 @@ class UiAutomatorDriver(
     }
 
     private fun instagramOptionsMenuAlreadyOpen(): Boolean =
-        instagramOptionsMenuReadyUiDevice() || instagramOptionsMenuReadyShell()
+        uiQueryBounded(false) { instagramOptionsMenuReadyUiDevice() } ||
+            instagramOptionsMenuReadyShell()
 
     /**
      * Probe-aligned Options open:
@@ -2424,10 +2776,12 @@ class UiAutomatorDriver(
             return false
         }
         if (scope == SocialScope.OWN_PROFILE) return true
+        dismissXChromeOverlays()
         val labels = if (scope == SocialScope.OWN_TWEETS) X_POSTS_LABELS else X_REPLIES_LABELS
         if (!ensureXProfileTabsVisible() || !clickXProfileTab(labels)) {
             return fail("x_profile_tab_not_found")
         }
+        dismissXChromeOverlays()
         xTimelineActive = true
         if (!waitForXTimeline(scope) ||
             X_PACKAGE !in verifiedOwnAccountPackages ||
@@ -2642,6 +2996,8 @@ class UiAutomatorDriver(
     }
 
     private fun clickXProfileTab(labels: List<String>): Boolean {
+        dismissXChromeOverlays()
+        if (xProfileTabAlreadyActive(labels)) return true
         val maximumTop = (device.displayHeight * 2) / 3
         val candidates = boundedLabelCandidates(labels, 0, maximumTop)
         val target = candidates.minByOrNull { value ->
@@ -2650,15 +3006,58 @@ class UiAutomatorDriver(
         val clickable = clickableAncestor(target) ?: target
         if (!safeClick(clickable)) return false
         waitNavigation()
+        dismissXChromeOverlays()
         return boundedLabelCandidates(labels, 0, maximumTop).isNotEmpty()
+    }
+
+    private fun xProfileTabAlreadyActive(labels: List<String>): Boolean {
+        if (xHighlightsMenuVisible()) return false
+        if (labels === X_REPLIES_LABELS || labels.any { it in X_REPLIES_LABELS }) {
+            return xTabLooksSelected(X_REPLIES_LABELS)
+        }
+        return xTabLooksSelected(X_POSTS_LABELS) && !xTabLooksSelected(X_REPLIES_LABELS)
+    }
+
+    private fun xTabLooksSelected(labels: List<String>): Boolean = safeUi(false) {
+        labels.any { label ->
+            device.findObjects(By.text(label)).any { value -> value.isSelected } ||
+                device.findObjects(By.desc(label)).any { value -> value.isSelected } ||
+                device.findObjects(By.descContains(label)).any { value ->
+                    value.isSelected ||
+                        value.contentDescription?.contains("selected", ignoreCase = true) == true
+                }
+        }
+    }
+
+    private fun xHighlightsMenuVisible(): Boolean = safeUi(false) {
+        val posts = boundedLabelCandidates(X_POSTS_LABELS, 0, (device.displayHeight * 2) / 3)
+            .minByOrNull { value -> safeBounds(value)?.top ?: Int.MAX_VALUE }
+            ?: return@safeUi false
+        val postsBounds = safeBounds(posts) ?: return@safeUi false
+        boundedLabelCandidates(
+            listOf("Highlights", "Sorotan"),
+            postsBounds.bottom - 8,
+            postsBounds.bottom + 280,
+        ).any { highlight ->
+            val bounds = safeBounds(highlight) ?: return@any false
+            bounds.top > postsBounds.bottom - 8
+        }
+    }
+
+    private fun dismissXChromeOverlays() {
+        dismissBlockingSystemPrompts()
+        if (xHighlightsMenuVisible()) {
+            device.pressBack()
+            waitNavigation()
+        }
     }
 
     private fun waitForXTimeline(scope: SocialScope): Boolean {
         repeat(X_TIMELINE_WAIT_ATTEMPTS) {
-            if (isXTimelineSurface(scope)) return true
+            if (isXTimelineSurface(scope) || hasLabelContaining(X_EMPTY_TIMELINE_LABELS)) return true
             device.waitForIdle(NAVIGATION_IDLE_MS)
         }
-        return isXTimelineSurface(scope)
+        return isXTimelineSurface(scope) || hasLabelContaining(X_EMPTY_TIMELINE_LABELS)
     }
 
     private fun navigateFacebook(scope: SocialScope): Boolean {
@@ -3751,7 +4150,7 @@ class UiAutomatorDriver(
                 SocialScope.OWN_PROFILE -> hasInstagramOwnProfileProof()
                 SocialScope.OWN_POSTS -> isInstagramOwnPostSurface()
                 SocialScope.OWN_STORY_ARCHIVE -> isInstagramArchiveListSurface()
-                SocialScope.OWN_COMMENTS -> hasHeader(COMMENTS_LABELS)
+                SocialScope.OWN_COMMENTS -> instagramCommentsListChromeVisible()
                 else -> false
             }
             X_PACKAGE -> when (scope) {
@@ -4103,8 +4502,11 @@ class UiAutomatorDriver(
         )
     }
 
-    private fun hasMeaningfulXText(value: String, marker: String): Boolean =
-        value.lineSequence()
+    private fun hasMeaningfulXText(value: String, marker: String): Boolean {
+        if (X_EMPTY_TIMELINE_LABELS.any { label -> value.contains(label, ignoreCase = true) }) {
+            return false
+        }
+        return value.lineSequence()
             .map { line -> line.trim() }
             .filter(String::isNotEmpty)
             .any { line ->
@@ -4113,6 +4515,7 @@ class UiAutomatorDriver(
                     normalized != "@${marker.lowercase()}" &&
                     normalized !in X_TIMELINE_NOISE
             }
+    }
 
     private fun waitForXViewportSignature(scope: SocialScope): String? {
         repeat(X_SIGNATURE_WAIT_ATTEMPTS) {
@@ -4341,12 +4744,68 @@ class UiAutomatorDriver(
             default
         }
 
+    private fun <T> uiQueryBounded(fallback: T, block: () -> T): T {
+        val holder = arrayOfNulls<Any>(1)
+        val worker = Thread(
+            {
+                try {
+                    holder[0] = block()
+                } catch (_: Throwable) {
+                    holder[0] = fallback
+                }
+            },
+            "siksik-ui-bound",
+        )
+        worker.start()
+        try {
+            worker.join(UI_DEVICE_BOUND_MS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        if (worker.isAlive) {
+            Log.w(LOG_TAG, "event=uidevice_bounded_timeout ms=$UI_DEVICE_BOUND_MS")
+            return fallback
+        }
+        @Suppress("UNCHECKED_CAST")
+        return (holder[0] as T?) ?: fallback
+    }
+
+    private fun shellTap(x: Int, y: Int): Boolean = try {
+        device.executeShellCommand("input tap $x $y")
+        true
+    } catch (_: Throwable) {
+        false
+    }
+
     private fun accessibilityLabels(node: AccessibilityNodeInfo): Set<String> =
         sequenceOf(node.text, node.contentDescription)
             .filterNotNull()
             .map { value -> value.toString().trim().lowercase(Locale.ROOT) }
             .filter(String::isNotEmpty)
             .toSet()
+
+    private fun accessibilityHasAnyLabel(labels: List<String>): Boolean {
+        val expected = labels.map { value -> value.trim().lowercase(Locale.ROOT) }.toSet()
+        return safeUi(false) {
+            val root = uiAutomation.rootInActiveWindow ?: return@safeUi false
+            if (root.packageName?.toString() != INSTAGRAM_PACKAGE) return@safeUi false
+            val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+            queue.addLast(root to 0)
+            var visited = 0
+            while (queue.isNotEmpty() && visited < MAX_INSTAGRAM_PROBE_NODES) {
+                val (node, depth) = queue.removeFirst()
+                visited += 1
+                if (node.isVisibleToUser && accessibilityLabels(node).any(expected::contains)) {
+                    return@safeUi true
+                }
+                if (depth >= BuildConfig.MAX_UI_DEPTH) continue
+                for (index in 0 until node.childCount) {
+                    node.getChild(index)?.let { child -> queue.addLast(child to depth + 1) }
+                }
+            }
+            false
+        }
+    }
 
     private fun performAccessibilityClick(
         predicate: (AccessibilityNodeInfo, Rect) -> Boolean,
@@ -4628,7 +5087,7 @@ class UiAutomatorDriver(
                 try {
                     // Bound hung dumps (Infinix/Transsion "could not get idle state").
                     device.executeShellCommand(
-                        "timeout ${SHELL_DUMP_TIMEOUT_SEC}s uiautomator dump $SHELL_DUMP_PATH",
+                        "timeout ${SHELL_DUMP_TIMEOUT_SEC}s uiautomator dump --compressed $SHELL_DUMP_PATH",
                     )
                     holder[0] = device.executeShellCommand("cat $SHELL_DUMP_PATH").orEmpty()
                 } catch (_: Throwable) {
@@ -4719,15 +5178,39 @@ class UiAutomatorDriver(
     private fun clickInstagramLabelViaShellDump(labels: List<String>): Boolean {
         invalidateShellDumpCache()
         val hits = shellDumpProbeNodes(labels)
-        val best = hits.maxByOrNull { node ->
-            node.bounds.width().toLong() * node.bounds.height().toLong()
-        } ?: return false
+        val best = pickInstagramShellRowTarget(hits)
+            ?: hits.maxByOrNull { node ->
+                node.bounds.width().toLong() * node.bounds.height().toLong()
+            }
+            ?: return false
         Log.i(
             LOG_TAG,
             "event=instagram_shell_dump_click label=${labels.firstOrNull()} " +
                 "bounds=${best.bounds.toShortString()}",
         )
-        return safeClickPoint(best.bounds.centerX(), best.bounds.centerY())
+        return shellTap(best.bounds.centerX(), best.bounds.centerY()) ||
+            safeClickPoint(best.bounds.centerX(), best.bounds.centerY())
+    }
+
+    private fun shellDumpProbeByResourceSuffix(suffix: String): Rect? {
+        val xml = readShellUiDump()
+        if (!xml.contains("<node")) return null
+        val nodeRe = Regex("""<node\b[^>]*>""")
+        val boundsRe = Regex("""bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"""")
+        val needle = "/$suffix"
+        for (match in nodeRe.findAll(xml)) {
+            val tag = match.value
+            val resourceId = shellDumpAttr(tag, "resource-id")
+            if (resourceId != suffix && !resourceId.endsWith(needle)) continue
+            val bounds = boundsRe.find(tag) ?: continue
+            return Rect(
+                bounds.groupValues[1].toInt(),
+                bounds.groupValues[2].toInt(),
+                bounds.groupValues[3].toInt(),
+                bounds.groupValues[4].toInt(),
+            )
+        }
+        return null
     }
 
     private fun swipeXTimeline(): Boolean {
@@ -5171,6 +5654,14 @@ class UiAutomatorDriver(
     private fun navigationRemainingMs(): Long =
         (navigationDeadlineAtMs - System.currentTimeMillis()).coerceAtLeast(0L)
 
+    private fun instagramArchiveScrollsForRemainingTime(): Int {
+        val available = navigationRemainingMs() - INSTAGRAM_COMMENTS_RESERVE_MS
+        if (available < INSTAGRAM_ARCHIVE_MIN_REMAINING_FOR_EXTRA_MS) return 0
+        return (available / INSTAGRAM_ARCHIVE_EXTRA_CAPTURE_MS)
+            .toInt()
+            .coerceIn(0, INSTAGRAM_ARCHIVE_SCROLL_LIMIT)
+    }
+
     private fun waitBudgetMs(requested: Long): Long {
         val remaining = navigationDeadlineAtMs - System.currentTimeMillis()
         if (remaining <= 0L) return 0L
@@ -5218,10 +5709,13 @@ class UiAutomatorDriver(
 
     private fun deactivateScope(forceLedgerClear: Boolean = false) {
         val hadActiveScope = activePackage != null || activeScope != null
+        val keepArchiveFlag = activeScope == SocialScope.OWN_STORY_ARCHIVE
         activePackage = null
         activeScope = null
         instagramOwnPostActive = false
-        instagramArchiveListActive = false
+        if (!keepArchiveFlag) {
+            instagramArchiveListActive = false
+        }
         xTimelineActive = false
         fbFeedActive = false
         instagramGridScrollBudget = null
@@ -5268,11 +5762,19 @@ class UiAutomatorDriver(
         private const val INSTAGRAM_OPTIONS_MENU_WAIT_MS = 12_000L
         private const val INSTAGRAM_SETTINGS_SEARCH_SETTLE_MS = 900L
         private const val INSTAGRAM_SCROLL_SETTLE_MS = 250L
+        private const val INSTAGRAM_COMMENTS_RESERVE_MS = 50_000L
+        private const val INSTAGRAM_YOUR_ACTIVITY_WAIT_MS = 10_000L
+        private const val INSTAGRAM_COMMENTS_LIST_WAIT_MS = 12_000L
+        private const val INSTAGRAM_SHELL_POLL_MS = 280L
+        private const val INSTAGRAM_ARCHIVE_EXTRA_CAPTURE_MS = 28_000L
+        private const val INSTAGRAM_ARCHIVE_MIN_REMAINING_FOR_EXTRA_MS = 8_000L
         private const val INSTAGRAM_ARCHIVE_SCROLL_SETTLE_MS = 1_200L
         private const val INSTAGRAM_ARCHIVE_LOAD_SETTLE_MS = 1_200L
         private const val INSTAGRAM_ARCHIVE_PROBE_INTERVAL_MS = 300L
         private const val UI_AUTOMATOR_IDLE_TIMEOUT_MS = 250L
         private const val UI_AUTOMATOR_SELECTOR_TIMEOUT_MS = 500L
+        private const val UI_DEVICE_BOUND_MS = 900L
+        private const val UI_DEVICE_SELECTOR_WAIT_MS = 500L
         private const val X_SCROLL_IDLE_MS = 350L
         private const val X_SIGNATURE_IDLE_MS = 250L
         private const val DEFAULT_NAVIGATION_BUDGET_MS = 120_000L
@@ -5290,8 +5792,8 @@ class UiAutomatorDriver(
         private const val ARCHIVE_PAGE_SWIPE_STEPS = 36
         private const val SHELL_DUMP_PATH = "/data/local/tmp/siksik_ig_ui_dump.xml"
         private const val SHELL_DUMP_CACHE_MS = 1_200L
-        private const val SHELL_DUMP_TIMEOUT_SEC = 2
-        private const val SHELL_DUMP_JOIN_MS = 2_800L
+        private const val SHELL_DUMP_TIMEOUT_SEC = 8
+        private const val SHELL_DUMP_JOIN_MS = 11_000L
         private const val SHELL_DUMP_COOLDOWN_MS = 20_000L
         private const val SHELL_DUMP_POLL_MIN_MS = 2_500L
         private const val VISIBLE_GRID_POSTS = 3
@@ -5539,6 +6041,25 @@ class UiAutomatorDriver(
             "Arsip cerita",
             "Arsip Cerita",
         )
+        private val INSTAGRAM_HEADER_BACK_LABELS = listOf(
+            "Back",
+            "Kembali",
+            "Navigate up",
+            "Navigate back",
+        )
+        private const val INSTAGRAM_HEADER_BACK_RESOURCE = "action_bar_button_back"
+        private val INSTAGRAM_COMMENTS_LIST_CHROME_LABELS = listOf(
+            "Newest to oldest",
+            "Oldest to newest",
+            "All dates",
+            "All authors",
+            "Select",
+            "Terbaru ke terlama",
+            "Terlama ke terbaru",
+            "Semua tanggal",
+            "Semua penulis",
+            "Pilih",
+        )
         private val STORY_ARCHIVE_NORMALIZED_LABELS =
             STORY_ARCHIVE_LABELS.map { value -> value.lowercase(Locale.ROOT) }.toSet()
         private val INSTAGRAM_NON_STORY_ARCHIVE_LABELS = listOf(
@@ -5647,7 +6168,13 @@ class UiAutomatorDriver(
             "Belum ada balasan",
             "hasn't posted",
             "hasn’t posted",
+            "haven't posted",
+            "haven’t posted",
+            "You haven't posted yet",
+            "You haven’t posted yet",
+            "When you send posts or replies",
             "belum memposting",
+            "Post now",
         )
         private val X_DETAIL_LABELS = listOf("Post", "Postingan")
         private val X_DETAIL_RESOURCES = listOf(

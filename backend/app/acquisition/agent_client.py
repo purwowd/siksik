@@ -271,6 +271,7 @@ class InventoryMetadataV1(StrictAgentModel):
         "unknown",
     ]
     directory_hint: str | None = Field(default=None, max_length=512)
+    is_favorite: bool = False
     exif: InventoryExifV1 | None = None
     warning_codes: list[str] = Field(max_length=16)
     thumbnail_available: bool

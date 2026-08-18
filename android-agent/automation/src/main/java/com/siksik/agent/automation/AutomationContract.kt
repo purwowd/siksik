@@ -36,6 +36,7 @@ internal const val INSTAGRAM_COMMENTS_SCROLL_LIMIT = 3
 data class ScopeCapture(
     val stored: Boolean,
     val screenshotId: String?,
+    val exhausted: Boolean = false,
 )
 
 data class AutomationOutcome(
@@ -288,6 +289,9 @@ class AutomationEngine(
                                     "target=${strategy.targetPackage} scope=${scope.wireName} " +
                                     "screenshot=${initial.screenshotId != null}",
                             )
+                            if (initial.exhausted) {
+                                return@forEachIndexed
+                            }
                             var remainingForScope = (
                                 driver.recommendedAdditionalCaptures(scope)
                                     ?: strategy.additionalCaptureCount(scope)
@@ -316,6 +320,7 @@ class AutomationEngine(
                                     screenshots.add(screenshotId)
                                     scopeScreenshotCount += 1
                                 }
+                                if (capture.exhausted) break
                                 if (!capture.stored) {
                                     failedScopes += 1
                                     if (reason == null) reason = driver.lastFailureReason()

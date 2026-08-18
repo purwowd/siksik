@@ -22,5 +22,10 @@ class InstagramCapturePolicyTest {
             strategy.additionalCaptureCount(SocialScope.OWN_STORY_ARCHIVE),
         )
         assertEquals(4, strategy.screenshotLimit(SocialScope.OWN_STORY_ARCHIVE, 24))
+        assertEquals(
+            INSTAGRAM_COMMENTS_SCROLL_LIMIT,
+            strategy.additionalCaptureCount(SocialScope.OWN_COMMENTS),
+        )
+        assertEquals(4, strategy.screenshotLimit(SocialScope.OWN_COMMENTS, 24))
     }
 }

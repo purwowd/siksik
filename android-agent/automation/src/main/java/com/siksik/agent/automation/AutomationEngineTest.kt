@@ -65,6 +65,17 @@ class AutomationEngineTest {
         )
     }
 
+    @Test
+    fun exhaustedInitialCaptureSkipsExtraScrollsWithoutFailing() {
+        val driver = FakeDriver(exhausted = true)
+        val result = AutomationEngine(sequenceClock()).execute(strategy, driver, limits) { true }
+
+        assertEquals("complete", result.state)
+        assertEquals(0, result.scrollCount)
+        assertEquals(0, driver.scrollCalls)
+        assertEquals(strategy.scopes, driver.openedScopes)
+    }
+
     private fun sequenceClock(): () -> Long {
         var value = 1_000L
         return { value.also { value += 10 } }
@@ -74,6 +85,7 @@ class AutomationEngineTest {
         private val exists: Boolean = true,
         private val visible: Boolean = true,
         private val foreground: Boolean = true,
+        private val exhausted: Boolean = false,
     ) : AutomationDriver {
         var scrollCalls = 0
         var captureCalls = 0
@@ -98,6 +110,7 @@ class AutomationEngineTest {
             return ScopeCapture(
                 stored = true,
                 screenshotId = "shot_$captureCalls".takeIf { takeScreenshot },
+                exhausted = exhausted,
             )
         }
         override fun returnToAgent() {

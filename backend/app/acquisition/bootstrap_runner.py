@@ -235,6 +235,13 @@ class Phase7AndroidAgentRunner:
         inventory_started = time.perf_counter()
         inventory = await self._enumerate(context, client, runtime, policy)
         inventory_ms = round((time.perf_counter() - inventory_started) * 1000)
+        await context.on_progress(
+            SessionStatus.ACQUIRING,
+            34.0,
+            "Inventaris Android selesai",
+            crawl_id=inventory.crawl_id,
+            android_inventory_ms=inventory_ms,
+        )
         preprocessing_started = time.perf_counter()
         initial_preprocessing = (
             await client.start_preprocessing(
@@ -271,6 +278,15 @@ class Phase7AndroidAgentRunner:
             raise
         preprocessing_ms = round((time.perf_counter() - preprocessing_started) * 1000)
         selection_ms = round((time.perf_counter() - selection_started) * 1000)
+        await context.on_progress(
+            SessionStatus.ACQUIRING,
+            49.0,
+            "Preprocess dan selection Android selesai",
+            crawl_id=inventory.crawl_id,
+            android_inventory_ms=inventory_ms,
+            android_preprocessing_ms=preprocessing_ms,
+            android_selection_ms=selection_ms,
+        )
         transfer_started = time.perf_counter()
         transfer = await self._transfer.ingest(context, client, selection)
         transfer_ms = round((time.perf_counter() - transfer_started) * 1000)

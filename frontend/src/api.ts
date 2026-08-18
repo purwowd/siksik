@@ -80,6 +80,10 @@ export interface SessionProgress {
   transfer_completed?: number;
   transfer_records?: number;
   transfer_artifacts?: number;
+  android_inventory_ms?: number;
+  android_preprocessing_ms?: number;
+  android_selection_ms?: number;
+  android_transfer_ms?: number;
   recovery_state?: "scanning" | "complete" | "partial" | "unavailable";
   recovery_mode?: AcquisitionMode;
   recovery_candidates?: number;
@@ -101,6 +105,10 @@ export interface SessionProgress {
 export interface TimingBreakdown {
   t_detect_ms: number;
   t_acquire_ms: number;
+  t_inventory_ms?: number;
+  t_preprocess_ms?: number;
+  t_selection_ms?: number;
+  t_transfer_ms?: number;
   t_index_ms: number;
   t_analyze_ms: number;
   t_total_ms: number;
@@ -194,6 +202,28 @@ export interface DashboardStats {
   risk_timeline?: RiskTimeline | null;
   timeline_session_id?: string | null;
   timeline_session_label?: string | null;
+}
+
+export interface GalleryAlbum {
+  id: string;
+  label: string;
+  kind: "access" | "album";
+  count: number;
+}
+
+export interface GalleryItem {
+  id: string;
+  session_id: string;
+  file_id: string;
+  source: string;
+  path: string;
+  album: string;
+  album_key: string;
+  label: string;
+  mime?: string | null;
+  preview_path?: string | null;
+  captured_at?: string | null;
+  favorite: boolean;
 }
 
 export interface Paginated<T> {
@@ -427,6 +457,16 @@ export const api = {
       return req<Paginated<Finding>>(`/sessions/${sessionId}/findings?${q}`);
     }
     return req<Paginated<Finding>>(`/findings?${q}`);
+  },
+  galleryAlbums: (sessionId: string) =>
+    req<GalleryAlbum[]>(`/sessions/${sessionId}/gallery/albums`),
+  gallery: (sessionId: string, album: string, page = 1, pageSize = 10) => {
+    const q = new URLSearchParams({
+      album,
+      page: String(page),
+      page_size: String(pageSize),
+    });
+    return req<Paginated<GalleryItem>>(`/sessions/${sessionId}/gallery?${q}`);
   },
   reviewFinding: (id: string, review_status: ReviewStatus) =>
     req<Finding>(`/findings/${id}`, {

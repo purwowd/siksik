@@ -1062,6 +1062,14 @@ body::after {
   margin-bottom: 14px;
 }
 
+.gallery-filter-row {
+  margin-top: -6px;
+}
+
+.chip-gallery {
+  letter-spacing: 0.04em;
+}
+
 .filter-label {
   font-family: var(--font-mono);
   font-size: 0.72rem;

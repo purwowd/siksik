@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import com.siksik.agent.BuildConfig
 import com.siksik.agent.model.ApiException
 import org.json.JSONObject
@@ -75,7 +76,29 @@ class MediaStoreInventorySource(
             return AdapterPage(emptyList(), null, 0, available.state, available.reason)
         }
         val lastId = decodeCheckpoint(checkpoint)
-        val spec = querySpec(lastId, limit, timeScope)
+        val favoriteRecords = if (lastId == null) {
+            loadFavoriteRecords(timeScope, isCancelled)
+        } else {
+            emptyList()
+        }
+        val favoriteIds = favoriteRecords.map(InventoryRecord::recordId).toSet()
+        val timeLimit = (limit - favoriteRecords.size).coerceAtLeast(1)
+        fun merged(page: List<InventoryRecord>): List<InventoryRecord> =
+            (favoriteRecords + page).distinctBy(InventoryRecord::recordId)
+        fun pageOut(
+            page: List<InventoryRecord>,
+            nextCheckpoint: String?,
+            scannedCount: Int,
+            terminalState: InventorySourceState,
+            terminalReason: String?,
+        ): AdapterPage = AdapterPage(
+            merged(page),
+            nextCheckpoint,
+            scannedCount + favoriteRecords.size,
+            terminalState,
+            terminalReason,
+        )
+        val spec = querySpec(lastId, timeLimit, timeScope)
         val signal = CancellationSignal()
         val records = mutableListOf<InventoryRecord>()
         var scanned = 0
@@ -84,7 +107,7 @@ class MediaStoreInventorySource(
             resolver.query(spec.uri, spec.projection, spec.arguments, signal)?.use { cursor ->
                 while (cursor.moveToNext()) {
                     if (isCancelled()) {
-                        return AdapterPage(
+                        return pageOut(
                             records,
                             lastScannedId?.let(::encodeCheckpoint),
                             scanned,
@@ -96,10 +119,11 @@ class MediaStoreInventorySource(
                     val id = cursor.long(MediaStore.MediaColumns._ID) ?: continue
                     lastScannedId = id
                     mapRecord(cursor, spec)?.let { record ->
-                        records.add(record)
+                        if (record.recordId in favoriteIds) return@let
+                        if (timeScope.includes(record)) records.add(record)
                     }
                 }
-            } ?: return AdapterPage(
+            } ?: return pageOut(
                 emptyList(),
                 null,
                 0,
@@ -107,15 +131,25 @@ class MediaStoreInventorySource(
                 "media_provider_unavailable",
             )
         } catch (_: SecurityException) {
-            return AdapterPage(
-                emptyList(),
-                checkpoint,
-                scanned,
-                InventorySourceState.DENIED,
-                "runtime_permission_revoked",
-            )
+            return if (favoriteRecords.isNotEmpty()) {
+                pageOut(
+                    emptyList(),
+                    checkpoint,
+                    scanned,
+                    InventorySourceState.PARTIAL,
+                    "runtime_permission_revoked",
+                )
+            } else {
+                AdapterPage(
+                    emptyList(),
+                    checkpoint,
+                    scanned,
+                    InventorySourceState.DENIED,
+                    "runtime_permission_revoked",
+                )
+            }
         } catch (_: IllegalArgumentException) {
-            return AdapterPage(
+            return pageOut(
                 emptyList(),
                 checkpoint,
                 scanned,
@@ -123,7 +157,15 @@ class MediaStoreInventorySource(
                 "media_provider_query_rejected",
             )
         }
-        val hasMore = scanned >= limit
+        val mergedRecords = merged(records)
+        val favoriteCount = mergedRecords.count(InventoryRecord::isFavorite)
+        if (favoriteCount > 0) {
+            Log.i(
+                LOG_TAG,
+                "event=inventory_favorites adapter=${adapter.wireName} count=$favoriteCount",
+            )
+        }
+        val hasMore = scanned >= timeLimit
         val terminal = if (
             !hasMore && adapter == SourceAdapter.DOCUMENT_SHARED && !hasFullDocumentVisibility()
         ) {
@@ -134,9 +176,9 @@ class MediaStoreInventorySource(
             InventorySourceState.COMPLETE
         }
         return AdapterPage(
-            records = records,
+            records = mergedRecords,
             nextCheckpoint = lastScannedId?.let(::encodeCheckpoint).takeIf { hasMore },
-            scannedCount = scanned,
+            scannedCount = scanned + favoriteRecords.size,
             terminalState = terminal,
             terminalReason = when {
                 terminal != InventorySourceState.PARTIAL -> null
@@ -152,21 +194,6 @@ class MediaStoreInventorySource(
         limit: Int,
         timeScope: InventoryTimeScope,
     ): QuerySpec {
-        val collection = when (adapter) {
-            SourceAdapter.MEDIA_IMAGE -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-            SourceAdapter.MEDIA_VIDEO -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-            SourceAdapter.MEDIA_AUDIO -> MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-            SourceAdapter.DOCUMENT_SHARED,
-            SourceAdapter.PUBLIC_WHATSAPP,
-            SourceAdapter.PUBLIC_TELEGRAM,
-            -> MediaStore.Files.getContentUri("external")
-            SourceAdapter.DOCUMENT_TREE,
-            SourceAdapter.SMS,
-            SourceAdapter.CONTACT,
-            SourceAdapter.VISIBLE_UI,
-            SourceAdapter.NOTIFICATION,
-            -> throw IllegalStateException("invalid MediaStore adapter")
-        }
         val clauses = mutableListOf<String>()
         val selectionArgs = mutableListOf<String>()
         if (lastId != null) {
@@ -203,7 +230,77 @@ class MediaStoreInventorySource(
             )
             putInt(ContentResolver.QUERY_ARG_LIMIT, limit)
         }
-        return QuerySpec(collection, projection(), bundle)
+        return QuerySpec(collectionUri(), projection(), bundle)
+    }
+
+    /** Starred Camera-roll items are older than the 3/6-month cut; a dedicated query
+     *  avoids (time OR IS_FAVORITE) + LIMIT ranking them behind newer in-window rows. */
+    private fun loadFavoriteRecords(
+        timeScope: InventoryTimeScope,
+        isCancelled: () -> Boolean,
+    ): List<InventoryRecord> {
+        if (Build.VERSION.SDK_INT < 30) return emptyList()
+        if (
+            adapter !in setOf(
+                SourceAdapter.MEDIA_IMAGE,
+                SourceAdapter.MEDIA_VIDEO,
+            )
+        ) {
+            return emptyList()
+        }
+        val spec = favoriteQuerySpec()
+        val out = mutableListOf<InventoryRecord>()
+        try {
+            resolver.query(spec.uri, spec.projection, spec.arguments, CancellationSignal())
+                ?.use { cursor ->
+                    while (cursor.moveToNext()) {
+                        if (isCancelled()) break
+                        mapRecord(cursor, spec)?.let { record ->
+                            if (timeScope.includes(record)) out.add(record)
+                        }
+                    }
+                }
+        } catch (_: SecurityException) {
+            return emptyList()
+        } catch (_: IllegalArgumentException) {
+            return emptyList()
+        }
+        return out
+    }
+
+    private fun favoriteQuerySpec(): QuerySpec {
+        val bundle = Bundle().apply {
+            putString(
+                ContentResolver.QUERY_ARG_SQL_SELECTION,
+                "${MediaStore.MediaColumns.IS_FAVORITE} = ?",
+            )
+            putStringArray(
+                ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
+                arrayOf("1"),
+            )
+            putString(
+                ContentResolver.QUERY_ARG_SQL_SORT_ORDER,
+                "${MediaStore.MediaColumns._ID} DESC",
+            )
+            putInt(ContentResolver.QUERY_ARG_LIMIT, BuildConfig.MAX_INVENTORY_PAGE_SIZE)
+        }
+        return QuerySpec(collectionUri(), projection(), bundle)
+    }
+
+    private fun collectionUri(): Uri = when (adapter) {
+        SourceAdapter.MEDIA_IMAGE -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        SourceAdapter.MEDIA_VIDEO -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        SourceAdapter.MEDIA_AUDIO -> MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+        SourceAdapter.DOCUMENT_SHARED,
+        SourceAdapter.PUBLIC_WHATSAPP,
+        SourceAdapter.PUBLIC_TELEGRAM,
+        -> MediaStore.Files.getContentUri("external")
+        SourceAdapter.DOCUMENT_TREE,
+        SourceAdapter.SMS,
+        SourceAdapter.CONTACT,
+        SourceAdapter.VISIBLE_UI,
+        SourceAdapter.NOTIFICATION,
+        -> throw IllegalStateException("invalid MediaStore adapter")
     }
 
     private fun addTimeFilter(
@@ -221,26 +318,59 @@ class MediaStoreInventorySource(
             SourceAdapter.PUBLIC_WHATSAPP,
             SourceAdapter.PUBLIC_TELEGRAM,
         )
-        if (supportsDateTaken) {
+        val timeClause = if (supportsDateTaken) {
             val dateTaken = MediaStore.Images.ImageColumns.DATE_TAKEN
-            clauses.add(
-                "($dateTaken >= ? OR $dateAdded >= ? OR $dateModified >= ? OR " +
-                    "(($dateTaken IS NULL OR $dateTaken <= 0) AND " +
-                    "($dateAdded IS NULL OR $dateAdded <= 0) AND " +
-                    "($dateModified IS NULL OR $dateModified <= 0)))",
-            )
             arguments.add(timeScope.notBeforeEpochMs.toString())
             arguments.add(seconds)
             arguments.add(seconds)
+            "($dateTaken >= ? OR $dateAdded >= ? OR $dateModified >= ? OR " +
+                "(($dateTaken IS NULL OR $dateTaken <= 0) AND " +
+                "($dateAdded IS NULL OR $dateAdded <= 0) AND " +
+                "($dateModified IS NULL OR $dateModified <= 0)))"
         } else {
-            clauses.add(
-                "($dateAdded >= ? OR $dateModified >= ? OR " +
-                    "(($dateAdded IS NULL OR $dateAdded <= 0) AND " +
-                    "($dateModified IS NULL OR $dateModified <= 0)))",
-            )
             arguments.add(seconds)
             arguments.add(seconds)
+            "($dateAdded >= ? OR $dateModified >= ? OR " +
+                "(($dateAdded IS NULL OR $dateAdded <= 0) AND " +
+                "($dateModified IS NULL OR $dateModified <= 0)))"
         }
+        val favoriteClause = favoriteBypassClause(arguments)
+        if (favoriteClause == null) {
+            clauses.add(timeClause)
+        } else {
+            clauses.add("($timeClause OR $favoriteClause)")
+        }
+    }
+
+    private fun favoriteBypassClause(arguments: MutableList<String>): String? {
+        if (
+            adapter !in setOf(
+                SourceAdapter.MEDIA_IMAGE,
+                SourceAdapter.MEDIA_VIDEO,
+                SourceAdapter.PUBLIC_WHATSAPP,
+                SourceAdapter.PUBLIC_TELEGRAM,
+            )
+        ) {
+            return null
+        }
+        val parts = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= 30) {
+            parts.add("${MediaStore.MediaColumns.IS_FAVORITE} = 1")
+        }
+        val pathColumn = if (Build.VERSION.SDK_INT >= 29) {
+            MediaStore.MediaColumns.RELATIVE_PATH
+        } else {
+            MediaStore.MediaColumns.DATA
+        }
+        val nameColumn = MediaStore.MediaColumns.DISPLAY_NAME
+        InventoryPolicy.favoriteSqlLikePatterns.forEach { pattern ->
+            parts.add("LOWER($pathColumn) LIKE ?")
+            arguments.add(pattern)
+            parts.add("LOWER($nameColumn) LIKE ?")
+            arguments.add(pattern)
+        }
+        if (parts.isEmpty()) return null
+        return parts.joinToString(" OR ", prefix = "(", postfix = ")")
     }
 
     private fun projection(): Array<String> = buildList {
@@ -266,6 +396,9 @@ class MediaStoreInventorySource(
         ) {
             add(MediaStore.Images.ImageColumns.DATE_TAKEN)
         }
+        if (Build.VERSION.SDK_INT >= 30) {
+            add(MediaStore.MediaColumns.IS_FAVORITE)
+        }
         if (adapter != SourceAdapter.MEDIA_IMAGE && adapter != SourceAdapter.DOCUMENT_SHARED) {
             add(MediaStore.Video.VideoColumns.DURATION)
         }
@@ -289,6 +422,13 @@ class MediaStoreInventorySource(
         val dateModified = cursor.long(MediaStore.MediaColumns.DATE_MODIFIED)?.secondsToMillis()
         val exif = if (kind == InventorySourceKind.MEDIA_IMAGE) exifReader.read(uri, mime) else null
         val directoryHint = directoryHint(cursor)
+        val flaggedFavorite = if (Build.VERSION.SDK_INT >= 30) {
+            cursor.int(MediaStore.MediaColumns.IS_FAVORITE)?.let { it != 0 } ?: false
+        } else {
+            false
+        }
+        val isFavorite = flaggedFavorite ||
+            InventoryPolicy.looksFavorite(directoryHint, name)
         val sizeBytes = cursor.long(MediaStore.MediaColumns.SIZE)?.nonNegative()
         val captureCandidates = listOf(
             exif?.capturedAtEpochMs to "exif_original",
@@ -328,6 +468,7 @@ class MediaStoreInventorySource(
             captureTimeEpochMs = capture?.first,
             captureTimeSource = capture?.second ?: "unknown",
             directoryHint = directoryHint,
+            isFavorite = isFavorite,
             exif = exif,
             warningCodes = emptyList(),
             thumbnailAvailable = kind in setOf(
@@ -520,6 +661,9 @@ class MediaStoreInventorySource(
         val arguments: Bundle,
     )
 
+    companion object {
+        private const val LOG_TAG = "SIKSIKInventory"
+    }
 }
 
 private object ContentUrisCompat {

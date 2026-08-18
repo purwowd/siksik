@@ -45,6 +45,18 @@ class SelectionPolicyScorerTest {
     }
 
     @Test
+    fun inWindowMediaIsAutoSelectedWithoutKeywordScore() {
+        val scorer = SelectionScorer(SelectionPolicyCodec.parse(policyJson())) { 1L }
+        val image = scorer.evaluate(input("", "media_image"))
+        val sms = scorer.evaluate(input("noscobom", "sms"))
+
+        assertTrue(image.autoSelected)
+        assertTrue(image.eligibleForAutomaticSelection)
+        assertTrue("in_window_media" in image.reasons)
+        assertFalse(sms.autoSelected)
+    }
+
+    @Test
     fun nonRepresentativeDuplicateRetainsTraceButIsNotAutomaticallyEligible() {
         val preprocessing = JSONObject()
             .put("schema_version", 1)

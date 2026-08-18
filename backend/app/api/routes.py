@@ -17,12 +17,14 @@ from app.models.schemas import (
     DashboardStats,
     DeviceInfo,
     FindingOut,
+    GalleryAlbumOut,
     HealthOut,
     LoginRequest,
     LoginResponse,
     MeResponse,
     NamedCount,
     PaginatedFindings,
+    PaginatedGallery,
     PaginatedSessions,
     ReviewRequest,
     ReviewStatus,
@@ -72,6 +74,24 @@ def _clamp_page(page: int, pages: int) -> int:
     return min(max(1, page), pages)
 
 
+FINDING_DEDUP_PREDICATE = """
+AND f.id IN (
+  SELECT ranked.id FROM (
+    SELECT
+      f2.id AS id,
+      ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(NULLIF(fi2.sha256, ''), f2.file_id), f2.label
+        ORDER BY f2.confidence DESC, f2.created_at ASC, f2.id ASC
+      ) AS rn
+    FROM findings f2
+    LEFT JOIN files fi2 ON fi2.id = f2.file_id
+    WHERE f2.session_id = f.session_id
+  ) ranked
+  WHERE ranked.rn = 1
+)
+"""
+
+
 async def _paginate_findings(
     *,
     where_sql: str,
@@ -80,7 +100,10 @@ async def _paginate_findings(
     page: int,
     page_size: int,
 ) -> PaginatedFindings:
-    total_row = await db.fetchone(f"SELECT COUNT(*) AS c FROM findings f {where_sql}", params)
+    total_row = await db.fetchone(
+        f"SELECT COUNT(*) AS c FROM findings f {where_sql} {FINDING_DEDUP_PREDICATE}",
+        params,
+    )
     total = int(total_row["c"]) if total_row else 0
     pages = _pages(total, page_size)
     page = _clamp_page(page, pages)
@@ -121,7 +144,7 @@ async def _paginate_findings(
             ) AS normalized_preview_text
         FROM findings f
         LEFT JOIN files fi ON fi.id = f.file_id
-        {where_sql} {order_sql} LIMIT ? OFFSET ?
+        {where_sql} {FINDING_DEDUP_PREDICATE} {order_sql} LIMIT ? OFFSET ?
         """,
         (*params, page_size, offset),
     )
@@ -489,6 +512,38 @@ async def session_findings(
         page=page,
         page_size=page_size,
     )
+
+
+async def _session_mode(session_id: str) -> AcquisitionMode:
+    row = await db.fetchone("SELECT mode FROM sessions WHERE id = ?", (session_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return AcquisitionMode(str(row["mode"]))
+
+
+@router.get("/sessions/{session_id}/gallery/albums", response_model=list[GalleryAlbumOut])
+async def session_gallery_albums(
+    session_id: str,
+    _: Annotated[AuthUser, Depends(require_perm("findings:read"))],
+) -> list[GalleryAlbumOut]:
+    from app.services import gallery as gallery_mod
+
+    mode = await _session_mode(session_id)
+    return await gallery_mod.list_albums(session_id, mode)
+
+
+@router.get("/sessions/{session_id}/gallery", response_model=PaginatedGallery)
+async def session_gallery(
+    session_id: str,
+    _: Annotated[AuthUser, Depends(require_perm("findings:read"))],
+    album: str = Query(..., min_length=1, max_length=64, pattern=r"^[a-z0-9-]+$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=48),
+) -> PaginatedGallery:
+    from app.services import gallery as gallery_mod
+
+    mode = await _session_mode(session_id)
+    return await gallery_mod.list_items(session_id, mode, album, page, page_size)
 
 
 @router.get("/sessions/{session_id}/media")

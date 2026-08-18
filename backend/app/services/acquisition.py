@@ -948,10 +948,14 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                 captured_year = year if 1970 <= year <= 9999 else None
             except ValueError:
                 captured_year = None
+        from app.services.gallery import gallery_meta_from_canonical
+
+        gallery_meta = gallery_meta_from_canonical(payload)
         crawl_capture_meta[record_id] = {
             "captured_at": captured_at if isinstance(captured_at, str) else None,
             "captured_year": captured_year,
             "date_source": "android_agent_canonical",
+            **gallery_meta,
         }
 
     async def one(p: Path) -> tuple:
@@ -1001,6 +1005,7 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                 capture = capture_meta(p)
             meta = {"ext": p.suffix.lower(), **capture}
             if artifact is not None:
+                capture_extra = crawl_capture_meta.get(str(artifact["record_id"]), {})
                 meta.update(
                     {
                         "acquisition_method": "android_agent_direct_manifest",
@@ -1008,6 +1013,13 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         "crawl_artifact_role": artifact["role"],
                         "social_scope": artifact["social_scope"],
                         "source_app": artifact["source_app"],
+                        "directory_hint": capture_extra.get("directory_hint"),
+                        "display_name": capture_extra.get("display_name"),
+                        "is_favorite": bool(capture_extra.get("is_favorite")),
+                        "date_added": capture_extra.get("date_added"),
+                        "date_modified": capture_extra.get("date_modified"),
+                        "date_taken": capture_extra.get("date_taken"),
+                        "album": capture_extra.get("album"),
                     }
                 )
             if recovered is not None:
@@ -1031,6 +1043,21 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         "ios_original_filename": ios_artifact.original_filename,
                     }
                 )
+            from app.services.gallery import album_leaf, looks_favorite
+
+            if not meta.get("album"):
+                hint = meta.get("directory_hint")
+                meta["album"] = album_leaf(
+                    hint if isinstance(hint, str) else None,
+                    rel,
+                    str(source),
+                )
+            meta["is_favorite"] = bool(meta.get("is_favorite")) or looks_favorite(
+                rel,
+                str(meta.get("album") or ""),
+                str(meta.get("display_name") or ""),
+                str(meta.get("directory_hint") or ""),
+            )
             if mime == "application/vnd.siksik.crawl-record+json":
                 from app.acquisition.agent_client import InventoryRecordV1
 

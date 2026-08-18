@@ -129,23 +129,37 @@ class AdbDevice:
 
     def dump_hierarchy(self) -> str:
         remote = "/sdcard/window_dump.xml"
-        # Prefer compressed dump; fall back to uncompressed.
-        try:
-            self.run_shell(f"uiautomator dump {remote}", timeout=45.0)
-        except RuntimeError:
-            self.run_shell(f"uiautomator dump --compressed {remote}", timeout=45.0)
-        local_bytes = subprocess.run(
-            [*self._base(), "exec-out", "cat", remote],
-            check=False,
-            capture_output=True,
-            timeout=30.0,
-        )
-        if local_bytes.returncode != 0 or not local_bytes.stdout:
-            raise RuntimeError("failed to pull uiautomator dump")
-        text = local_bytes.stdout.decode("utf-8", errors="replace")
-        if "<hierarchy" not in text and "<node" not in text:
-            raise RuntimeError("uiautomator dump empty or invalid")
-        return text
+        # Infinix/Transsion uncompressed dump often prints
+        # "could not get idle state" with exit 0 and no file.
+        # Compressed dump succeeds; try it first.
+        errors: list[str] = []
+        for cmd in (
+            f"timeout 15s uiautomator dump --compressed {remote}",
+            f"timeout 15s uiautomator dump {remote}",
+        ):
+            try:
+                out = self.run_shell(cmd, timeout=20.0)
+            except RuntimeError as exc:
+                errors.append(str(exc))
+                continue
+            if "ERROR" in out.upper() and "dumped" not in out.lower():
+                errors.append(out.strip() or cmd)
+                continue
+            local_bytes = subprocess.run(
+                [*self._base(), "exec-out", "cat", remote],
+                check=False,
+                capture_output=True,
+                timeout=30.0,
+            )
+            if local_bytes.returncode != 0 or not local_bytes.stdout:
+                errors.append("failed to pull uiautomator dump")
+                continue
+            text = local_bytes.stdout.decode("utf-8", errors="replace")
+            if "<hierarchy" not in text and "<node" not in text:
+                errors.append("uiautomator dump empty or invalid")
+                continue
+            return text
+        raise RuntimeError("; ".join(errors) or "uiautomator dump failed")
 
     def screenshot_png(self) -> bytes:
         proc = subprocess.run(

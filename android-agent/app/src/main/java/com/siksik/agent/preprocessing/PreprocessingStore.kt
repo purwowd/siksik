@@ -79,6 +79,8 @@ data class StoredPreprocessRecord(
     val normalizedText: String?,
     val contentSha256: String?,
     val attachmentIds: List<String>,
+    val displayName: String? = null,
+    val directoryHint: String? = null,
 )
 
 data class PreprocessingRecordUpdate(
@@ -291,6 +293,8 @@ class PreprocessingStore(context: Context) : InventoryRecordSink, AutoCloseable 
             limit.toString(),
         ).use { cursor ->
             while (cursor.moveToNext()) {
+                val baseJson = cursor.getString(11)
+                val origin = originFromBaseJson(baseJson)
                 rows.add(
                     StoredPreprocessRecord(
                         cursor.getString(0),
@@ -305,10 +309,12 @@ class PreprocessingStore(context: Context) : InventoryRecordSink, AutoCloseable 
                         cursor.stringOrNull(9),
                         cursor.stringOrNull(10),
                         jsonStrings(
-                            JSONObject(cursor.getString(11))
+                            JSONObject(baseJson)
                                 .getJSONArray("attachment_ids")
                                 .toString(),
                         ),
+                        origin.first,
+                        origin.second,
                     ),
                 )
             }
@@ -1148,6 +1154,12 @@ class PreprocessingStore(context: Context) : InventoryRecordSink, AutoCloseable 
 
     private fun requireSafeId(value: String) {
         require(SessionAuthenticator.SAFE_ID.matches(value))
+    }
+
+    private fun originFromBaseJson(raw: String): Pair<String?, String?> {
+        val metadata = JSONObject(raw).optJSONObject("metadata") ?: return null to null
+        return metadata.optString("display_name").takeIf(String::isNotBlank) to
+            metadata.optString("directory_hint").takeIf(String::isNotBlank)
     }
 
     private fun jsonStrings(value: String): List<String> {

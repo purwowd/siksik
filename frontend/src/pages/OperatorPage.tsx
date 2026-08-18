@@ -93,13 +93,13 @@ export function OperatorPage(p: Props) {
     progress?.preprocessing_total ?? 0,
     progress?.selection_evaluated ?? 0,
   );
-  const transferred = Math.max(
-    progress?.files_pulled ?? 0,
-    progress?.transfer_completed ?? 0,
-  );
-  const transferTotal = Math.max(
-    progress?.transfer_artifacts ?? 0,
+  const selectedRecords = Math.max(
+    progress?.selection_selected ?? 0,
     progress?.transfer_records ?? 0,
+  );
+  const indexedFiles = Math.max(
+    progress?.files_indexed ?? 0,
+    progress?.files_pulled ?? 0,
   );
   const ocrProcessed =
     progress?.preprocessing_preprocessor_totals?.ocr?.processed ?? 0;
@@ -274,15 +274,15 @@ export function OperatorPage(p: Props) {
 
             <div className="timing">
               <div>
-                Masuk
+                Record
                 <strong>
-                  {transferred}
-                  {transferTotal
-                    ? ` / ${transferTotal}`
-                    : inventoried
-                      ? ` / ${inventoried}`
-                      : ""}
+                  {selectedRecords}
+                  {inventoried ? ` / ${inventoried}` : ""}
                 </strong>
+              </div>
+              <div>
+                File
+                <strong>{indexedFiles}</strong>
               </div>
               <div>
                 Dianalisis
@@ -308,6 +308,46 @@ export function OperatorPage(p: Props) {
                 <div>
                   Akuisisi
                   <strong>{ms(liveAcquireMs)}</strong>
+                </div>
+                <div>
+                  Inventaris
+                  <strong>
+                    {ms(
+                      timing?.t_inventory_ms ||
+                        progress?.android_inventory_ms ||
+                        0,
+                    )}
+                  </strong>
+                </div>
+                <div>
+                  Preprocess HP
+                  <strong>
+                    {ms(
+                      timing?.t_preprocess_ms ||
+                        progress?.android_preprocessing_ms ||
+                        0,
+                    )}
+                  </strong>
+                </div>
+                <div>
+                  Seleksi
+                  <strong>
+                    {ms(
+                      timing?.t_selection_ms ||
+                        progress?.android_selection_ms ||
+                        0,
+                    )}
+                  </strong>
+                </div>
+                <div>
+                  Transfer
+                  <strong>
+                    {ms(
+                      timing?.t_transfer_ms ||
+                        progress?.android_transfer_ms ||
+                        0,
+                    )}
+                  </strong>
                 </div>
                 <div>
                   Indeks

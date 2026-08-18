@@ -88,3 +88,29 @@ def test_l3_safe_image_meta():
 @pytest.mark.unit
 def test_l3_invalid_json():
     assert analyze_image_meta_l3("bukan-json") == []
+
+
+@pytest.mark.unit
+def test_quick_android_camera_roll_skips_easyocr(tmp_path, monkeypatch):
+    from app.models.schemas import AcquisitionMode
+    from app.services.analysis import _skip_heavy_ocr_for_gallery
+    from app.services.hash_cache import reset_analysis_mode, set_analysis_mode
+
+    monkeypatch.setattr(settings, "gpu_stack_enabled", False)
+    monkeypatch.setattr(settings, "media_text_enabled", True)
+    token = set_analysis_mode(AcquisitionMode.QUICK)
+    try:
+        hashed = tmp_path / "deadbeef.jpg"
+        hashed.write_bytes(b"x")
+        assert _skip_heavy_ocr_for_gallery(
+            hashed,
+            "media_image",
+            "DCIM/Camera IMG_20260817.jpg",
+        )
+        assert not _skip_heavy_ocr_for_gallery(
+            hashed,
+            "media_image",
+            "Pictures/Screenshots Screenshot_20260817.png",
+        )
+    finally:
+        reset_analysis_mode(token)

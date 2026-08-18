@@ -18,6 +18,13 @@ from app.services import reports as rpt
 if TYPE_CHECKING:
     from app.acquisition.runtime import AgentRuntimeRecord
 
+_PROGRESS_TIMING_KEYS = {
+    "android_inventory_ms": "t_inventory_ms",
+    "android_preprocessing_ms": "t_preprocess_ms",
+    "android_selection_ms": "t_selection_ms",
+    "android_transfer_ms": "t_transfer_ms",
+}
+
 
 class SessionManager:
     def __init__(self) -> None:
@@ -271,6 +278,12 @@ class SessionManager:
                 progress["message"] = message
             for k, v in progress_fields.items():
                 progress[k] = v
+                timing_key = _PROGRESS_TIMING_KEYS.get(k)
+                if timing_key is not None:
+                    try:
+                        timing[timing_key] = round(float(v), 1)
+                    except (TypeError, ValueError):
+                        pass
             if timing_patch:
                 timing.update(timing_patch)
 

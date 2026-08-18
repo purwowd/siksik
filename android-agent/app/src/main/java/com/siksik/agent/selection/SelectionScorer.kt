@@ -65,7 +65,9 @@ class SelectionScorer(
             representative != input.recordId
         val requiredSocialScope = input.sourceKind == "visible_ui" &&
             input.socialScope in policy.requiredSocialScopes
+        val inWindowMedia = input.sourceKind in IN_WINDOW_MEDIA_KINDS
         if (requiredSocialScope) matchedRules.add("scope:${input.socialScope}")
+        if (inWindowMedia) matchedRules.add("in_window_media")
         if (duplicateGroup != null) {
             matchedRules.add(
                 if (isNonRepresentative) "duplicate:non_representative" else
@@ -75,10 +77,11 @@ class SelectionScorer(
 
         val boundedScore = score.coerceIn(0, MAX_BASIS_POINTS)
         val thresholdMet = boundedScore >= policy.thresholdBasisPoints
-        val autoSelected = thresholdMet || requiredSocialScope
+        val autoSelected = thresholdMet || requiredSocialScope || inWindowMedia
         val reasons = buildList {
             add(if (thresholdMet) "threshold_met" else "threshold_not_met")
             if (requiredSocialScope) add("required_social_scope")
+            if (inWindowMedia) add("in_window_media")
             if (matchedKeywords.isNotEmpty()) add("keyword_match")
             if (modelSignals.isNotEmpty()) add("model_signal")
             if (isNonRepresentative) add("duplicate_non_representative")
@@ -194,6 +197,7 @@ class SelectionScorer(
 
     companion object {
         private val SUCCESS_STATUSES = setOf("completed", "truncated")
+        private val IN_WINDOW_MEDIA_KINDS = setOf("media_image", "media_video", "document")
         private const val MIN_OBJECT_CONFIDENCE = 0.5
         private const val MAX_EVIDENCE_CHARACTERS = 512
         private const val MAX_BASIS_POINTS = 10_000

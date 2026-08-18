@@ -32,7 +32,9 @@ def test_policy_fingerprint_terms_and_word_boundaries_are_deterministic() -> Non
     assert first == second
     assert verify_policy_fingerprint(first)
     assert first.threshold_basis_points == 5_500
-    assert first.maximum_candidates == 2_500
+    assert first.maximum_candidates == 100_000
+    assert first.policy_version == "siksik-selection-v4"
+    assert build_selection_policy(AcquisitionMode.FULL).maximum_candidates == 1_000_000
     assert keyword_match_terms("anti pemerintah")[0] == "anti pemerintah"
     assert contains_phrase("seruan ANTI-Pemerintah!", "anti pemerintah")
     assert not contains_phrase("noscobom", "bom")

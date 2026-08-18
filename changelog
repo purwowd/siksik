@@ -6,6 +6,148 @@
 - Android agent: `0.7.0`, API `1.0`
 - Primary project: `/Users/macbook/Documents/Product1/siksik`
 
+## 2026-08-18: IG comments ready-check is UiDevice/a11y, dump fallback
+
+- Session `d1beba46` (Samsung A73) left archive, clicked Your activity, then failed
+  `instagram_activity_not_ready`. Screenshot `041` already showed Your activity with
+  Comments visible. Host ADB dump+tap on the same phone reached Comments list and
+  scrolled (`temp_crawl/ig_comments_map_20260818_110312/`). Agent wait was dump-only,
+  so empty/cooldown dumps failed while the screen was correct.
+- Ready/click now: bounded UiDevice + accessibility + dump (dump is fallback, not a
+  gate). Your activity / Comments rows still prefer dump `input tap` on Button-sized
+  bounds when dump exists (Compose `clickable=false`). Retry Your activity once if
+  Settings is still showing during the wait. Same path for Infinix and Samsung.
+
+## 2026-08-18: IG comments wait for Your activity, shellTap row (not max-area)
+
+- Session `726a823a` reached `archive_back_cleared` but failed
+  `instagram_interactions_not_found` ~3s later. Manual ADB on the same
+  Infinix build: Your activity → `input tap` on Comments bounds opens the list
+  (`Newest to oldest` / `All dates`). Agent missed because it only slept 300ms,
+  then `clickInstagramLabeledRow` relied on a11y/UiDevice while shell dump was
+  often in cooldown after archive back; `clickInstagramLabelViaShellDump` also
+  preferred the full-width Interactions header over the Comments button.
+- Comments navigation now clears shell cooldown, waits up to 10s for Comments or
+  Interactions in dump, taps row-sized Button nodes via `input tap` first, and
+  polls up to 12s for list chrome before failing.
+
+## 2026-08-17: Stop extra IG backs after Settings; inject all IS_FAVORITE rows
+
+- Session `0bf2a2a5` still `ig:instagram_archive_back_failed`. Mapping `036 archive_back_0`
+  via a11y already showed Settings; the loop kept backing because it required
+  `!instagramOnStoriesArchive() && Settings` while the archive flag / empty dump
+  still looked like Stories archive. Leave-archive now stops on Settings first,
+  or after a non-geometry back once the dump no longer has `Stories archive`.
+- Galeri Favorit on that crawl was 4 unique Camera photos, not 8. Device has 8
+  `IS_FAVORITE=1` images, all in `DCIM/Camera` (no Favorit album token), all
+  older than QUICK 3 months. `(time OR favorite) + LIMIT 100` ranks recent
+  in-window rows first, so 4 starred files never entered inventory. First
+  MediaStore page now queries `IS_FAVORITE=1` separately and merges those
+  records in front.
+
+## 2026-08-17: Comments skipped archive back because scope switch cleared the flag
+
+- Session `43949596` still `ig:automation_timeout`. Mapping stopped at
+  `instagram_profile_before_navigation` on Stories archive — no
+  `archive_back_start`. `navigateToScope` calls `deactivateScope()` which
+  cleared `instagramArchiveListActive`, so leave-archive thought it was already
+  out and tried to prove own profile on the archive grid.
+- Leave-archive now uses dump title `Stories archive` (and keeps the archive
+  flag across the archive→comments switch). UiDevice comments-chrome is not
+  probed while that title is visible.
+
+## 2026-08-17: IG comments Back is generic first, dump fallback
+
+- Probe on Infinix (`temp_crawl/ig_back_probe_20260817_221818/`): KEYCODE_BACK,
+  live `action_bar_button_back`, desc Back, header ImageView, and 8%/7% geometry
+  all leave Stories archive to Settings. No hardcoded Infinix pixels.
+- Agent order: accessibility → bounded UiDevice (`wait` ≤900ms, no unbounded
+  `findObjects`) → compressed dump + `input tap` (live bounds) → %-geometry.
+  Dump is fallback for OEMs where UiDevice hangs. Same order for Your activity
+  / Comments rows and comments-list chrome.
+
+## 2026-08-17: IG comments mapped on device, dump+tap (no findObjects)
+
+- Host ADB mapping (`scripts/map_instagram_comments.py`, compressed dump) reached
+  Comments from Stories archive on Infinix X6837. Evidence:
+  `temp_crawl/ig_comments_map_20260817_215317/`. Back is
+  `action_bar_button_back` desc=Back bounds `[0,108][168,276]`. One tap returns
+  Settings; Your activity → Comments list (`Newest to oldest` / `All dates`).
+- Agent no longer calls UiDevice `findObjects`/`hasObject` on that path (those
+  hang on IG Compose and never reach the geometry fallback). Header Back, Settings
+  detection, Your activity, Comments, and list chrome use compressed
+  `uiautomator dump` + coordinate tap. Uncompressed dump on this device prints
+  `could not get idle state`.
+
+## 2026-08-17: IG comments from archive, operator counts, device favorites
+
+- Instagram comments no longer require a full own-profile proof after Stories
+  archive. Header Back is clicked first; if Settings is still open, Your
+  activity → Comments runs from there. Stuck archive is `instagram_archive_back_failed`.
+- Operator counters are Record (selected), File (indexed), Dianalisis — not
+  mixed transfer artifact / files_pulled (720 / 699).
+- MediaStore keeps IS_FAVORITE=1 and Favorites/Favorit album paths outside the
+  3/6-month window. Galeri still shows those starred items.
+
+## 2026-08-17: Host accepts media records without a binary
+
+- Agent fail-soft already finishes transfer with canonical JSON when a
+  media/document stream is missing, unreadable, or past the byte budget.
+- Host ingest no longer rejects that with "Binary source Android tidak lengkap."
+  Zero or one `source_binary` is valid; extra binaries or screenshots on those
+  kinds still fail. Visible UI screenshots may be a subset of `attachment_ids`.
+
+## 2026-08-17: Selective OCR on phone, vision on operator Mac
+
+- Phone preprocess keeps hash/pHash. ML Kit OCR runs only for screenshot/chat/
+  download/document origins. MediaPipe face/objects are skipped for media and
+  social screenshots (selection v4 already takes in-window media).
+- After ADB pull, Mac EasyOCR uses directory_hint/display_name/album because
+  staged names are hashed. QUICK skips camera-roll DCIM/Pictures unless
+  screenshot/dokumen/edge. Files stay in `data/staging/<sesi>` on this Mac.
+- Operator rincian waktu splits Akuisisi into Inventaris, Preprocess HP,
+  Seleksi, and Transfer.
+
+## 2026-08-17: X overlay/empty, IG comments budget, fail-soft transfer
+
+- X no longer re-clicks an already-active Posts tab (that opened Posts/Highlights
+  and blocked scrolling). Overlay sheet is dismissed; empty replies
+  ("You haven't posted yet") complete without 12 fake extra captures.
+- Instagram archive extra scrolls now leave ~50s for comments. Opening comments
+  from Stories archive backs out of the subpage first.
+- Staging copy no longer aborts the whole transfer on one unreadable/missing
+  binary. Canonical JSON still lands; host error text includes `error_category`.
+
+## 2026-08-17: In-window media is kept without extra exceptions
+
+- QUICK still means every in-window item for 3 months; FULL for 6 months. The bound
+  is the time query, not a row cap.
+- Inventory `includes()` now matches MediaStore: keep if **any** of DATE_TAKEN /
+  DATE_ADDED / DATE_MODIFIED (or capture time) is inside the window; unknown dates
+  stay. A photo taken years ago but added last month is kept.
+- Galeri uses the same OR rule, anchored to **session created_at** so opening an
+  old sesi later does not shrink the window.
+- Selection `siksik-selection-v4` auto-selects in-window `media_image` /
+  `media_video` / `document` so they actually transfer. Candidate count cap is
+  100_000 (QUICK) / 1_000_000 (FULL); byte budget is unchanged. SMS/contacts/
+  notifications still use the 5500 bp threshold. Duplicate non-representatives
+  stay unselected.
+
+## 2026-08-17: Galeri tab for full session crawl media
+
+- Tab **Galeri** sits between Temuan and Laporan (`/galeri`). Temuan stays
+  findings-only (Semua / Menunggu / Dikonfirmasi / Ditolak).
+- Galeri lists media already indexed in the session (flagged and unflagged),
+  deduped by sha256. It does not pull extra files from the phone; previews are
+  paginated (max 48) and lazy-loaded from staging.
+- Chips: Semua, Paling sering, Terbaru diakses, Favorit, then origin albums from
+  the last path segment (Screenshots, Download, Previews, …). QUICK 3 months /
+  FULL 6 months.
+- Inventory metadata (`directory_hint`, dates, MediaStore `is_favorite` on API
+  30+) ranks the access chips. `android-media-puller` is reference-only.
+- Scan ulang HP yang sama = sesi baru. Review confirmed/rejected dan rekomendasi
+  LULUS/TIDAK LULUS tidak disalin; temuan di-dedup per (sha256, label).
+
 ## 2026-08-17: Document grant wait, Instagram archive before comments, 3/6-month inventory
 
 Bootstrap and documents:
