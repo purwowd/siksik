@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
 import time
 from collections.abc import Callable
@@ -304,7 +305,7 @@ class AndroidAgentBootstrapService:
                     work,
                 )
 
-                async def publish_awaiting() -> None:
+                async def publish_awaiting(message: str | None = None) -> None:
                     await self._publish(
                         session_id,
                         serial,
@@ -312,6 +313,7 @@ class AndroidAgentBootstrapService:
                         request_id,
                         on_progress,
                         work,
+                        message=message,
                     )
 
                 await self._access.verify_special_access(
@@ -379,12 +381,65 @@ class AndroidAgentBootstrapService:
                     work,
                 )
                 await self._handshake.negotiate(session_id, capabilities, request_id, work)
+
+                google_token: str | None = None
+                google_account: str | None = None
+                if settings.gmail_acquisition_enabled:
+                    try:
+                        client = self._client_factory(work.forward_host_port, work.token)
+                        accounts = await client.list_google_accounts(session_id, request_id=request_id)
+                        if not accounts and serial:
+                            dumpsys_res = await self._adb.run(
+                                serial,
+                                ["shell", "dumpsys", "account"],
+                                operation="dumpsys_account_probe",
+                                timeout=5.0,
+                                check=False,
+                            )
+                            if dumpsys_res.returncode == 0:
+                                match = re.search(
+                                    r"Account \{name=([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}), type=com\.google\}",
+                                    dumpsys_res.stdout,
+                                )
+                                if match:
+                                    google_account = match.group(1)
+                        elif accounts:
+                            google_account = accounts[0].name
+
+                        if google_account:
+                            await self._publish(
+                                session_id,
+                                serial,
+                                AgentRuntimeState.AWAITING_ACCESS,
+                                request_id,
+                                on_progress,
+                                work,
+                                message="Menunggu otorisasi akun Google (Gmail) pada perangkat",
+                            )
+                            google_token = await client.get_google_auth_token(
+                                session_id,
+                                google_account,
+                                scope=settings.resolved_gmail_scope,
+                                request_id=request_id,
+                            )
+                            if not google_token and settings.resolved_gmail_scope != settings.gmail_scope:
+                                google_token = await client.get_google_auth_token(
+                                    session_id,
+                                    google_account,
+                                    scope=settings.gmail_scope,
+                                    request_id=request_id,
+                                )
+                    except Exception as exc:
+                        logger.warning("gmail_bootstrap_auth_failed", extra={"error": str(exc)})
+
                 runtime = AgentRuntimeSecrets(
                     session_id=session_id,
                     serial=serial,
                     token=work.token,
                     forward_host_port=work.forward_host_port,
                     token_expires_at=work.token_expires_at.isoformat(),
+                    google_token=google_token,
+                    google_account=google_account,
                 )
                 await self._registry.bind(runtime)
                 record = await self._publish(
@@ -707,6 +762,7 @@ class AndroidAgentBootstrapService:
         work: BootstrapWorkingState,
         *,
         error: AcquisitionError | None = None,
+        message: str | None = None,
     ) -> AgentRuntimeRecord:
         details = work.safe_details()
         record = await self._repository.upsert(
@@ -754,7 +810,7 @@ class AndroidAgentBootstrapService:
         await on_progress(
             phase,
             percent,
-            STATE_MESSAGES[state],
+            message or STATE_MESSAGES[state],
             bootstrap_state=state.value,
             agent_state=state.value,
             agent_version=record.agent_version,

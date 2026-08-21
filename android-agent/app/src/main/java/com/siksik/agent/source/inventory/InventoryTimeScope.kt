@@ -14,11 +14,20 @@ class InventoryTimeScope private constructor(
 
     fun includes(record: InventoryRecord): Boolean {
         if (record.sourceKind == InventorySourceKind.CONTACT) return true
-        val sourceTime = record.captureTimeEpochMs
-            ?: record.dateTakenEpochMs
-            ?: record.dateAddedEpochMs
-            ?: record.dateModifiedEpochMs
-        return includesTimestamp(sourceTime)
+        if (
+            record.isFavorite ||
+            InventoryPolicy.looksFavorite(record.directoryHint, record.displayName)
+        ) {
+            return true
+        }
+        val known = listOf(
+            record.captureTimeEpochMs,
+            record.dateTakenEpochMs,
+            record.dateAddedEpochMs,
+            record.dateModifiedEpochMs,
+        ).filterNotNull().filter { it > 0L }
+        if (known.isEmpty()) return true
+        return known.any { it >= notBeforeEpochMs }
     }
 
     companion object {

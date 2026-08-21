@@ -23,7 +23,7 @@ class SocialCrawlInstrumentation {
         val strategy = TargetStrategyRegistry.resolve(targetPackage)
             ?: throw IllegalArgumentException("target package is not allowed")
         val limits = AutomationLimits(
-            maxScrolls = boundedInt(arguments, "max_scrolls", 0, 40),
+            maxScrolls = boundedInt(arguments, "max_scrolls", 0, 400),
             maxScreenshots = boundedInt(arguments, "max_screenshots", 0, 48),
             launchTimeoutMs = boundedLong(arguments, "launch_timeout_ms", 1_000, 60_000),
             stableWaitMs = boundedLong(arguments, "stable_wait_ms", 250, 10_000),
@@ -32,7 +32,7 @@ class SocialCrawlInstrumentation {
             arguments,
             "navigation_deadline_ms",
             15_000,
-            175_000,
+            3_600_000,
         )
         val now = System.currentTimeMillis()
         val notBeforeEpochMs = boundedLong(
@@ -42,6 +42,7 @@ class SocialCrawlInstrumentation {
             now - 1,
         )
         val debugSnapshots = arguments.getString("debug_snapshots") == "true"
+        instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
         val testContext = instrumentation.targetContext
         val context = testContext.createPackageContext("com.siksik.agent", 0)
         val sessionStore = CommunicationCaptureStore(context)

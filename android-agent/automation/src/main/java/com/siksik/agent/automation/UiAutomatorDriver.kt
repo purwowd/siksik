@@ -8,6 +8,8 @@ import android.graphics.BitmapFactory
 import android.graphics.Rect
 import android.os.SystemClock
 import android.util.Log
+import android.view.InputDevice
+import android.view.MotionEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.uiautomator.By
@@ -118,6 +120,8 @@ class UiAutomatorDriver(
     private var instagramLastPostCaptureSignature: String? = null
     private var instagramLastArchiveCaptureSignature: String? = null
     private var instagramCommentsViewportIndex: Int = 0
+    private var instagramCommentsContentSignature: String? = null
+    private var instagramCommentsStagnantScrolls: Int = 0
     private val xVisitedViewportSignatures = mutableMapOf<SocialScope, MutableSet<String>>()
     private val xCurrentViewportSignatures = mutableMapOf<SocialScope, String>()
     private val xStoredItemSignatures = mutableMapOf<SocialScope, MutableSet<String>>()
@@ -160,6 +164,9 @@ class UiAutomatorDriver(
         shellDumpDisabledUntilMs = 0L
         invalidateShellDumpCache()
         debugMapper.startTarget(targetPackage)
+        if (CommunicationPolicy.usesTextOnlyCrawlCover(targetPackage)) {
+            ensureTextOnlyCoverVisible()
+        }
         return try {
             val intent = context.packageManager.getLaunchIntentForPackage(targetPackage)
                 ?: return false
@@ -177,12 +184,18 @@ class UiAutomatorDriver(
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
         while (SystemClock.elapsedRealtime() < deadline) {
             dismissBlockingSystemPrompts()
-            if (foregroundPackageName() == targetPackage) {
-                // Permission dialogs often appear 100–500ms after FB becomes visible
-                // (session 2c71ebbf: notification Allow → fb:scope_navigation_failed).
+            dismissCredentialOverlays()
+            val foreground = foregroundPackageName()
+            if (foreground == targetPackage) {
                 SystemClock.sleep(350L)
                 dismissBlockingSystemPrompts()
+                dismissCredentialOverlays()
                 if (foregroundPackageName() == targetPackage) {
+                    if (looksLikeSignedOutSession(targetPackage)) {
+                        failureReason = "account_not_signed_in"
+                        debugMapper.capture("account_not_signed_in", status = "failed")
+                        return false
+                    }
                     debugMapper.capture("target_launch_visible")
                     return true
                 }
@@ -190,12 +203,54 @@ class UiAutomatorDriver(
             SystemClock.sleep(FOREGROUND_POLL_MS)
         }
         dismissBlockingSystemPrompts()
-        val visible = foregroundPackageName() == targetPackage
+        dismissCredentialOverlays()
+        val foreground = foregroundPackageName()
+        if (foreground == targetPackage && looksLikeSignedOutSession(targetPackage)) {
+            failureReason = "account_not_signed_in"
+            debugMapper.capture("account_not_signed_in", status = "failed")
+            return false
+        }
+        if (
+            foregroundLooksLikeCredentialManager() ||
+            (foreground == targetPackage && looksLikeSignedOutSession(targetPackage))
+        ) {
+            failureReason = "account_not_signed_in"
+            debugMapper.capture("account_not_signed_in", status = "failed")
+            return false
+        }
+        val visible = foreground == targetPackage
         debugMapper.capture(
             if (visible) "target_launch_visible_late" else "target_launch_timeout",
             status = if (visible) "observed" else "failed",
         )
         return visible
+    }
+
+    override fun requireSignedInSession(targetPackage: String): Boolean {
+        dismissBlockingSystemPrompts()
+        dismissCredentialOverlays()
+        if (foregroundLooksLikeCredentialManager()) {
+            dismissCredentialOverlays()
+        }
+        if (!isForeground(targetPackage)) {
+            SystemClock.sleep(400L)
+            dismissCredentialOverlays()
+        }
+        if (foregroundLooksLikeCredentialManager()) {
+            failureReason = "account_not_signed_in"
+            debugMapper.capture("account_not_signed_in", status = "failed")
+            return false
+        }
+        if (!isForeground(targetPackage)) {
+            failureReason = "target_not_foreground"
+            return false
+        }
+        if (looksLikeSignedOutSession(targetPackage)) {
+            failureReason = "account_not_signed_in"
+            debugMapper.capture("account_not_signed_in", status = "failed")
+            return false
+        }
+        return true
     }
 
     override fun waitStable(timeoutMs: Long) {
@@ -210,6 +265,7 @@ class UiAutomatorDriver(
     override fun navigateToScope(targetPackage: String, scope: SocialScope): Boolean {
         deactivateScope()
         failureReason = null
+        ensureTextOnlyCoverVisible(targetPackage)
         debugMapper.capture("scope_${scope.wireName}_start", scope)
         if (!isForeground(targetPackage)) {
             failureReason = "target_not_foreground"
@@ -248,7 +304,14 @@ class UiAutomatorDriver(
     }
 
     override fun scrollForward(): Boolean {
-        if (navigationExpired()) return fail("navigation_deadline")
+        val feedScroll = activeScope in setOf(
+            SocialScope.OWN_POSTS,
+            SocialScope.OWN_TWEETS,
+            SocialScope.OWN_REPLIES,
+            SocialScope.OWN_COMMENTS,
+            SocialScope.OWN_STORY_ARCHIVE,
+        )
+        if (!feedScroll && navigationExpired()) return fail("navigation_deadline")
         if (activeScope == SocialScope.OWN_PROFILE) return false
         if (activeScope in temporalBoundaryScopes) return false
         if (activePackage == INSTAGRAM_PACKAGE) {
@@ -288,17 +351,31 @@ class UiAutomatorDriver(
             scope == SocialScope.OWN_POSTS && activePackage == INSTAGRAM_PACKAGE ->
                 instagramGridScrollBudget
             scope == SocialScope.OWN_STORY_ARCHIVE && activePackage == INSTAGRAM_PACKAGE ->
-                instagramArchiveScrollBudget
+                INSTAGRAM_ARCHIVE_SCROLL_LIMIT
             scope == SocialScope.OWN_COMMENTS && activePackage == INSTAGRAM_PACKAGE ->
-                INSTAGRAM_COMMENTS_SCROLL_LIMIT
+                INSTAGRAM_COMMENTS_EXHAUST_SCROLL_BUDGET
+            scope in setOf(SocialScope.OWN_TWEETS, SocialScope.OWN_REPLIES) &&
+                activePackage == X_PACKAGE ->
+                SOCIAL_FEED_EXHAUST_SCROLL_BUDGET
+            scope in setOf(SocialScope.OWN_POSTS, SocialScope.OWN_COMMENTS) &&
+                activePackage == FACEBOOK_PACKAGE ->
+                SOCIAL_FEED_EXHAUST_SCROLL_BUDGET
             else -> null
         }
 
     override fun captureScope(scope: SocialScope, takeScreenshot: Boolean): ScopeCapture {
-        if (navigationExpired()) {
+        val feedCapture = scope in setOf(
+            SocialScope.OWN_POSTS,
+            SocialScope.OWN_TWEETS,
+            SocialScope.OWN_REPLIES,
+            SocialScope.OWN_COMMENTS,
+            SocialScope.OWN_STORY_ARCHIVE,
+        )
+        if (!feedCapture && navigationExpired()) {
             failureReason = "navigation_deadline"
             return ScopeCapture(false, null)
         }
+        activePackage?.let { pkg -> ensureTextOnlyCoverVisible(pkg) }
         val packageName = foregroundPackageName() ?: run {
             failureReason = "active_package_missing"
             return ScopeCapture(false, null)
@@ -358,11 +435,17 @@ class UiAutomatorDriver(
                 mergeVisibleNodes(baseCaptureNodes, instagramProfileEvidenceNodes(visibleNodes)),
                 instagramProfileEvidenceFromUiDevice(),
             )
+        } else if (
+            packageName == INSTAGRAM_PACKAGE && scope == SocialScope.OWN_COMMENTS
+        ) {
+            mergeVisibleNodes(
+                baseCaptureNodes.ifEmpty { visibleNodes },
+                instagramCommentsEvidenceFromUiDevice(),
+            )
         } else if (packageName == X_PACKAGE && scope == SocialScope.OWN_PROFILE) {
             mergeVisibleNodes(baseCaptureNodes, xProfileEvidenceFromUiDevice())
         } else if (packageName == FACEBOOK_PACKAGE && scope == SocialScope.OWN_PROFILE) {
             val evidence = facebookProfileEvidenceFromUiDevice()
-            // Prefer UiDevice evidence when a11y only exposes chrome tabs.
             if (evidence.any { node ->
                     node.viewId?.endsWith("profile_display_name") == true ||
                         node.viewId?.endsWith("_stat") == true
@@ -388,20 +471,37 @@ class UiAutomatorDriver(
             !(
                 takeScreenshot &&
                     packageName == INSTAGRAM_PACKAGE &&
-                    scope in setOf(SocialScope.OWN_PROFILE, SocialScope.OWN_POSTS)
+                    scope in setOf(
+                        SocialScope.OWN_PROFILE,
+                        SocialScope.OWN_POSTS,
+                        SocialScope.OWN_STORY_ARCHIVE,
+                        SocialScope.OWN_COMMENTS,
+                    )
                 )
         ) {
             failureReason = "owned_content_not_visible"
             return ScopeCapture(false, null)
         }
-        val normalizedText = CommunicationPolicy.joinedText(
+        val joinedCaptureText = CommunicationPolicy.joinedText(
             captureNodes.flatMap { node -> listOf(node.text, node.contentDescription) },
             BuildConfig.MAX_SMS_TEXT_LENGTH,
         )
+        val commentsBodyText =
+            if (packageName == INSTAGRAM_PACKAGE && scope == SocialScope.OWN_COMMENTS) {
+                instagramCommentsBodyText(captureNodes, joinedCaptureText)
+            } else {
+                null
+            }
+        val normalizedText = when {
+            !commentsBodyText.isNullOrBlank() && !joinedCaptureText.isNullOrBlank() ->
+                CommunicationPolicy.joinedText(
+                    listOf(commentsBodyText, joinedCaptureText),
+                    BuildConfig.MAX_SMS_TEXT_LENGTH,
+                )
+            !commentsBodyText.isNullOrBlank() -> commentsBodyText
+            else -> joinedCaptureText
+        }
         val activityContext = captureNodes.firstNotNullOfOrNull(VisibleNodeRecord::className)
-        // IG comments a11y is often identical chrome ("Select"/"Comments") across pages —
-        // bake viewport index into the hash so each scroll stores a distinct record/screenshot.
-        // Skip Filter-by-date sheet captures (scroll accidentally opened the chip).
         val contentHash = if (
             packageName == INSTAGRAM_PACKAGE &&
             scope == SocialScope.OWN_COMMENTS
@@ -410,16 +510,31 @@ class UiAutomatorDriver(
                 (normalizedText?.contains("Filter by date", ignoreCase = true) == true)
             ) {
                 dismissInstagramCommentsFilterSheet()
-                // Don't abort the scroll loop — skip this junk viewport and continue.
                 Log.w(LOG_TAG, "event=instagram_comments_filter_sheet_skipped")
                 return ScopeCapture(true, null)
+            }
+            val bodyForSignature = commentsBodyText ?: normalizedText
+            val contentSignature = CommunicationPolicy.contentHash(
+                packageName,
+                scope.wireName,
+                "comments_body",
+                bodyForSignature,
+            )
+            if (contentSignature == instagramCommentsContentSignature) {
+                instagramCommentsStagnantScrolls += 1
+                if (instagramCommentsStagnantScrolls >= 2) {
+                    return ScopeCapture(true, null, exhausted = true)
+                }
+            } else {
+                instagramCommentsContentSignature = contentSignature
+                instagramCommentsStagnantScrolls = 0
             }
             instagramCommentsViewportIndex += 1
             CommunicationPolicy.contentHash(
                 packageName,
                 scope.wireName,
                 "comments_viewport_$instagramCommentsViewportIndex",
-                normalizedText,
+                bodyForSignature,
             )
         } else {
             CommunicationPolicy.visibleUiContentHash(
@@ -539,7 +654,9 @@ class UiAutomatorDriver(
         }
         repeat(X_CONTENT_WAIT_ATTEMPTS) {
             if (rows.isNotEmpty()) return@repeat
-            if (hasLabelContaining(X_EMPTY_TIMELINE_LABELS)) return ScopeCapture(true, null)
+            if (hasLabelContaining(X_EMPTY_TIMELINE_LABELS)) {
+                return ScopeCapture(stored = true, screenshotId = null, exhausted = true)
+            }
             if (navigationExpired()) return@repeat
             SystemClock.sleep(X_SCROLL_IDLE_MS)
             rows = xTimelineRowsFromUiDevice(marker, scope)
@@ -552,6 +669,9 @@ class UiAutomatorDriver(
             if (root.packageName?.toString() != X_PACKAGE) return@repeat
             nodes = snapshotVisibleNodes(root)
             rows = xOwnedTimelineRows(nodes, marker, scope)
+        }
+        if (rows.isEmpty() && hasLabelContaining(X_EMPTY_TIMELINE_LABELS)) {
+            return ScopeCapture(stored = true, screenshotId = null, exhausted = true)
         }
         if (rows.isEmpty()) {
             buildXTimelineRow(nodes, marker, scope)?.let { rows = listOf(it) }
@@ -616,20 +736,49 @@ class UiAutomatorDriver(
                     "new=$storedAny mode=text_only",
             )
         }
-        return ScopeCapture(accepted, null)
+        return ScopeCapture(accepted, null, exhausted = accepted && !storedAny)
     }
 
     override fun lastFailureReason(): String? = failureReason
 
     private fun navigateInstagram(scope: SocialScope): Boolean {
+        if (scope == SocialScope.OWN_COMMENTS) {
+            return navigateInstagramComments()
+        }
+        if (scope == SocialScope.OWN_STORY_ARCHIVE) {
+            // Infinix/Samsung still open Archive from own profile + hamburger.
+            // Xiaomi may fail the profile tab; settings deeplink remains the fallback.
+            if (!openInstagramOwnProfile() && !instagramOptionsMenuAlreadyOpen()) {
+                Log.i(LOG_TAG, "event=instagram_archive_skip_profile_try_settings")
+            }
+            return openInstagramStoryArchive()
+        }
         if (!openInstagramOwnProfile()) return false
         return when (scope) {
             SocialScope.OWN_PROFILE -> true
             SocialScope.OWN_POSTS -> openInstagramOwnPost()
-            SocialScope.OWN_STORY_ARCHIVE -> openInstagramStoryArchive()
-            SocialScope.OWN_COMMENTS -> openInstagramComments()
             else -> false
         }
+    }
+
+    private fun navigateInstagramComments(): Boolean {
+        shellDumpDisabledUntilMs = 0L
+        invalidateShellDumpCache()
+        if (instagramOnStoriesArchive()) {
+            if (!leaveInstagramArchiveForComments()) return false
+        } else if (instagramCommentsListChromeVisible()) {
+            markInstagramOwnAccountVerified()
+            return true
+        }
+        if (instagramOptionsMenuAlreadyOpen()) {
+            markInstagramOwnAccountVerified()
+            return openInstagramComments()
+        }
+        // Xiaomi: profile tab inject is blocked; comments still open via settings deeplink.
+        if (!openInstagramOwnProfile() && !instagramOptionsMenuAlreadyOpen()) {
+            Log.i(LOG_TAG, "event=instagram_comments_skip_profile_try_settings")
+        }
+        return openInstagramComments()
     }
 
     private fun snapshotVisibleNodes(root: android.view.accessibility.AccessibilityNodeInfo): List<VisibleNodeRecord> =
@@ -659,7 +808,82 @@ class UiAutomatorDriver(
         node.viewId.orEmpty().substringAfterLast('/') in INSTAGRAM_PROFILE_EVIDENCE_RESOURCES
     }
 
-    /** UiDevice fallback when Compose a11y root is a single empty window placeholder. */
+    private fun instagramCommentsEvidenceFromUiDevice(): List<VisibleNodeRecord> = safeUi(emptyList()) {
+        val window = activeWindowBounds()
+        val minimumTop = (window.top + window.height() / 8).coerceAtLeast(window.top)
+        val maximumBottom = (window.bottom - window.height() / 10).coerceAtMost(window.bottom)
+        val out = ArrayList<VisibleNodeRecord>(64)
+        var seq = 0
+        val seen = HashSet<String>()
+        fun consider(obj: UiObject2) {
+            val text = obj.text?.toString()?.trim().orEmpty()
+            val desc = obj.contentDescription?.toString()?.trim().orEmpty()
+            if (text.isBlank() && desc.isBlank()) return
+            if (instagramCommentsChromeLabel(text) || instagramCommentsChromeLabel(desc)) return
+            val b = safeBounds(obj) ?: return
+            if (b.bottom < minimumTop || b.top > maximumBottom) return
+            if (b.height() <= 0 || b.width() <= 0) return
+            val key = listOf(text, desc, b.left, b.top, b.right, b.bottom).joinToString("|")
+            if (!seen.add(key)) return
+            out += VisibleNodeRecord(
+                sequence = seq++,
+                depth = 0,
+                text = text.takeIf { it.isNotBlank() },
+                contentDescription = desc.takeIf { it.isNotBlank() },
+                className = obj.className?.toString() ?: "android.widget.TextView",
+                viewId = obj.resourceName,
+                left = b.left,
+                top = b.top,
+                right = b.right,
+                bottom = b.bottom,
+                clickable = obj.isClickable,
+                scrollable = obj.isScrollable,
+            )
+        }
+        for (obj in device.findObjects(By.clazz("android.widget.TextView"))) {
+            consider(obj)
+            if (out.size >= 80) break
+        }
+        if (out.size < 8) {
+            for (obj in device.findObjects(By.clickable(true))) {
+                consider(obj)
+                if (out.size >= 80) break
+            }
+        }
+        out
+    }
+
+    private fun instagramCommentsBodyText(
+        nodes: List<VisibleNodeRecord>,
+        fallback: String?,
+    ): String? {
+        val parts = nodes.asSequence()
+            .flatMap { node -> sequenceOf(node.text, node.contentDescription) }
+            .mapNotNull { value -> value?.trim()?.takeIf { it.isNotEmpty() } }
+            .filterNot(::instagramCommentsChromeLabel)
+            .distinct()
+            .toList()
+        if (parts.isNotEmpty()) {
+            return CommunicationPolicy.joinedText(parts, BuildConfig.MAX_SMS_TEXT_LENGTH)
+        }
+        if (fallback.isNullOrBlank()) return null
+        val filtered = fallback.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !instagramCommentsChromeLabel(it) }
+            .distinct()
+            .toList()
+        return CommunicationPolicy.joinedText(filtered, BuildConfig.MAX_SMS_TEXT_LENGTH)
+    }
+
+    private fun instagramCommentsChromeLabel(value: String): Boolean {
+        val normalized = value.trim().lowercase(Locale.ROOT)
+        if (normalized.isEmpty()) return true
+        if (normalized in INSTAGRAM_COMMENTS_CHROME_LABELS) return true
+        return INSTAGRAM_COMMENTS_CHROME_FRAGMENTS.any { fragment ->
+            normalized == fragment || normalized.startsWith("$fragment ")
+        }
+    }
+
     private fun instagramProfileEvidenceFromUiDevice(): List<VisibleNodeRecord> = safeUi(emptyList()) {
         val out = ArrayList<VisibleNodeRecord>(12)
         var seq = 0
@@ -759,6 +983,21 @@ class UiAutomatorDriver(
         logInstagramProfileNavigation("start", started)
         debugMapper.capture("instagram_profile_before_navigation", activeScope)
         dismissInstagramProfileCoachmarks()
+        if (isInstagramArchiveListSurface()) {
+            instagramSubpageActive = true
+        }
+        if (instagramOptionsMenuAlreadyOpen()) {
+            markInstagramOwnAccountVerified()
+            debugMapper.capture("instagram_profile_settings_already_open", activeScope)
+            repeat(3) {
+                clickInstagramSubpageBack()
+                SystemClock.sleep(PROFILE_ACTION_INTERVAL_MS)
+                if (instagramOwnProfileVisibleOnDevice()) {
+                    return acceptInstagramOwnProfile(started, "restored_from_settings")
+                }
+                if (!instagramOptionsMenuAlreadyOpen()) return@repeat
+            }
+        }
         scrollInstagramProfileToHeaderIfNeeded()
         // Already on own profile — UiDevice selectors first (probe-proven).
         if (instagramOwnProfileVisibleOnDevice()) {
@@ -768,7 +1007,7 @@ class UiAutomatorDriver(
             var restored = false
             for (step in 0 until MAX_INSTAGRAM_PROFILE_BACK_STEPS) {
                 dismissInstagramCommentsFilterSheet()
-                device.pressBack()
+                clickInstagramSubpageBack()
                 SystemClock.sleep(PROFILE_PROBE_INTERVAL_MS)
                 if (instagramOwnProfileVisibleOnDevice()) {
                     return acceptInstagramOwnProfile(started, "restored_from_subpage")
@@ -901,7 +1140,7 @@ class UiAutomatorDriver(
         probe: InstagramSurfaceProbe = InstagramSurfaceProbe.EMPTY,
     ): Boolean {
         instagramSubpageActive = false
-        verifiedOwnAccountPackages.add(INSTAGRAM_PACKAGE)
+        markInstagramOwnAccountVerified()
         instagramOwnAccountMarker = probe.accountMarker
             ?.takeIf { it.isNotBlank() }
             ?: shellDumpAccountMarker()
@@ -914,6 +1153,11 @@ class UiAutomatorDriver(
         }
         debugMapper.capture(captureName, activeScope, "verified")
         return true
+    }
+
+    /** Settings sheet (Arsip / Aktivitas Anda) is own-account proof without the profile tab. */
+    private fun markInstagramOwnAccountVerified() {
+        verifiedOwnAccountPackages.add(INSTAGRAM_PACKAGE)
     }
 
     /** Coachmark/tooltips (e.g. "Try sharing a song…") — tap header chrome, not avatar. */
@@ -966,7 +1210,25 @@ class UiAutomatorDriver(
             resource in INSTAGRAM_PROFILE_RESOURCES &&
                 bounds.top >= (device.displayHeight * 2) / 3 &&
                 bounds.right >= (device.displayWidth * 3) / 4
-        } || clickInstagramProfileTabCoordinate()
+        } || clickInstagramProfileTabCoordinate() || clickInstagramProfileTabShellTap()
+
+    private fun clickInstagramProfileTabShellTap(): Boolean {
+        val obj = safeUi(null as UiObject2?) {
+            INSTAGRAM_PROFILE_RESOURCES.firstNotNullOfOrNull { res ->
+                device.findObject(By.res(INSTAGRAM_PACKAGE, res))
+            } ?: device.findObject(By.desc("Profile"))
+                ?: device.findObject(By.desc("Profil"))
+        } ?: return false
+        val bounds = safeBounds(obj) ?: return false
+        if (bounds.top < (device.displayHeight * 2) / 3) return false
+        val tapped = shellTap(bounds.centerX(), bounds.centerY())
+        Log.i(
+            LOG_TAG,
+            "event=instagram_profile_tab_shell_tap success=$tapped " +
+                "x=${bounds.centerX()} y=${bounds.centerY()}",
+        )
+        return tapped
+    }
 
     private fun clickInstagramProfileTabCoordinate(): Boolean {
         val width = device.displayWidth
@@ -1283,14 +1545,9 @@ class UiAutomatorDriver(
         if (!clickInstagramOptions()) return fail("instagram_options_not_found")
         instagramSubpageActive = true
         debugMapper.capture("instagram_archive_settings_open", SocialScope.OWN_STORY_ARCHIVE)
-        // Settings Compose can paint before UiDevice sees rows — settle then retry clicks.
-        SystemClock.sleep(INSTAGRAM_SETTINGS_LOAD_SETTLE_MS)
-        // Live mapping showed Settings opened already scrolled to bottom (Log out /
-        // Also from Meta). Archive lives under "How you use Instagram" near the top.
-        ensureInstagramSettingsNearTop()
+        revealInstagramSettingsRow(ARCHIVE_LABELS)
         if (!clickInstagramArchiveMenuEntry()) {
-            SystemClock.sleep(INSTAGRAM_SETTINGS_LOAD_SETTLE_MS)
-            ensureInstagramSettingsNearTop()
+            revealInstagramSettingsRow(ARCHIVE_LABELS)
             if (!clickInstagramArchiveMenuEntry()) {
                 debugMapper.capture(
                     "instagram_archive_entry_not_found",
@@ -1753,61 +2010,350 @@ class UiAutomatorDriver(
         return visible
     }
 
+    /**
+     * Stories archive intercepts pressBack on some OEM builds. Click the header
+     * Back control, then open Comments from Settings if that sheet is still up.
+     */
+    private fun leaveInstagramArchiveForComments(): Boolean {
+        if (!instagramOnStoriesArchive()) {
+            return true
+        }
+        Log.i(LOG_TAG, "event=instagram_archive_back stage=start")
+        debugMapper.capture("instagram_archive_back_start", SocialScope.OWN_COMMENTS)
+        var previousVia: String? = null
+        repeat(MAX_INSTAGRAM_PROFILE_BACK_STEPS) { step ->
+            invalidateShellDumpCache()
+            if (instagramOptionsMenuAlreadyOpen()) {
+                markInstagramArchiveLeft()
+                debugMapper.capture(
+                    "instagram_archive_back_cleared",
+                    SocialScope.OWN_COMMENTS,
+                    "observed",
+                )
+                return true
+            }
+            val dumpShowsArchive = shellDumpHasAnyLabel(STORY_ARCHIVE_LABELS)
+            if (!dumpShowsArchive && previousVia != null && previousVia != "geometry") {
+                markInstagramArchiveLeft()
+                debugMapper.capture(
+                    "instagram_archive_back_cleared",
+                    SocialScope.OWN_COMMENTS,
+                    previousVia,
+                )
+                return true
+            }
+            if (!dumpShowsArchive && !isInstagramArchiveListSurface()) {
+                markInstagramArchiveLeft()
+                return true
+            }
+            val via = clickInstagramHeaderBack()
+            previousVia = via
+            invalidateShellDumpCache()
+            SystemClock.sleep(INSTAGRAM_ARCHIVE_LOAD_SETTLE_MS)
+            debugMapper.capture(
+                "instagram_archive_back_$step",
+                SocialScope.OWN_COMMENTS,
+                via,
+            )
+        }
+        invalidateShellDumpCache()
+        if (instagramOptionsMenuAlreadyOpen()) {
+            markInstagramArchiveLeft()
+            debugMapper.capture(
+                "instagram_archive_back_cleared",
+                SocialScope.OWN_COMMENTS,
+                "observed",
+            )
+            return true
+        }
+        if (!shellDumpHasAnyLabel(STORY_ARCHIVE_LABELS) &&
+            previousVia != null &&
+            previousVia != "geometry"
+        ) {
+            markInstagramArchiveLeft()
+            debugMapper.capture(
+                "instagram_archive_back_cleared",
+                SocialScope.OWN_COMMENTS,
+                previousVia,
+            )
+            return true
+        }
+        debugMapper.capture("instagram_archive_back_failed", SocialScope.OWN_COMMENTS, "failed")
+        return fail("instagram_archive_back_failed")
+    }
+
+    /** Flag is cleared on scope switch; dump title is the live signal. */
+    private fun instagramOnStoriesArchive(): Boolean {
+        if (shellDumpHasAnyLabel(STORY_ARCHIVE_LABELS)) return true
+        return isInstagramArchiveListSurface()
+    }
+
+    private fun markInstagramArchiveLeft() {
+        instagramArchiveListActive = false
+        instagramSubpageActive = instagramOptionsMenuAlreadyOpen()
+    }
+
+    private fun clickInstagramSubpageBack(): Boolean {
+        clickInstagramHeaderBack()
+        return true
+    }
+
+    /**
+     * Portable header Back: accessibility and bounded UiDevice first.
+     * Compressed dump + `input tap` is fallback when those miss or hang
+     * (Infinix/IG Compose). Live bounds from the dump, not a device pixel map.
+     */
+    private fun clickInstagramHeaderBack(): String {
+        if (clickInstagramHeaderBackAccessibility()) return "a11y"
+        if (clickInstagramHeaderBackUiDevice()) return "uidevice"
+        if (clickInstagramHeaderBackViaShellDump()) return "dump"
+        val x = (device.displayWidth * 8 / 100).coerceAtLeast(24)
+        val y = (device.displayHeight * 7 / 100).coerceAtLeast(48)
+        Log.i(LOG_TAG, "event=instagram_header_back via=geometry x=$x y=$y")
+        shellTap(x, y)
+        return "geometry"
+    }
+
+    private fun clickInstagramHeaderBackAccessibility(): Boolean {
+        val maxTop = (device.displayHeight / 5).coerceAtLeast(1)
+        val maxRight = (device.displayWidth / 3).coerceAtLeast(1)
+        val backLabels = INSTAGRAM_HEADER_BACK_LABELS
+            .map { value -> value.lowercase(Locale.ROOT) }
+            .toSet()
+        return performAccessibilityClick { node, bounds ->
+            if (bounds.top >= maxTop || bounds.left >= maxRight) return@performAccessibilityClick false
+            val resourceId = node.viewIdResourceName.orEmpty()
+            resourceId.endsWith("/$INSTAGRAM_HEADER_BACK_RESOURCE") ||
+                accessibilityLabels(node).any(backLabels::contains)
+        }
+    }
+
+    private fun clickInstagramHeaderBackUiDevice(): Boolean = uiQueryBounded(false) {
+        val byRes = device.wait(
+            Until.findObject(By.res(INSTAGRAM_PACKAGE, INSTAGRAM_HEADER_BACK_RESOURCE)),
+            UI_DEVICE_SELECTOR_WAIT_MS,
+        )
+        if (byRes != null && safeClick(byRes)) return@uiQueryBounded true
+        val maxTop = (device.displayHeight / 5).coerceAtLeast(1)
+        val maxRight = (device.displayWidth / 3).coerceAtLeast(1)
+        for (label in INSTAGRAM_HEADER_BACK_LABELS) {
+            val obj = device.wait(Until.findObject(By.desc(label)), UI_DEVICE_SELECTOR_WAIT_MS)
+                ?: continue
+            val bounds = safeBounds(obj) ?: continue
+            if (bounds.top < maxTop && bounds.left < maxRight && safeClick(obj)) {
+                return@uiQueryBounded true
+            }
+        }
+        false
+    }
+
+    private fun clickInstagramHeaderBackViaShellDump(): Boolean {
+        invalidateShellDumpCache()
+        val fromResource = shellDumpProbeByResourceSuffix(INSTAGRAM_HEADER_BACK_RESOURCE)
+        if (fromResource != null && shellTap(fromResource.centerX(), fromResource.centerY())) {
+            Log.i(
+                LOG_TAG,
+                "event=instagram_header_back via=dump_resource " +
+                    "bounds=${fromResource.toShortString()}",
+            )
+            return true
+        }
+        val maxTop = (device.displayHeight / 5).coerceAtLeast(1)
+        val maxRight = (device.displayWidth / 3).coerceAtLeast(1)
+        val fromLabel = shellDumpProbeNodes(INSTAGRAM_HEADER_BACK_LABELS)
+            .map { node -> node.bounds }
+            .filter { bounds -> bounds.top < maxTop && bounds.left < maxRight }
+            .minByOrNull { bounds -> bounds.left }
+        if (fromLabel != null && shellTap(fromLabel.centerX(), fromLabel.centerY())) {
+            Log.i(
+                LOG_TAG,
+                "event=instagram_header_back via=dump_label bounds=${fromLabel.toShortString()}",
+            )
+            return true
+        }
+        return false
+    }
+
     private fun openInstagramComments(): Boolean {
-        // Settings may already be open (e.g. after archive); don't re-open/thrash.
         if (!instagramOptionsMenuAlreadyOpen() && !clickInstagramOptions()) {
             return fail("instagram_options_not_found")
         }
         instagramSubpageActive = true
-        SystemClock.sleep(INSTAGRAM_SETTINGS_LOAD_SETTLE_MS)
-        // After Archive, Settings often resumes at the bottom (Log out). Your activity
-        // sits near the top under "How you use Instagram".
-        ensureInstagramSettingsNearTop()
-        dismissInstagramCommentsCoachmark()
-        if (!clickInstagramSettingsLabel(YOUR_ACTIVITY_LABELS) &&
-            !clickInstagramLabelViaShellDump(YOUR_ACTIVITY_LABELS) &&
-            !clickInstagramLabelViaSettingsSearch(
-                queries = listOf("Your activity", "Aktivitas Anda"),
-                labels = YOUR_ACTIVITY_LABELS,
-                eventPrefix = "instagram_activity",
-            )
+        shellDumpDisabledUntilMs = 0L
+        invalidateShellDumpCache()
+        // Compose Settings rows are clickable=false. Dump+input tap first; a11y can
+        // return true without leaving Settings (Samsung d1beba46, Infinix 726a823a).
+        if (!clickInstagramActivitySubpageRow(YOUR_ACTIVITY_LABELS) &&
+            !clickInstagramLabeledRow(YOUR_ACTIVITY_LABELS) &&
+            !clickInstagramCommentsActivityFallback()
         ) {
-            // One retry after settle — Compose rows often lag behind the header paint.
-            SystemClock.sleep(INSTAGRAM_SETTINGS_LOAD_SETTLE_MS)
-            ensureInstagramSettingsNearTop()
-            if (!clickInstagramSettingsLabel(YOUR_ACTIVITY_LABELS) &&
-                !clickInstagramLabelViaShellDump(YOUR_ACTIVITY_LABELS) &&
-                !clickInstagramLabelViaSettingsSearch(
-                    queries = listOf("Your activity", "Aktivitas Anda"),
-                    labels = YOUR_ACTIVITY_LABELS,
-                    eventPrefix = "instagram_activity",
-                )
-            ) {
-                return fail("instagram_activity_not_found")
-            }
+            return fail("instagram_activity_not_found")
         }
-        SystemClock.sleep(INSTAGRAM_ACTION_SETTLE_MS)
-        if (clickInstagramSettingsLabel(COMMENTS_LABELS)) {
+        debugMapper.capture("instagram_your_activity_opening", SocialScope.OWN_COMMENTS)
+        if (!waitForInstagramYourActivityScreen()) {
+            debugMapper.capture(
+                "instagram_your_activity_not_ready",
+                SocialScope.OWN_COMMENTS,
+                "failed",
+            )
+            return fail("instagram_activity_not_ready")
+        }
+        debugMapper.capture("instagram_your_activity_ready", SocialScope.OWN_COMMENTS, "observed")
+        invalidateShellDumpCache()
+        if (clickInstagramActivitySubpageRow(COMMENTS_LABELS) ||
+            clickInstagramLabeledRow(COMMENTS_LABELS)
+        ) {
             return finalizeInstagramCommentsSurface()
         }
-        if (!clickInstagramSettingsLabel(INTERACTIONS_LABELS)) {
-            return fail("instagram_interactions_not_found")
+        if (clickInstagramActivitySubpageRow(INTERACTIONS_LABELS) ||
+            clickInstagramLabeledRow(INTERACTIONS_LABELS)
+        ) {
+            if (!waitForInstagramAnyLabel(COMMENTS_LABELS, INSTAGRAM_YOUR_ACTIVITY_WAIT_MS)) {
+                return fail("instagram_comments_not_found")
+            }
+            if (clickInstagramActivitySubpageRow(COMMENTS_LABELS) ||
+                clickInstagramLabeledRow(COMMENTS_LABELS)
+            ) {
+                return finalizeInstagramCommentsSurface()
+            }
         }
-        SystemClock.sleep(INSTAGRAM_ACTION_SETTLE_MS)
-        if (!clickInstagramSettingsLabel(COMMENTS_LABELS)) {
-            return fail("instagram_comments_not_found")
+        return fail("instagram_interactions_not_found")
+    }
+
+    /**
+     * Your activity is ready when Comments / Interactions is visible via UiDevice,
+     * accessibility, or dump. Dump-only wait failed on Samsung while Comments was
+     * already on screen (d1beba46 `your_activity_not_ready`).
+     */
+    private fun waitForInstagramYourActivityScreen(): Boolean {
+        if (instagramYourActivityPageVisible()) return true
+        val deadline = SystemClock.elapsedRealtime() + INSTAGRAM_YOUR_ACTIVITY_WAIT_MS
+        var retriedActivity = false
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (instagramYourActivityPageVisible()) return true
+            if (!retriedActivity && instagramOptionsMenuAlreadyOpen()) {
+                clickInstagramActivitySubpageRow(YOUR_ACTIVITY_LABELS)
+                retriedActivity = true
+            }
+            SystemClock.sleep(INSTAGRAM_SHELL_POLL_MS)
         }
-        return finalizeInstagramCommentsSurface()
+        return instagramYourActivityPageVisible()
+    }
+
+    private fun instagramYourActivityPageVisible(): Boolean {
+        if (instagramCommentsListChromeVisible()) return true
+        return instagramAnyLabelVisible(COMMENTS_LABELS + INTERACTIONS_LABELS)
+    }
+
+    private fun waitForInstagramAnyLabel(labels: List<String>, timeoutMs: Long): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (instagramAnyLabelVisible(labels)) return true
+            SystemClock.sleep(INSTAGRAM_SHELL_POLL_MS)
+        }
+        return instagramAnyLabelVisible(labels)
+    }
+
+    private fun instagramAnyLabelVisible(labels: List<String>): Boolean {
+        if (uiQueryBounded(false) { hasExactLabel(labels) }) return true
+        if (accessibilityHasAnyLabel(labels)) return true
+        return shellDumpHasAnyLabel(labels)
+    }
+
+    private fun clickInstagramActivitySubpageRow(labels: List<String>): Boolean {
+        invalidateShellDumpCache()
+        val hits = shellDumpProbeNodes(labels)
+        val target = pickInstagramShellRowTarget(hits)
+        if (target != null) {
+            Log.i(
+                LOG_TAG,
+                "event=instagram_activity_row_click via=dump label=${labels.firstOrNull()} " +
+                    "bounds=${target.bounds.toShortString()} class=${target.className}",
+            )
+            debugMapper.capture(
+                "instagram_activity_row_" +
+                    labels.firstOrNull().orEmpty().lowercase(Locale.ROOT).replace(' ', '_'),
+                SocialScope.OWN_COMMENTS,
+                "dump",
+            )
+            return shellTap(target.bounds.centerX(), target.bounds.centerY()) ||
+                safeClickPoint(target.bounds.centerX(), target.bounds.centerY())
+        }
+        if (uiQueryBounded(false) { clickInstagramVisibleSettingsRow(labels) }) {
+            debugMapper.capture(
+                "instagram_activity_row_" +
+                    labels.firstOrNull().orEmpty().lowercase(Locale.ROOT).replace(' ', '_'),
+                SocialScope.OWN_COMMENTS,
+                "uidevice",
+            )
+            return true
+        }
+        val normalized = labels.map { value -> value.trim().lowercase(Locale.ROOT) }.toSet()
+        if (performAccessibilityClick { node, _ ->
+                accessibilityLabels(node).any(normalized::contains)
+            }
+        ) {
+            debugMapper.capture(
+                "instagram_activity_row_" +
+                    labels.firstOrNull().orEmpty().lowercase(Locale.ROOT).replace(' ', '_'),
+                SocialScope.OWN_COMMENTS,
+                "a11y",
+            )
+            return true
+        }
+        return clickInstagramLabelViaShellDump(labels)
+    }
+
+    private fun pickInstagramShellRowTarget(
+        hits: List<InstagramProbeNode>,
+    ): InstagramProbeNode? {
+        if (hits.isEmpty()) return null
+        val screenArea = device.displayWidth.toLong() * device.displayHeight.coerceAtLeast(1)
+        val rowCandidates = hits.filter { node ->
+            val area = node.bounds.width().toLong() * node.bounds.height()
+            area <= screenArea / 3
+        }
+        val pool = rowCandidates.ifEmpty { hits }
+        return pool.sortedWith(
+            compareByDescending<InstagramProbeNode> { node ->
+                if (node.className.contains("Button", ignoreCase = true)) 1 else 0
+            }.thenBy { node ->
+                node.bounds.width().toLong() * node.bounds.height()
+            },
+        ).firstOrNull()
+    }
+
+    /** Accessibility / bounded UiDevice first; dump+input tap only if those miss. */
+    private fun clickInstagramLabeledRow(labels: List<String>): Boolean {
+        val normalized = labels.map { value -> value.trim().lowercase(Locale.ROOT) }.toSet()
+        if (performAccessibilityClick { node, _ ->
+                accessibilityLabels(node).any(normalized::contains)
+            }
+        ) {
+            return true
+        }
+        if (uiQueryBounded(false) { clickInstagramVisibleSettingsRow(labels) }) {
+            return true
+        }
+        return clickInstagramLabelViaShellDump(labels)
     }
 
     private fun finalizeInstagramCommentsSurface(): Boolean {
-        dismissInstagramCommentsCoachmark()
-        val ready = waitForHeader(COMMENTS_LABELS) ||
-            device.hasObject(By.text("Comments")) ||
-            device.hasObject(By.text("Komentar"))
-        if (!ready) return fail("instagram_comments_not_ready")
-        dismissInstagramCommentsCoachmark()
-        return true
+        val deadline = SystemClock.elapsedRealtime() + INSTAGRAM_COMMENTS_LIST_WAIT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            SystemClock.sleep(INSTAGRAM_ACTION_SETTLE_MS)
+            invalidateShellDumpCache()
+            if (instagramCommentsListChromeVisible()) {
+                markInstagramOwnAccountVerified()
+                debugMapper.capture(
+                    "instagram_comments_list_ready",
+                    SocialScope.OWN_COMMENTS,
+                    "verified",
+                )
+                return true
+            }
+        }
+        return fail("instagram_comments_not_ready")
     }
 
     private fun advanceInstagramComments(): Boolean {
@@ -1818,13 +2364,17 @@ class UiAutomatorDriver(
         if (bounds.width() <= 0 || bounds.height() <= 0) return false
         // Keep swipe in the comment rows — top ~30% has "All dates" chips that open
         // the Filter-by-date sheet (session 4b42ad0f false-positive captures).
-        val swiped = device.swipe(
-            bounds.centerX(),
-            bounds.top + (bounds.height() * 78) / 100,
-            bounds.centerX(),
-            bounds.top + (bounds.height() * 42) / 100,
-            SWIPE_STEPS,
-        )
+        val swiped = try {
+            device.swipe(
+                bounds.centerX(),
+                bounds.top + (bounds.height() * 78) / 100,
+                bounds.centerX(),
+                bounds.top + (bounds.height() * 42) / 100,
+                SWIPE_STEPS,
+            )
+        } catch (_: RuntimeException) {
+            false
+        }
         SystemClock.sleep(INSTAGRAM_SCROLL_SETTLE_MS)
         dismissInstagramCommentsCoachmark()
         dismissInstagramCommentsFilterSheet()
@@ -1844,36 +2394,48 @@ class UiAutomatorDriver(
     /** True when Comments list (not Filter-by-date sheet) is showing. */
     private fun isInstagramCommentsListSurface(): Boolean {
         if (instagramCommentsFilterSheetVisible()) return false
-        return hasExactLabel(COMMENTS_LABELS) ||
-            device.hasObject(By.text("Comments")) ||
-            device.hasObject(By.text("Komentar"))
+        return instagramCommentsListChromeVisible()
     }
 
-    private fun instagramCommentsFilterSheetVisible(): Boolean =
-        hasExactLabel(
-            listOf(
-                "Filter by date",
-                "Filter by Date",
-                "Filter tanggal",
-                "Past week",
-                "Past month",
-                "Past year",
-                "Date range",
-                "Minggu lalu",
-                "Bulan lalu",
-            ),
+    /** Comments list chrome: UiDevice first, dump fallback. */
+    private fun instagramCommentsListChromeVisible(): Boolean {
+        val viaDevice = safeUi(false) {
+            hasExactLabel(COMMENTS_LABELS) &&
+                hasExactLabel(INSTAGRAM_COMMENTS_LIST_CHROME_LABELS)
+        }
+        if (viaDevice) return true
+        invalidateShellDumpCache()
+        if (!shellDumpHasAnyLabel(COMMENTS_LABELS)) return false
+        return shellDumpHasAnyLabel(INSTAGRAM_COMMENTS_LIST_CHROME_LABELS)
+    }
+
+    private fun instagramCommentsFilterSheetVisible(): Boolean {
+        val labels = listOf(
+            "Filter by date",
+            "Filter by Date",
+            "Filter tanggal",
+            "Past week",
+            "Past month",
+            "Past year",
+            "Date range",
+            "Minggu lalu",
+            "Bulan lalu",
         )
+        if (safeUi(false) { hasExactLabel(labels) }) return true
+        return shellDumpHasAnyLabel(labels)
+    }
 
     private fun dismissInstagramCommentsFilterSheet(): Boolean {
         if (!instagramCommentsFilterSheetVisible()) return false
         Log.i(LOG_TAG, "event=instagram_comments_filter_sheet_dismiss")
         device.pressBack()
         SystemClock.sleep(INSTAGRAM_ACTION_SETTLE_MS)
+        invalidateShellDumpCache()
         if (!instagramCommentsFilterSheetVisible()) return true
-        // Tap above the sheet (dimmed area) as fallback.
         val bounds = activeWindowBounds()
         safeClickPoint(bounds.centerX(), bounds.top + bounds.height() / 8)
         SystemClock.sleep(INSTAGRAM_ACTION_SETTLE_MS)
+        invalidateShellDumpCache()
         return !instagramCommentsFilterSheetVisible()
     }
 
@@ -1886,20 +2448,24 @@ class UiAutomatorDriver(
             device.hasObject(By.desc("Beranda"))
     }
 
-    private fun dismissInstagramCommentsCoachmark(): Boolean = safeUi(false) {
-        val tip = device.findObject(By.text("Delete multiple comments."))
-            ?: device.findObject(By.textContains("Delete multiple comments"))
-            ?: device.findObject(By.textContains("Hapus beberapa komentar"))
-        if (tip != null) {
-            // Tap outside the tip (list area) or back-dismiss by tapping Select's coachmark once.
-            val bounds = safeBounds(tip)
-            if (bounds != null) {
-                safeClickPoint(bounds.centerX(), (bounds.bottom + 48).coerceAtMost(device.displayHeight - 2))
-                SystemClock.sleep(150L)
-                return@safeUi true
+    private fun dismissInstagramCommentsCoachmark(): Boolean {
+        return safeUi(false) {
+            val tip = device.findObject(By.text("Delete multiple comments."))
+                ?: device.findObject(By.textContains("Delete multiple comments"))
+                ?: device.findObject(By.textContains("Hapus beberapa komentar"))
+            if (tip != null) {
+                val bounds = safeBounds(tip)
+                if (bounds != null) {
+                    safeClickPoint(
+                        bounds.centerX(),
+                        (bounds.bottom + 48).coerceAtMost(device.displayHeight - 2),
+                    )
+                    SystemClock.sleep(150L)
+                    return@safeUi true
+                }
             }
+            false
         }
-        false
     }
 
     /** Prefer UiDevice / shell dump for Compose Settings rows (same idea as Archive). */
@@ -1968,7 +2534,8 @@ class UiAutomatorDriver(
     }
 
     private fun instagramOptionsMenuAlreadyOpen(): Boolean =
-        instagramOptionsMenuReadyUiDevice() || instagramOptionsMenuReadyShell()
+        uiQueryBounded(false) { instagramOptionsMenuReadyUiDevice() } ||
+            instagramOptionsMenuReadyShell()
 
     /**
      * Probe-aligned Options open:
@@ -1977,19 +2544,25 @@ class UiAutomatorDriver(
     private fun clickInstagramOptions(): Boolean {
         if (instagramOptionsMenuAlreadyOpen()) {
             Log.i(LOG_TAG, "event=instagram_options_already_open success=true")
+            markInstagramOwnAccountVerified()
             return true
         }
         if (!hasInstagramOwnProfileProof()) {
-            Log.i(LOG_TAG, "event=instagram_options_blocked_not_on_profile")
-            return false
+            Log.i(LOG_TAG, "event=instagram_options_not_on_profile_try_deeplink")
+            return openInstagramSettingsViaDeepLink()
         }
         ensureInstagramProfileHeaderForMenu()
         repeat(INSTAGRAM_MENU_OPEN_ATTEMPTS) { attempt ->
-            if (instagramOptionsMenuAlreadyOpen()) return true
+            if (instagramOptionsMenuAlreadyOpen()) {
+                markInstagramOwnAccountVerified()
+                return true
+            }
             debugMapper.capture("instagram_options_before_click", activeScope)
-            val clicked = clickInstagramOptionsUiDevice() ||
+            val clicked = clickInstagramOptionsByResource() ||
+                clickInstagramOptionsUiDevice() ||
                 clickInstagramOptionsAccessibility() ||
-                clickInstagramProfileMenuCoordinate()
+                clickInstagramProfileMenuCoordinate() ||
+                clickInstagramOptionsShellTap()
             if (!clicked) {
                 Log.i(LOG_TAG, "event=instagram_options_click_missed attempt=$attempt")
                 return@repeat
@@ -1999,6 +2572,7 @@ class UiAutomatorDriver(
             // Probe waitUntilA11yHasAny(~12s) for Archive / Saved / Settings labels.
             if (waitForInstagramOptionsMenuReady()) {
                 Log.i(LOG_TAG, "event=instagram_options_menu_ready attempt=$attempt")
+                markInstagramOwnAccountVerified()
                 return true
             }
             // Still on profile → miss; do not Back-thrash Settings skeleton.
@@ -2012,7 +2586,35 @@ class UiAutomatorDriver(
                 return true
             }
         }
+        // Xiaomi MIUI blocks UiObject2/UiDevice/a11y clicks on the Opsi node.
+        // instagram://settings opens the same "Pengaturan dan aktivitas" sheet
+        // (Arsip / Tersimpan / Aktivitas Anda). Infinix never reaches this.
+        if (openInstagramSettingsViaDeepLink()) return true
         return instagramOptionsMenuAlreadyOpen()
+    }
+
+    private fun openInstagramSettingsViaDeepLink(): Boolean {
+        debugMapper.capture("instagram_settings_deeplink_start", activeScope)
+        val launched = try {
+            device.executeShellCommand(
+                "am start -a android.intent.action.VIEW " +
+                    "-d instagram://settings -p $INSTAGRAM_PACKAGE",
+            )
+            true
+        } catch (_: RuntimeException) {
+            false
+        }
+        Log.i(LOG_TAG, "event=instagram_settings_deeplink launched=$launched")
+        if (!launched) return false
+        SystemClock.sleep(INSTAGRAM_SETTINGS_LOAD_SETTLE_MS + 1_200L)
+        debugMapper.capture("instagram_settings_deeplink_after", activeScope)
+        if (waitForInstagramOptionsMenuReady() || instagramOptionsMenuAlreadyOpen()) {
+            Log.i(LOG_TAG, "event=instagram_settings_deeplink success=true")
+            markInstagramOwnAccountVerified()
+            return true
+        }
+        Log.i(LOG_TAG, "event=instagram_settings_deeplink success=false")
+        return false
     }
 
     /** Probe: after posts scroll, swipe back so Options hamburger is reachable. */
@@ -2045,6 +2647,20 @@ class UiAutomatorDriver(
         }
     }
 
+    private fun clickInstagramOptionsByResource(): Boolean = safeUi(false) {
+        val maxTop = (device.displayHeight * 0.22).toInt()
+        for (resource in INSTAGRAM_OPTIONS_RESOURCES) {
+            val obj = device.findObject(By.res(INSTAGRAM_PACKAGE, resource)) ?: continue
+            val bounds = safeBounds(obj) ?: continue
+            if (bounds.top >= maxTop) continue
+            if (safeClick(obj) || safeClickPoint(bounds.centerX(), bounds.centerY())) {
+                Log.i(LOG_TAG, "event=instagram_options_resource_click resource=$resource")
+                return@safeUi true
+            }
+        }
+        false
+    }
+
     private fun clickInstagramOptionsUiDevice(): Boolean = safeUi(false) {
         // Match FlowMapFinalProbe: top band only — do not require right-edge geometry.
         val maxTop = (device.displayHeight * 0.22).toInt()
@@ -2063,25 +2679,46 @@ class UiAutomatorDriver(
             .minByOrNull { (_, b) -> b.top }
             ?.first
         if (top != null) {
-            // Probe clickObjectOrAncestor preference.
+            // Capture bounds before click — Xiaomi recycles the UiObject2 so
+            // later visibleBounds is null and the point fallback never runs.
+            val savedBounds = safeBounds(top)
             var node: UiObject2? = top
+            var objectClicked = false
             repeat(6) {
                 val cur = node ?: return@repeat
                 if (cur.isClickable && safeClick(cur)) {
-                    Log.i(LOG_TAG, "event=instagram_options_uidevice_click success=true")
-                    return@safeUi true
+                    objectClicked = true
+                    return@repeat
                 }
                 node = cur.parent
             }
-            if (safeClick(top)) {
-                Log.i(LOG_TAG, "event=instagram_options_uidevice_click success=true")
+            if (!objectClicked) {
+                objectClicked = safeClick(top)
+            }
+            SystemClock.sleep(400)
+            // Infinix: object-click already opened Settings — do not point-click Search.
+            if (instagramOptionsMenuReadyUiDevice()) {
+                Log.i(LOG_TAG, "event=instagram_options_uidevice_click success=true via=object")
                 return@safeUi true
             }
-            val bounds = safeBounds(top)
-            if (bounds != null && safeClickPoint(bounds.centerX(), bounds.centerY())) {
-                Log.i(LOG_TAG, "event=instagram_options_uidevice_point success=true")
-                return@safeUi true
+            val pointBounds = savedBounds ?: safeBounds(device.findObject(By.desc("Opsi")))
+            if (pointBounds != null) {
+                val x = pointBounds.centerX()
+                val y = pointBounds.centerY()
+                val pointed = safeClickPoint(x, y)
+                Log.i(
+                    LOG_TAG,
+                    "event=instagram_options_uidevice_point success=$pointed x=$x y=$y " +
+                        "object_click=$objectClicked saved=${savedBounds != null}",
+                )
+                if (pointed) return@safeUi true
+            } else {
+                Log.i(LOG_TAG, "event=instagram_options_uidevice_point skipped=null_bounds")
             }
+            // Do not report success if Settings did not open. Xiaomi rejects
+            // UiDevice.click at the Opsi center (success=false x=992 y=170);
+            // returning true here skipped the accessibility click path.
+            Log.i(LOG_TAG, "event=instagram_options_uidevice_click success=false sheet_closed")
         }
         false
     }
@@ -2128,6 +2765,7 @@ class UiAutomatorDriver(
             device.hasObject(By.text("Disimpan")) ||
             device.hasObject(By.text("Settings and activity")) ||
             device.hasObject(By.text("Setelan dan aktivitas")) ||
+            device.hasObject(By.text("Pengaturan dan aktivitas")) ||
             instagramOptionsMenuVisible(instagramProbeNodes())
 
     private fun instagramOptionsMenuReadyShell(): Boolean {
@@ -2164,40 +2802,129 @@ class UiAutomatorDriver(
         return true
     }
 
-    private fun clickInstagramArchiveMenuEntry(): Boolean {
-        ensureInstagramSettingsNearTop()
-        // Probe order: UiDevice/shell (no downward scroll) → Search (visible on Settings).
-        if (clickInstagramSettingsLabel(ARCHIVE_LABELS)) {
-            SystemClock.sleep(INSTAGRAM_ARCHIVE_LOAD_SETTLE_MS)
-            return true
-        }
-        if (clickInstagramArchiveUiDevice()) {
-            SystemClock.sleep(INSTAGRAM_ARCHIVE_LOAD_SETTLE_MS)
-            return true
-        }
-        if (clickInstagramLabelViaShellDump(ARCHIVE_LABELS)) {
-            SystemClock.sleep(INSTAGRAM_ARCHIVE_LOAD_SETTLE_MS)
-            return true
-        }
-        // Settings Search is on-screen at the top — more reliable than scrolling down.
-        if (clickInstagramArchiveViaSettingsSearch()) {
-            return true
-        }
-        val nodes = waitForInstagramOptionsMenuNodes()
-        if (nodes != null) {
-            val target = instagramOptionsMenuEntry(ARCHIVE_LABELS, nodes)
-            if (target != null) {
-                val clicked = performAccessibilityClick { node, bounds ->
-                    bounds.top >= activeWindowBounds().top &&
-                        accessibilityLabels(node).any { label -> label in ARCHIVE_NORMALIZED_LABELS }
-                } || safeClickPoint(target.bounds.centerX(), target.bounds.centerY())
-                if (clicked) {
-                    SystemClock.sleep(INSTAGRAM_ARCHIVE_LOAD_SETTLE_MS)
-                    return true
+    /**
+     * Last resort inside the automation APK (same path as Compose comments).
+     * Xiaomi rejects UiObject2.click and UiDevice.click at the Opsi node.
+     */
+    private fun clickInstagramOptionsShellTap(): Boolean {
+        val maxTop = (device.displayHeight * 0.22).toInt()
+        val node = safeUi(null as UiObject2?) {
+            val candidates = device.findObjects(By.desc("Opsi")) +
+                device.findObjects(By.desc("Options"))
+            candidates
+                .mapNotNull { obj ->
+                    val b = safeBounds(obj) ?: return@mapNotNull null
+                    obj to b
                 }
+                .filter { (_, b) -> b.top < maxTop }
+                .minByOrNull { (_, b) -> b.top }
+                ?.first
+        } ?: return false
+        val bounds = safeBounds(node) ?: return false
+        val x = bounds.centerX()
+        val y = bounds.centerY()
+        val tapped = shellTap(x, y)
+        Log.i(LOG_TAG, "event=instagram_options_shell_tap success=$tapped x=$x y=$y")
+        if (!tapped) return false
+        SystemClock.sleep(INSTAGRAM_ACTION_SETTLE_MS)
+        return true
+    }
+
+    private fun revealInstagramSettingsRow(labels: List<String>) {
+        if (hasExactLabel(labels)) return
+        val remaining = navigationRemainingMs()
+        if (remaining > 800L) {
+            SystemClock.sleep(minOf(INSTAGRAM_SETTINGS_VISIBLE_SETTLE_MS, remaining))
+        }
+        if (hasExactLabel(labels)) return
+        ensureInstagramSettingsNearTop()
+    }
+
+    private fun clickInstagramVisibleSettingsRow(labels: List<String>): Boolean {
+        val expected = labels.map { it.trim().lowercase(Locale.ROOT) }.toSet()
+        val deviceBounds = safeUi(null as Rect?) {
+            for (label in labels) {
+                val obj = device.findObject(By.text(label))
+                    ?: device.findObject(By.desc(label))
+                    ?: continue
+                val raw = sequenceOf(obj.text, obj.contentDescription)
+                    .filterNotNull()
+                    .map { it.trim() }
+                    .firstOrNull()
+                    .orEmpty()
+                if (raw.isNotEmpty() &&
+                    expected.none { value -> raw.equals(value, ignoreCase = true) }
+                ) {
+                    continue
+                }
+                return@safeUi safeBounds(obj)
             }
+            null
+        }
+        if (deviceBounds != null && clickInstagramSettingsRowBounds(deviceBounds)) {
+            Log.i(LOG_TAG, "event=instagram_settings_row_click via=uidevice")
+            return true
+        }
+        invalidateShellDumpCache()
+        val dumpBounds = shellDumpProbeNodes(labels)
+            .minByOrNull { node ->
+                node.bounds.width().toLong().coerceAtLeast(1L) *
+                    node.bounds.height().toLong().coerceAtLeast(1L)
+            }
+            ?.bounds
+        if (dumpBounds != null && clickInstagramSettingsRowBounds(dumpBounds)) {
+            Log.i(LOG_TAG, "event=instagram_settings_row_click via=shell_dump")
+            return true
         }
         return false
+    }
+
+    private fun clickInstagramSettingsRowBounds(labelBounds: Rect): Boolean {
+        if (labelBounds.width() <= 0 || labelBounds.height() <= 0) return false
+        val density = context.resources.displayMetrics.density
+        val window = activeWindowBounds()
+        val iconX = (labelBounds.left - (36 * density).toInt())
+            .coerceIn(window.left + 16, (labelBounds.centerX()).coerceAtLeast(window.left + 16))
+        val y = labelBounds.centerY().coerceIn(window.top + 1, window.bottom - 1)
+        if (safeClickPoint(iconX, y)) return true
+        val centerX = ((window.left + window.right) / 2)
+            .coerceIn(window.left + 8, window.right - 8)
+        return safeClickPoint(centerX, y)
+    }
+
+    private fun clickInstagramCommentsActivityFallback(): Boolean {
+        if (clickInstagramLabelViaShellDump(YOUR_ACTIVITY_LABELS)) return true
+        return clickInstagramLabelViaSettingsSearch(
+            queries = listOf("Your activity", "Aktivitas Anda"),
+            labels = YOUR_ACTIVITY_LABELS,
+            eventPrefix = "instagram_activity",
+        )
+    }
+
+    private fun clickInstagramArchiveMenuEntry(): Boolean {
+        val attempts = listOf<() -> Boolean>(
+            { clickInstagramArchiveViaAccessibility() },
+            { clickInstagramVisibleSettingsRow(ARCHIVE_LABELS) },
+            { clickInstagramSettingsLabel(ARCHIVE_LABELS) },
+            { clickInstagramArchiveUiDevice() },
+            { clickInstagramLabelViaShellDump(ARCHIVE_LABELS) },
+            { clickInstagramArchiveViaSettingsSearch() },
+        )
+        for (attempt in attempts) {
+            if (!attempt()) continue
+            SystemClock.sleep(INSTAGRAM_ARCHIVE_LOAD_SETTLE_MS)
+            if (!instagramOptionsMenuAlreadyOpen()) return true
+            Log.i(LOG_TAG, "event=instagram_archive_click_still_on_settings")
+        }
+        return false
+    }
+
+    private fun clickInstagramArchiveViaAccessibility(): Boolean {
+        val window = activeWindowBounds()
+        return performAccessibilityClick { node, bounds ->
+            bounds.top >= window.top &&
+                accessibilityLabels(node).any { label -> label in ARCHIVE_NORMALIZED_LABELS }
+        }
     }
 
     private fun clickInstagramArchiveUiDevice(): Boolean = safeUi(false) {
@@ -2253,6 +2980,7 @@ class UiAutomatorDriver(
 
     private fun instagramArchivePageVisible(nodes: List<InstagramProbeNode>): Boolean =
         isForeground(INSTAGRAM_PACKAGE) &&
+            !instagramOptionsMenuAlreadyOpen() &&
             instagramHasHeaderLabel(INSTAGRAM_ARCHIVE_PAGE_LABELS, nodes)
 
     private fun switchInstagramArchiveToStories(
@@ -2361,10 +3089,12 @@ class UiAutomatorDriver(
             return false
         }
         if (scope == SocialScope.OWN_PROFILE) return true
+        dismissXChromeOverlays()
         val labels = if (scope == SocialScope.OWN_TWEETS) X_POSTS_LABELS else X_REPLIES_LABELS
         if (!ensureXProfileTabsVisible() || !clickXProfileTab(labels)) {
             return fail("x_profile_tab_not_found")
         }
+        dismissXChromeOverlays()
         xTimelineActive = true
         if (!waitForXTimeline(scope) ||
             X_PACKAGE !in verifiedOwnAccountPackages ||
@@ -2382,6 +3112,9 @@ class UiAutomatorDriver(
     }
 
     private fun openXOwnProfile(): Boolean {
+        if (looksLikeSignedOutSession(X_PACKAGE)) {
+            return fail("account_not_signed_in")
+        }
         if (
             X_PACKAGE in verifiedOwnAccountPackages &&
             xOwnAccountMarker != null &&
@@ -2403,14 +3136,19 @@ class UiAutomatorDriver(
             if (navigationExpired()) return fail("x_navigation_deadline")
             debugMapper.capture("x_profile_nav_attempt_$attempt", SocialScope.OWN_PROFILE)
             Log.i(LOG_TAG, "event=x_profile_nav_attempt attempt=$attempt")
+            ensureTextOnlyCoverVisible(X_PACKAGE)
+            recoverXFromWrongSurface()
 
             // Prefer navigation drawer (top-left). Never match tweet "Profile image".
             // No shell dump on this hot path — dump hangs on Infinix home/feed.
+            if (xLooksLikeOtherProfile()) {
+                device.pressBack()
+                waitNavigation()
+            }
             val openedDrawer = clickXAccountDrawer()
             val openedProfile = when {
                 openedDrawer && clickXProfileMenuEntry() -> true
-                clickExactText(X_PROFILE_LABELS) -> true
-                clickExactDescription(X_PROFILE_LABELS) -> true
+                clickXBottomProfileTab() -> true
                 else -> false
             }
             if (openedProfile && waitForXOwnProfileProof()) {
@@ -2437,23 +3175,85 @@ class UiAutomatorDriver(
     private fun isXHomeTimelineVisible(): Boolean = safeUi(false) {
         device.hasObject(By.desc("For you")) ||
             device.hasObject(By.text("For you")) ||
+            device.hasObject(By.text("Untuk Anda")) ||
             device.hasObject(By.desc("Following")) ||
+            device.hasObject(By.text("Following")) ||
+            device.hasObject(By.text("Mengikuti")) ||
+            device.hasObject(By.desc("Home")) ||
+            device.hasObject(By.desc("Beranda")) ||
             device.hasObject(By.descContains("Home timeline")) ||
             device.hasObject(By.res(X_PACKAGE, "channels"))
     }
 
     private fun clickXAccountDrawer(): Boolean {
+        val drawerLabels = setOf(
+            "show navigation drawer",
+            "tampilkan laci navigasi",
+            "tampilkan panel navigasi",
+            "tampilkan penarik navigasi",
+        )
+        val appBarBottom = (device.displayHeight / 5).coerceAtLeast(280)
+        val leadingRight = (device.displayWidth / 4).coerceAtLeast(200)
+        fun drawerGeometry(bounds: android.graphics.Rect): Boolean =
+            bounds.top < appBarBottom &&
+                bounds.left < leadingRight &&
+                bounds.width() in 48..220 &&
+                bounds.height() in 48..220
+        fun labeledDrawer(node: AccessibilityNodeInfo, bounds: android.graphics.Rect): Boolean {
+            if (!drawerGeometry(bounds)) return false
+            val labels = accessibilityLabels(node)
+            return labels.any { label ->
+                label in drawerLabels ||
+                    label.contains("penarik navigasi") ||
+                    label.contains("laci navigasi") ||
+                    label.contains("navigation drawer") ||
+                    label.contains("account menu") ||
+                    label.contains("menu akun")
+            }
+        }
+        if (performAccessibilityClick(X_PACKAGE, predicate = ::labeledDrawer)) {
+            waitNavigation()
+            SystemClock.sleep(400)
+            if (hasXProfileMenuEntry() || xDrawerLooksOpen()) {
+                Log.i(LOG_TAG, "event=x_drawer_open via=accessibility")
+                return true
+            }
+        }
+        // ACTION_CLICK can return true on MIUI without opening the drawer.
+        if (
+            performAccessibilityClick(
+                X_PACKAGE,
+                allowActionClick = false,
+                predicate = ::labeledDrawer,
+            )
+        ) {
+            waitNavigation()
+            SystemClock.sleep(400)
+            if (hasXProfileMenuEntry() || xDrawerLooksOpen()) {
+                Log.i(LOG_TAG, "event=x_drawer_open via=service_tap")
+                return true
+            }
+        }
         // Exact drawer control first — never Broad "Profile" (matches tweet "Profile image").
         val drawer = safeUi(null) {
             device.findObject(By.desc("Show navigation drawer"))
+                ?: device.findObject(By.desc("Tampilkan laci navigasi"))
+                ?: device.findObject(By.desc("Tampilkan panel navigasi"))
+                ?: device.findObject(By.desc("Tampilkan penarik navigasi"))
+                ?: device.findObject(By.descContains("Account menu"))
+                ?: device.findObject(By.descContains("Menu akun"))
                 ?: device.findObject(By.descContains("Show navigation drawer"))
                 ?: device.findObject(By.descContains("Open navigation drawer"))
                 ?: device.findObject(By.descContains("navigation drawer"))
+                ?: device.findObject(By.descContains("laci navigasi"))
+                ?: device.findObject(By.descContains("penarik navigasi"))
         }
         if (drawer != null) {
+            val bounds = safeBounds(drawer)
             val clicked = safeClick(drawer) || run {
-                val b = safeBounds(drawer) ?: return@run false
-                safeClickPoint(b.centerX(), b.centerY())
+                val b = bounds ?: return@run false
+                safeClickPoint(b.centerX(), b.centerY()) ||
+                    shellTap(b.centerX(), b.centerY())
             }
             if (clicked) {
                 waitNavigation()
@@ -2463,60 +3263,50 @@ class UiAutomatorDriver(
                     return true
                 }
             }
-        }
-        val density = context.resources.displayMetrics.density
-        val maxLeft = (88 * density).toInt().coerceAtLeast(device.displayWidth / 5)
-        val maxTop = (120 * density).toInt().coerceAtLeast(device.displayHeight / 8)
-        val selectors = listOf(
-            By.descContains("Account menu"),
-            By.descContains("Account"),
-            By.descContains("Akun"),
-            By.desc("Profil"),
-            By.desc("Profile"),
-        )
-        val candidate = safeUi<UiObject2?>(null) {
-            selectors.asSequence()
-                .flatMap { selector -> device.findObjects(selector).asSequence() }
-                .filter { value ->
-                    val desc = value.contentDescription?.toString().orEmpty()
-                    // Tweet avatars are "Profile image" — never open those as the drawer.
-                    !desc.contains("Profile image", ignoreCase = true) &&
-                        !desc.contains("Image", ignoreCase = true)
+            if (bounds != null && a11yServiceTap(bounds.centerX(), bounds.centerY())) {
+                waitNavigation()
+                SystemClock.sleep(400)
+                if (hasXProfileMenuEntry() || xDrawerLooksOpen()) {
+                    Log.i(LOG_TAG, "event=x_drawer_open via=show_navigation_drawer_service_tap")
+                    return true
                 }
-                .mapNotNull(::clickableAncestor)
-                .distinctBy { value ->
-                    val bounds = safeBounds(value) ?: return@distinctBy ""
-                    listOf(bounds.left, bounds.top, bounds.right, bounds.bottom).toString()
-                }
-                .filter { value ->
-                    val bounds = safeBounds(value) ?: return@filter false
-                    bounds.left in 0 until maxLeft &&
-                        bounds.top in 0 until maxTop &&
-                        bounds.width() in 1..(device.displayWidth / 3) &&
-                        bounds.height() in 1..(device.displayHeight / 5)
-                }
-                .minByOrNull { value ->
-                    val bounds = safeBounds(value) ?: return@minByOrNull Int.MAX_VALUE
-                    bounds.top * device.displayWidth + bounds.left
-                }
-        }
-        if (candidate != null && safeClick(candidate)) {
-            waitNavigation()
-            SystemClock.sleep(400)
-            if (hasXProfileMenuEntry() || xDrawerLooksOpen()) {
-                Log.i(LOG_TAG, "event=x_drawer_open via=top_left_account")
-                return true
             }
         }
-        val bounds = activeWindowBounds()
-        val x = (bounds.left + (24 * density).toInt()).coerceAtMost(bounds.right - 1)
-        val y = (bounds.top + (28 * density).toInt()).coerceAtMost(bounds.bottom - 1)
-        if (!safeClickPoint(x, y)) return false
-        waitNavigation()
-        SystemClock.sleep(400)
-        val open = hasXProfileMenuEntry() || xDrawerLooksOpen()
-        Log.i(LOG_TAG, "event=x_drawer_open via=coordinate success=$open")
-        return open
+        return false
+    }
+
+    private fun recoverXFromWrongSurface(): Boolean {
+        if (!isForeground(X_PACKAGE)) return false
+        var recovered = false
+        repeat(3) {
+            when {
+                xLooksLikeProfileMediaViewer() -> {
+                    device.pressBack()
+                    waitNavigation()
+                    SystemClock.sleep(300)
+                    recovered = true
+                }
+                xLooksLikeOtherProfile() -> {
+                    device.pressBack()
+                    waitNavigation()
+                    SystemClock.sleep(300)
+                    recovered = true
+                }
+                else -> return recovered
+            }
+        }
+        return recovered
+    }
+
+    private fun xLooksLikeProfileMediaViewer(): Boolean = safeUi(false) {
+        if (hasXOwnProfileProof() || isXHomeTimelineVisible()) return@safeUi false
+        val hasBack = device.hasObject(By.descContains("Back")) ||
+            device.hasObject(By.descContains("Kembali")) ||
+            device.hasObject(By.descContains("Navigate up"))
+        val hasFeedChrome = isXHomeTimelineVisible() ||
+            xProfileTabsVisible() ||
+            hasXProfileMenuEntry()
+        hasBack && !hasFeedChrome && !hasExactLabel(EDIT_PROFILE_LABELS)
     }
 
     private fun xDrawerLooksOpen(): Boolean = safeUi(false) {
@@ -2526,8 +3316,10 @@ class UiAutomatorDriver(
                 device.hasObject(By.text(label)) || device.hasObject(By.desc(label))
             } ||
             device.hasObject(By.text("Bookmarks")) ||
+            device.hasObject(By.text("Markah")) ||
             device.hasObject(By.text("Premium")) ||
-            device.hasObject(By.text("Lists"))
+            device.hasObject(By.text("Lists")) ||
+            device.hasObject(By.text("Daftar"))
     }
 
     private fun hasXProfileMenuEntry(): Boolean =
@@ -2538,27 +3330,89 @@ class UiAutomatorDriver(
             }
 
     private fun clickXProfileMenuEntry(): Boolean {
-        if (clickExactText(X_PROFILE_LABELS)) return true
-        if (clickExactDescription(X_PROFILE_LABELS)) return true
+        if (clickExactText(X_PROFILE_LABELS) && !xDrawerLooksOpen()) return true
+        if (clickExactDescription(X_PROFILE_LABELS) && !xDrawerLooksOpen()) return true
+        fun profileMenuNode(node: AccessibilityNodeInfo, bounds: android.graphics.Rect): Boolean {
+            val labels = accessibilityLabels(node)
+            if (labels.any { label ->
+                    label.contains("profile image") || label.contains("gambar profil")
+                }
+            ) {
+                return false
+            }
+            if ("profil" !in labels && "profile" !in labels) return false
+            // Drawer row, not a tweet avatar or bottom-nav guess.
+            return bounds.width() > 8 &&
+                bounds.height() > 8 &&
+                bounds.centerX() < (device.displayWidth * 2) / 3 &&
+                bounds.top < (device.displayHeight * 3) / 4
+        }
+        if (performAccessibilityClick(X_PACKAGE, predicate = ::profileMenuNode)) {
+            waitNavigation()
+            if (!xDrawerLooksOpen()) return true
+        }
+        if (
+            performAccessibilityClick(
+                X_PACKAGE,
+                allowActionClick = false,
+                predicate = ::profileMenuNode,
+            )
+        ) {
+            waitNavigation()
+            if (!xDrawerLooksOpen()) return true
+        }
         for (label in X_PROFILE_LABELS) {
             val target = device.findObject(By.desc(label))
                 ?: device.findObject(By.text(label))
                 ?: continue
-            val clickable = clickableAncestor(target) ?: target
-            if (!safeClick(clickable)) continue
-            waitNavigation()
-            return true
-        }
-        for (label in X_PROFILE_LABELS) {
-            val target = device.findObject(By.textContains(label)) ?: continue
             val desc = target.contentDescription?.toString().orEmpty()
             if (desc.contains("Profile image", ignoreCase = true)) continue
             val clickable = clickableAncestor(target) ?: target
-            if (!safeClick(clickable)) continue
-            waitNavigation()
-            return true
+            val bounds = safeBounds(clickable) ?: safeBounds(target)
+            if (safeClick(clickable)) {
+                waitNavigation()
+                if (!xDrawerLooksOpen() && hasXOwnProfileProof()) return true
+                if (!xDrawerLooksOpen()) return true
+            }
+            if (bounds != null && a11yServiceTap(bounds.centerX(), bounds.centerY())) {
+                waitNavigation()
+                if (!xDrawerLooksOpen() && hasXOwnProfileProof()) return true
+                if (!xDrawerLooksOpen()) return true
+            }
         }
         return false
+    }
+
+    private fun clickXBottomProfileTab(): Boolean {
+        val minTop = (device.displayHeight * 4) / 5
+        for (label in X_PROFILE_LABELS) {
+            val matches = safeUi(emptyList<UiObject2>()) {
+                device.findObjects(By.desc(label)) + device.findObjects(By.text(label))
+            }
+            val target = matches.firstOrNull { value ->
+                val desc = value.contentDescription?.toString().orEmpty()
+                val bounds = safeBounds(value) ?: return@firstOrNull false
+                !desc.contains("Profile image", ignoreCase = true) &&
+                    !desc.contains("Gambar profil", ignoreCase = true) &&
+                    bounds.top >= minTop
+            } ?: continue
+            val bounds = safeBounds(target) ?: continue
+            val tapped = safeClick(target) ||
+                a11yServiceTap(bounds.centerX(), bounds.centerY())
+            if (!tapped) continue
+            waitNavigation()
+            if (hasXOwnProfileProof()) return true
+        }
+        return false
+    }
+
+    private fun xLooksLikeOtherProfile(): Boolean {
+        if (!isForeground(X_PACKAGE)) return false
+        if (hasExactLabel(EDIT_PROFILE_LABELS)) return false
+        if (device.hasObject(By.res(X_PACKAGE, "menu_edit_profile"))) return false
+        val followVisible = hasExactLabel(listOf("Follow", "Ikuti", "Subscribe", "Langganan"))
+        val messageVisible = hasExactLabel(listOf("Message", "Pesan"))
+        return followVisible || (followVisible && messageVisible)
     }
 
     private fun ensureXProfileTabsVisible(): Boolean {
@@ -2572,34 +3426,121 @@ class UiAutomatorDriver(
         return xProfileTabsVisible()
     }
 
+    private fun xProfileTabBandBottom(): Int = (device.displayHeight * 4) / 5
+
     private fun xProfileTabsVisible(): Boolean {
-        val maximumTop = (device.displayHeight * 2) / 3
+        val maximumTop = xProfileTabBandBottom()
         return boundedLabelCandidates(X_POSTS_LABELS, 0, maximumTop).isNotEmpty() &&
             boundedLabelCandidates(X_REPLIES_LABELS, 0, maximumTop).isNotEmpty()
     }
 
     private fun clickXProfileTab(labels: List<String>): Boolean {
-        val maximumTop = (device.displayHeight * 2) / 3
+        dismissXChromeOverlays()
+        if (xProfileTabAlreadyActive(labels)) return true
+        val maximumTop = xProfileTabBandBottom()
         val candidates = boundedLabelCandidates(labels, 0, maximumTop)
         val target = candidates.minByOrNull { value ->
             safeBounds(value)?.top ?: Int.MAX_VALUE
         } ?: return false
         val clickable = clickableAncestor(target) ?: target
-        if (!safeClick(clickable)) return false
+        val bounds = safeBounds(clickable) ?: safeBounds(target)
+        val tapped = safeClick(clickable) ||
+            (bounds != null && a11yServiceTap(bounds.centerX(), bounds.centerY()))
+        if (!tapped) return false
         waitNavigation()
-        return boundedLabelCandidates(labels, 0, maximumTop).isNotEmpty()
+        dismissXChromeOverlays()
+        return xProfileTabConfirmed(labels)
+    }
+
+    private fun xProfileTabConfirmed(labels: List<String>): Boolean {
+        val replies = labels === X_REPLIES_LABELS || labels.any { it in X_REPLIES_LABELS }
+        repeat(3) {
+            if (replies) {
+                if (xTabLooksSelected(X_REPLIES_LABELS) && !xTabLooksSelected(X_POSTS_LABELS)) {
+                    return true
+                }
+                if (xTabLooksSelected(X_REPLIES_LABELS)) return true
+                if (
+                    !xTabLooksSelected(X_POSTS_LABELS) &&
+                    boundedLabelCandidates(X_REPLIES_LABELS, 0, xProfileTabBandBottom()).isNotEmpty()
+                ) {
+                    return true
+                }
+            } else {
+                if (xTabLooksSelected(X_POSTS_LABELS) && !xTabLooksSelected(X_REPLIES_LABELS)) {
+                    return true
+                }
+                if (
+                    !xTabLooksSelected(X_REPLIES_LABELS) &&
+                    boundedLabelCandidates(X_POSTS_LABELS, 0, xProfileTabBandBottom()).isNotEmpty()
+                ) {
+                    return true
+                }
+            }
+            SystemClock.sleep(X_SCROLL_IDLE_MS)
+        }
+        return if (replies) {
+            xTabLooksSelected(X_REPLIES_LABELS)
+        } else {
+            !xTabLooksSelected(X_REPLIES_LABELS) &&
+                boundedLabelCandidates(labels, 0, xProfileTabBandBottom()).isNotEmpty()
+        }
+    }
+
+    private fun xProfileTabAlreadyActive(labels: List<String>): Boolean {
+        if (xHighlightsMenuVisible()) return false
+        if (labels === X_REPLIES_LABELS || labels.any { it in X_REPLIES_LABELS }) {
+            return xTabLooksSelected(X_REPLIES_LABELS)
+        }
+        return xTabLooksSelected(X_POSTS_LABELS) && !xTabLooksSelected(X_REPLIES_LABELS)
+    }
+
+    private fun xTabLooksSelected(labels: List<String>): Boolean = safeUi(false) {
+        labels.any { label ->
+            device.findObjects(By.text(label)).any { value -> value.isSelected } ||
+                device.findObjects(By.desc(label)).any { value -> value.isSelected } ||
+                device.findObjects(By.descContains(label)).any { value ->
+                    value.isSelected ||
+                        value.contentDescription?.contains("selected", ignoreCase = true) == true
+                }
+        }
+    }
+
+    private fun xHighlightsMenuVisible(): Boolean = safeUi(false) {
+        val posts = boundedLabelCandidates(X_POSTS_LABELS, 0, xProfileTabBandBottom())
+            .minByOrNull { value -> safeBounds(value)?.top ?: Int.MAX_VALUE }
+            ?: return@safeUi false
+        val postsBounds = safeBounds(posts) ?: return@safeUi false
+        boundedLabelCandidates(
+            listOf("Highlights", "Sorotan"),
+            postsBounds.bottom - 8,
+            postsBounds.bottom + 280,
+        ).any { highlight ->
+            val bounds = safeBounds(highlight) ?: return@any false
+            bounds.top > postsBounds.bottom - 8
+        }
+    }
+
+    private fun dismissXChromeOverlays() {
+        dismissBlockingSystemPrompts()
+        if (xHighlightsMenuVisible()) {
+            device.pressBack()
+            waitNavigation()
+        }
     }
 
     private fun waitForXTimeline(scope: SocialScope): Boolean {
         repeat(X_TIMELINE_WAIT_ATTEMPTS) {
-            if (isXTimelineSurface(scope)) return true
+            if (isXTimelineSurface(scope) || hasLabelContaining(X_EMPTY_TIMELINE_LABELS)) return true
             device.waitForIdle(NAVIGATION_IDLE_MS)
         }
-        return isXTimelineSurface(scope)
+        return isXTimelineSurface(scope) || hasLabelContaining(X_EMPTY_TIMELINE_LABELS)
     }
 
     private fun navigateFacebook(scope: SocialScope): Boolean {
         dismissBlockingSystemPrompts()
+        ensureTextOnlyCoverVisible(FACEBOOK_PACKAGE)
+        advanceFacebookProfilePastOnboarding()
         if (!isForeground(FACEBOOK_PACKAGE)) {
             dismissBlockingSystemPrompts()
             if (!isForeground(FACEBOOK_PACKAGE)) {
@@ -2686,10 +3627,44 @@ class UiAutomatorDriver(
                 acted = true
                 Log.i(LOG_TAG, "event=permission_controller_back attempt=$attempt")
             }
+            if (foregroundLooksLikeCredentialManager()) {
+                device.pressBack()
+                acted = true
+                Log.i(LOG_TAG, "event=credential_manager_back attempt=$attempt")
+            }
             if (!acted) return
             SystemClock.sleep(280L)
             waitNavigation()
         }
+    }
+
+    private fun dismissCredentialOverlays() {
+        repeat(3) { attempt ->
+            if (!foregroundLooksLikeCredentialManager()) return
+            device.pressBack()
+            Log.i(LOG_TAG, "event=credential_manager_dismiss attempt=$attempt")
+            SystemClock.sleep(280L)
+            waitNavigation()
+        }
+    }
+
+    private fun foregroundLooksLikeCredentialManager(): Boolean {
+        val fg = foregroundPackageName().orEmpty()
+        return fg == "com.android.credentialmanager" ||
+            fg.endsWith(".credentialmanager") ||
+            fg.contains("credentialmanager")
+    }
+
+    private fun looksLikeSignedOutSession(targetPackage: String): Boolean {
+        when (targetPackage) {
+            X_PACKAGE -> if (hasXOwnProfileProof()) return false
+            INSTAGRAM_PACKAGE -> if (hasInstagramOwnProfileProof()) return false
+            FACEBOOK_PACKAGE -> if (hasFacebookOwnProfileProof()) return false
+        }
+        if (hasExactLabel(EDIT_PROFILE_LABELS)) return false
+        return hasExactLabel(AUTH_WALL_LABELS) ||
+            hasLabelContaining(AUTH_WALL_FRAGMENTS) ||
+            foregroundLooksLikeCredentialManager()
     }
 
     private fun foregroundLooksLikePermissionController(): Boolean {
@@ -2701,6 +3676,66 @@ class UiAutomatorDriver(
 
     private fun dismissFacebookPermissionPrompt() {
         dismissBlockingSystemPrompts()
+    }
+
+    /** FB 2025+ profile setup wizard (Xiaomi ID: "Selamat datang di profil Anda"). */
+    private fun isFacebookProfileOnboarding(): Boolean {
+        if (!isForeground(FACEBOOK_PACKAGE)) return false
+        if (hasLabelContaining(FACEBOOK_PROFILE_ONBOARDING_FRAGMENTS)) return true
+        if (
+            hasExactLabel(FACEBOOK_PROFILE_PHOTO_SETUP_LABELS) &&
+            !hasFacebookAllFilter() &&
+            !hasExactLabel(listOf("About", "Tentang"))
+        ) {
+            return true
+        }
+        return false
+    }
+
+    private fun dismissFacebookProfileOnboarding(): Boolean {
+        if (!isForeground(FACEBOOK_PACKAGE)) return false
+        if (hasLabelContaining(FACEBOOK_PROFILE_SETUP_STOP_FRAGMENTS)) {
+            if (
+                clickFacebookLabeledControl(
+                    FACEBOOK_PROFILE_SETUP_STOP_LABELS,
+                    allowActionClick = false,
+                ) ||
+                clickExactText(FACEBOOK_PROFILE_SETUP_STOP_LABELS) ||
+                clickExactDescription(FACEBOOK_PROFILE_SETUP_STOP_LABELS)
+            ) {
+                waitNavigation()
+                SystemClock.sleep(400)
+                Log.i(LOG_TAG, "event=facebook_profile_setup_stopped")
+                return true
+            }
+        }
+        if (!isFacebookProfileOnboarding()) return false
+        if (
+            clickFacebookLabeledControl(
+                FACEBOOK_PROFILE_ONBOARDING_SKIP_LABELS,
+                allowActionClick = false,
+            ) ||
+            clickExactText(FACEBOOK_PROFILE_ONBOARDING_SKIP_LABELS) ||
+            clickExactDescription(FACEBOOK_PROFILE_ONBOARDING_SKIP_LABELS)
+        ) {
+            waitNavigation()
+            SystemClock.sleep(400)
+            Log.i(LOG_TAG, "event=facebook_profile_onboarding_skipped")
+            return true
+        }
+        return false
+    }
+
+    /** Multi-step setup (photo → city → …) before the real profile wall appears. */
+    private fun advanceFacebookProfilePastOnboarding(maxSteps: Int = 8): Boolean {
+        var progressed = false
+        repeat(maxSteps) {
+            if (hasFacebookOwnProfileProof()) return progressed || true
+            if (!dismissFacebookProfileOnboarding()) return@repeat
+            progressed = true
+            dismissBlockingSystemPrompts()
+        }
+        return progressed
     }
 
     private fun openFacebookOwnProfile(): Boolean {
@@ -2715,6 +3750,7 @@ class UiAutomatorDriver(
         repeat(MAX_BACK_NAVIGATION + 2) { attempt ->
             if (navigationExpired()) return fail("facebook_navigation_deadline")
             dismissBlockingSystemPrompts()
+            advanceFacebookProfilePastOnboarding()
             if (hasFacebookOwnProfileProof()) {
                 val marker = fbAccountMarker()
                 if (marker != null) {
@@ -2734,18 +3770,45 @@ class UiAutomatorDriver(
                     return true
                 }
             }
-            val opened = clickDescriptionContains(FACEBOOK_PROFILE_TAB_DESC) ||
+            var opened = clickDescriptionContains(FACEBOOK_PROFILE_TAB_DESC) ||
                 clickExactDescription(FACEBOOK_PROFILE_TAB_DESC) ||
                 clickBottomNavigation(FACEBOOK_PROFILE_TAB_DESC) ||
+                clickFacebookLabeledControl(FACEBOOK_OWN_PROFILE_LABELS) ||
                 clickExactText(FACEBOOK_OWN_PROFILE_LABELS) ||
-                (
-                    clickExactDescription(FACEBOOK_MENU_LABELS) &&
-                        clickExactTextWithScroll(FACEBOOK_OWN_PROFILE_LABELS, MENU_SCROLL_LIMIT)
-                    ) ||
-                clickExactDescription(listOf("Go to profile"))
+                clickExactDescription(FACEBOOK_OWN_PROFILE_LABELS)
+            if (!hasFacebookOwnProfileProof()) {
+                opened = clickFacebookLabeledControl(
+                    FACEBOOK_OWN_PROFILE_LABELS,
+                    allowActionClick = false,
+                ) || opened
+            }
+            if (!hasFacebookOwnProfileProof()) {
+                val menuOpened = clickFacebookLabeledControl(FACEBOOK_MENU_LABELS) ||
+                    clickExactDescription(FACEBOOK_MENU_LABELS) ||
+                    clickFacebookLabeledControl(
+                        FACEBOOK_MENU_LABELS,
+                        allowActionClick = false,
+                    )
+                if (menuOpened) {
+                    waitNavigation()
+                    SystemClock.sleep(350)
+                    opened = clickFacebookLabeledControl(FACEBOOK_OWN_PROFILE_LABELS) ||
+                        clickExactTextWithScroll(FACEBOOK_OWN_PROFILE_LABELS, MENU_SCROLL_LIMIT) ||
+                        clickExactDescription(FACEBOOK_OWN_PROFILE_LABELS) ||
+                        clickFacebookLabeledControl(
+                            FACEBOOK_OWN_PROFILE_LABELS,
+                            allowActionClick = false,
+                        ) ||
+                        opened
+                }
+            }
+            if (!hasFacebookOwnProfileProof()) {
+                opened = clickExactDescription(listOf("Go to profile")) || opened
+            }
             if (opened) {
                 waitNavigation()
                 SystemClock.sleep(450)
+                advanceFacebookProfilePastOnboarding()
             }
             if (hasFacebookOwnProfileProof()) {
                 val marker = fbAccountMarker()
@@ -2766,13 +3829,15 @@ class UiAutomatorDriver(
                     return true
                 }
                 // Proof without readable marker yet; posts path refreshes marker.
-                if (opened) {
+                if (opened && hasFacebookOwnProfileProof()) {
                     verifiedOwnAccountPackages.add(FACEBOOK_PACKAGE)
                     Log.i(LOG_TAG, "event=facebook_profile_verified marker=deferred attempt=$attempt")
                     return true
                 }
             }
-            if (attempt < MAX_BACK_NAVIGATION) {
+            if (isFacebookProfileOnboarding()) {
+                advanceFacebookProfilePastOnboarding()
+            } else if (attempt < MAX_BACK_NAVIGATION) {
                 device.pressBack()
                 waitNavigation()
             }
@@ -2855,32 +3920,62 @@ class UiAutomatorDriver(
         if (!openFacebookMoreProfileSettings()) {
             return fail("facebook_comments_menu_missing")
         }
-        if (!clickExactTextWithScroll(FACEBOOK_ACTIVITY_LOG_LABELS, MENU_SCROLL_LIMIT)) {
+        val openedActivityHub =
+            clickExactTextWithScroll(FACEBOOK_ACTIVITY_LOG_LABELS, MENU_SCROLL_LIMIT) ||
+                clickFacebookLabeledControl(FACEBOOK_ACTIVITY_LOG_LABELS) ||
+                clickFacebookLabeledControl(FACEBOOK_ACTIVITY_LOG_LABELS, allowActionClick = false) ||
+                clickExactTextWithScroll(FACEBOOK_YOUR_ACTIVITY_LABELS, MENU_SCROLL_LIMIT) ||
+                clickFacebookLabeledControl(FACEBOOK_YOUR_ACTIVITY_LABELS) ||
+                clickFacebookLabeledControl(FACEBOOK_YOUR_ACTIVITY_LABELS, allowActionClick = false)
+        if (!openedActivityHub) {
             return fail("facebook_activity_log_missing")
         }
         waitNavigation()
         SystemClock.sleep(400)
-        // New Activity log tree (2025+): Your Facebook activity → Comments and reactions → Comments
-        clickDescriptionContains(FACEBOOK_YOUR_ACTIVITY_DESC) ||
-            clickExactText(FACEBOOK_YOUR_ACTIVITY_LABELS)
+        clickFacebookLabeledControl(FACEBOOK_YOUR_ACTIVITY_LABELS) ||
+            clickDescriptionContains(FACEBOOK_YOUR_ACTIVITY_DESC) ||
+            clickExactText(FACEBOOK_YOUR_ACTIVITY_LABELS) ||
+            clickFacebookLabeledControl(FACEBOOK_YOUR_ACTIVITY_LABELS, allowActionClick = false)
         waitNavigation()
         SystemClock.sleep(350)
-        clickDescriptionContains(FACEBOOK_COMMENTS_REACTIONS_DESC) ||
-            clickExactText(FACEBOOK_COMMENTS_REACTIONS_LABELS)
-        waitNavigation()
-        SystemClock.sleep(350)
-        val openedComments =
-            clickExactDescription(listOf("Comments", "Komentar")) ||
-                clickExactText(listOf("Comments", "Komentar"))
-        if (!openedComments) {
-            return fail("facebook_comments_list_missing")
+        val openedCommentsHub =
+            clickFacebookLabeledControl(FACEBOOK_COMMENTS_REACTIONS_LABELS) ||
+                clickDescriptionContains(FACEBOOK_COMMENTS_REACTIONS_DESC) ||
+                clickExactText(FACEBOOK_COMMENTS_REACTIONS_LABELS) ||
+                clickFacebookLabeledControl(
+                    FACEBOOK_COMMENTS_REACTIONS_LABELS,
+                    allowActionClick = false,
+                ) ||
+                clickExactTextWithScroll(FACEBOOK_COMMENTS_REACTIONS_LABELS, MENU_SCROLL_LIMIT)
+        if (openedCommentsHub) {
+            waitNavigation()
+            SystemClock.sleep(350)
         }
+        clickFacebookLabeledControl(FACEBOOK_ACTIVITY_ALL_FILTER_LABELS) ||
+            clickExactText(FACEBOOK_ACTIVITY_ALL_FILTER_LABELS)
         waitNavigation()
-        SystemClock.sleep(450)
+        SystemClock.sleep(250)
+        if (!isFacebookCommentsSurface()) {
+            clickFacebookLabeledControl(listOf("Comments", "Komentar")) ||
+                clickExactDescription(listOf("Comments", "Komentar")) ||
+                clickExactText(listOf("Comments", "Komentar")) ||
+                clickFacebookLabeledControl(listOf("Comments", "Komentar"), allowActionClick = false)
+            waitNavigation()
+            SystemClock.sleep(350)
+        }
+        if (!isFacebookCommentsSurface()) {
+            clickFacebookLabeledControl(FACEBOOK_LIKES_REACTIONS_LABELS) ||
+                clickFacebookLabeledControl(
+                    FACEBOOK_LIKES_REACTIONS_LABELS,
+                    allowActionClick = false,
+                )
+            waitNavigation()
+            SystemClock.sleep(350)
+        }
         fbFeedActive = true
         if (!isFacebookCommentsSurface()) {
             fbFeedActive = false
-            return fail("facebook_comments_not_verified")
+            return fail("facebook_comments_list_missing")
         }
         val visited = fbVisitedViewportSignatures.getOrPut(SocialScope.OWN_COMMENTS) { mutableSetOf() }
         fbViewportSignature(SocialScope.OWN_COMMENTS)?.let { signature ->
@@ -2892,16 +3987,41 @@ class UiAutomatorDriver(
 
     private fun openFacebookMoreProfileSettings(): Boolean {
         if (!hasFacebookOwnProfileProof() && !openFacebookOwnProfile()) return false
-        if (clickExactDescription(listOf("More profile settings"))) {
+        advanceFacebookProfilePastOnboarding()
+        if (facebookSettingsSheetVisible()) return true
+        if (
+            clickFacebookLabeledControl(FACEBOOK_MORE_PROFILE_SETTINGS_LABELS) ||
+            clickExactDescription(FACEBOOK_MORE_PROFILE_SETTINGS_LABELS) ||
+            clickExactText(FACEBOOK_MORE_PROFILE_SETTINGS_LABELS)
+        ) {
             waitNavigation()
-            return true
+            SystemClock.sleep(350)
+            if (facebookSettingsSheetVisible()) return true
         }
-        if (clickExactLabel(FACEBOOK_MORE_LABELS)) {
+        if (
+            clickFacebookLabeledControl(
+                FACEBOOK_MORE_PROFILE_SETTINGS_LABELS,
+                allowActionClick = false,
+            )
+        ) {
             waitNavigation()
-            return true
+            SystemClock.sleep(350)
+            if (facebookSettingsSheetVisible()) return true
         }
-        return false
+        // Generic More is last: it also matches post overflow on some locales.
+        if (clickExactLabel(FACEBOOK_MORE_LABELS) || clickFacebookLabeledControl(FACEBOOK_MORE_LABELS)) {
+            waitNavigation()
+            SystemClock.sleep(350)
+            if (facebookSettingsSheetVisible()) return true
+        }
+        return facebookSettingsSheetVisible()
     }
+
+    private fun facebookSettingsSheetVisible(): Boolean =
+        hasExactLabel(FACEBOOK_ACTIVITY_LOG_LABELS) ||
+            hasExactLabel(FACEBOOK_YOUR_ACTIVITY_LABELS) ||
+            hasExactLabel(FACEBOOK_MORE_PROFILE_SETTINGS_LABELS) ||
+            hasExactLabel(listOf("Settings", "Pengaturan", "Setelan", "Profile settings", "Pengaturan profil"))
 
     private fun clickDescriptionContains(labels: List<String>): Boolean =
         clickFirst(labels.map { By.descContains(it) })
@@ -3023,14 +4143,24 @@ class UiAutomatorDriver(
     private fun advanceFacebookFeed(scope: SocialScope): Boolean {
         if (!isFacebookFeedSurface(scope)) return false
         val before = fbCurrentViewportSignatures[scope] ?: fbViewportSignature(scope)
-        if (!swipeFacebookFeed()) return false
+        val width = device.displayWidth
+        val height = device.displayHeight
+        if (width <= 0 || height <= 0) return false
+        fun moved(): Boolean {
+            if (!isFacebookFeedSurface(scope)) return false
+            val after = fbViewportSignature(scope) ?: return false
+            val visited = fbVisitedViewportSignatures.getOrPut(scope) { mutableSetOf() }
+            if (after == before || !visited.add(after)) return false
+            fbCurrentViewportSignatures[scope] = after
+            return true
+        }
+        invalidateShellDumpCache()
+        device.swipe(width / 2, (height * 3) / 4, width / 2, height / 4, SWIPE_STEPS)
         SystemClock.sleep(FB_SCROLL_IDLE_MS)
-        if (!isFacebookFeedSurface(scope)) return false
-        val after = fbViewportSignature(scope) ?: return false
-        val visited = fbVisitedViewportSignatures.getOrPut(scope) { mutableSetOf() }
-        if (after == before || !visited.add(after)) return false
-        fbCurrentViewportSignatures[scope] = after
-        return true
+        if (moved()) return true
+        performAccessibilityScrollForward(packageName = FACEBOOK_PACKAGE)
+        SystemClock.sleep(FB_SCROLL_IDLE_MS)
+        return moved()
     }
 
     private fun swipeFacebookFeed(): Boolean {
@@ -3038,13 +4168,10 @@ class UiAutomatorDriver(
         val height = device.displayHeight
         if (width <= 0 || height <= 0) return false
         invalidateShellDumpCache()
-        return device.swipe(
-            width / 2,
-            (height * 3) / 4,
-            width / 2,
-            height / 4,
-            SWIPE_STEPS,
-        )
+        if (device.swipe(width / 2, (height * 3) / 4, width / 2, height / 4, SWIPE_STEPS)) {
+            return true
+        }
+        return performAccessibilityScrollForward(packageName = FACEBOOK_PACKAGE)
     }
 
     private fun isFacebookFeedSurface(scope: SocialScope): Boolean {
@@ -3062,6 +4189,7 @@ class UiAutomatorDriver(
     private fun isFacebookCommentsSurface(): Boolean =
         hasExactLabel(listOf("Comments", "Komentar")) ||
             hasExactLabel(listOf("Comments and reactions", "Komentar dan reaksi")) ||
+            hasExactLabel(FACEBOOK_LIKES_REACTIONS_LABELS) ||
             hasLabelContaining(listOf("No items", "Tidak ada item")) ||
             hasExactLabel(FACEBOOK_EMPTY_COMMENTS_LABELS)
 
@@ -3688,7 +4816,7 @@ class UiAutomatorDriver(
                 SocialScope.OWN_PROFILE -> hasInstagramOwnProfileProof()
                 SocialScope.OWN_POSTS -> isInstagramOwnPostSurface()
                 SocialScope.OWN_STORY_ARCHIVE -> isInstagramArchiveListSurface()
-                SocialScope.OWN_COMMENTS -> hasHeader(COMMENTS_LABELS)
+                SocialScope.OWN_COMMENTS -> instagramCommentsListChromeVisible()
                 else -> false
             }
             X_PACKAGE -> when (scope) {
@@ -3714,14 +4842,25 @@ class UiAutomatorDriver(
     private fun advanceXTimeline(scope: SocialScope): Boolean {
         if (!isXTimelineSurface(scope)) return false
         val before = xCurrentViewportSignatures[scope] ?: xViewportSignature(scope)
-        if (!swipeXTimeline()) return false
+        val bounds = activeWindowBounds()
+        if (bounds.width() <= 0 || bounds.height() <= 0) return false
+        fun moved(): Boolean {
+            if (!isXTimelineSurface(scope)) return false
+            val after = waitForXViewportSignature(scope) ?: return false
+            val visited = xVisitedViewportSignatures.getOrPut(scope) { mutableSetOf() }
+            if (after == before || !visited.add(after)) return false
+            xCurrentViewportSignatures[scope] = after
+            return true
+        }
+        val x = bounds.centerX()
+        val yFrom = bounds.top + (bounds.height() * 76) / 100
+        val yTo = bounds.top + (bounds.height() * 32) / 100
+        device.swipe(x, yFrom, x, yTo, SWIPE_STEPS)
         SystemClock.sleep(X_SCROLL_IDLE_MS)
-        if (!isXTimelineSurface(scope)) return false
-        val after = waitForXViewportSignature(scope) ?: return false
-        val visited = xVisitedViewportSignatures.getOrPut(scope) { mutableSetOf() }
-        if (after == before || !visited.add(after)) return false
-        xCurrentViewportSignatures[scope] = after
-        return true
+        if (moved()) return true
+        performAccessibilityScrollForward(packageName = X_PACKAGE)
+        SystemClock.sleep(X_SCROLL_IDLE_MS)
+        return moved()
     }
 
     private fun xOwnedContentCandidates(marker: String): List<UiObject2> = safeUi(emptyList()) {
@@ -4040,8 +5179,11 @@ class UiAutomatorDriver(
         )
     }
 
-    private fun hasMeaningfulXText(value: String, marker: String): Boolean =
-        value.lineSequence()
+    private fun hasMeaningfulXText(value: String, marker: String): Boolean {
+        if (X_EMPTY_TIMELINE_LABELS.any { label -> value.contains(label, ignoreCase = true) }) {
+            return false
+        }
+        return value.lineSequence()
             .map { line -> line.trim() }
             .filter(String::isNotEmpty)
             .any { line ->
@@ -4050,6 +5192,7 @@ class UiAutomatorDriver(
                     normalized != "@${marker.lowercase()}" &&
                     normalized !in X_TIMELINE_NOISE
             }
+    }
 
     private fun waitForXViewportSignature(scope: SocialScope): String? {
         repeat(X_SIGNATURE_WAIT_ATTEMPTS) {
@@ -4085,9 +5228,32 @@ class UiAutomatorDriver(
     private fun isXTimelineSurface(scope: SocialScope): Boolean {
         if (!xTimelineActive || !isForeground(X_PACKAGE)) return false
         if (X_PACKAGE !in verifiedOwnAccountPackages || xOwnAccountMarker == null) return false
-        val labels = if (scope == SocialScope.OWN_REPLIES) X_REPLIES_LABELS else X_POSTS_LABELS
-        return hasExactLabel(labels) ||
-            xProfileTabsVisible() ||
+        return when (scope) {
+            SocialScope.OWN_REPLIES -> xRepliesSurfaceReady()
+            SocialScope.OWN_TWEETS -> xPostsSurfaceReady()
+            else -> false
+        }
+    }
+
+    private fun xRepliesSurfaceReady(): Boolean {
+        if (!xProfileTabsVisible() && !hasExactLabel(X_REPLIES_LABELS)) return false
+        if (xTabLooksSelected(X_POSTS_LABELS) && !xTabLooksSelected(X_REPLIES_LABELS)) {
+            return false
+        }
+        if (xTabLooksSelected(X_REPLIES_LABELS)) return true
+        if (xTabLooksSelected(X_POSTS_LABELS)) return false
+        return hasExactLabel(X_REPLIES_LABELS) ||
+            hasLabelContaining(X_EMPTY_TIMELINE_LABELS) ||
+            hasAnyResource(X_PACKAGE, X_TIMELINE_RESOURCES) ||
+            safeUi(false) { device.hasObject(By.scrollable(true)) }
+    }
+
+    private fun xPostsSurfaceReady(): Boolean {
+        if (xTabLooksSelected(X_REPLIES_LABELS) && !xTabLooksSelected(X_POSTS_LABELS)) {
+            return false
+        }
+        return hasExactLabel(X_POSTS_LABELS) ||
+            xTabLooksSelected(X_POSTS_LABELS) ||
             hasAnyResource(X_PACKAGE, X_TIMELINE_RESOURCES) ||
             safeUi(false) { device.hasObject(By.scrollable(true)) }
     }
@@ -4225,6 +5391,8 @@ class UiAutomatorDriver(
         instagramLastPostCaptureSignature = null
         instagramLastArchiveCaptureSignature = null
         instagramCommentsViewportIndex = 0
+        instagramCommentsContentSignature = null
+        instagramCommentsStagnantScrolls = 0
     }
 
     private fun updateInstagramCaptureProgress(scope: SocialScope, signature: String) {
@@ -4278,6 +5446,59 @@ class UiAutomatorDriver(
             default
         }
 
+    private fun <T> uiQueryBounded(fallback: T, block: () -> T): T {
+        val holder = arrayOfNulls<Any>(1)
+        val worker = Thread(
+            {
+                try {
+                    holder[0] = block()
+                } catch (_: Throwable) {
+                    holder[0] = fallback
+                }
+            },
+            "siksik-ui-bound",
+        )
+        worker.start()
+        try {
+            worker.join(UI_DEVICE_BOUND_MS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        if (worker.isAlive) {
+            Log.w(LOG_TAG, "event=uidevice_bounded_timeout ms=$UI_DEVICE_BOUND_MS")
+            return fallback
+        }
+        @Suppress("UNCHECKED_CAST")
+        return (holder[0] as T?) ?: fallback
+    }
+
+    private fun shellTap(x: Int, y: Int): Boolean = try {
+        device.executeShellCommand("input tap $x $y")
+        true
+    } catch (_: Throwable) {
+        false
+    }
+
+    private fun a11yServiceTap(x: Int, y: Int): Boolean {
+        val intent = Intent(CommunicationPolicy.A11Y_TAP_ACTION)
+            .setPackage("com.siksik.agent")
+            .putExtra(CommunicationPolicy.A11Y_TAP_X_EXTRA, x)
+            .putExtra(CommunicationPolicy.A11Y_TAP_Y_EXTRA, y)
+        return try {
+            context.sendBroadcast(intent)
+            device.executeShellCommand(
+                "am broadcast -a ${CommunicationPolicy.A11Y_TAP_ACTION} " +
+                    "--ei ${CommunicationPolicy.A11Y_TAP_X_EXTRA} $x " +
+                    "--ei ${CommunicationPolicy.A11Y_TAP_Y_EXTRA} $y " +
+                    "-p com.siksik.agent",
+            )
+            SystemClock.sleep(320)
+            true
+        } catch (_: RuntimeException) {
+            false
+        }
+    }
+
     private fun accessibilityLabels(node: AccessibilityNodeInfo): Set<String> =
         sequenceOf(node.text, node.contentDescription)
             .filterNotNull()
@@ -4285,49 +5506,111 @@ class UiAutomatorDriver(
             .filter(String::isNotEmpty)
             .toSet()
 
+    private fun accessibilityHasAnyLabel(labels: List<String>): Boolean {
+        val expected = labels.map { value -> value.trim().lowercase(Locale.ROOT) }.toSet()
+        return safeUi(false) {
+            val root = uiAutomation.rootInActiveWindow ?: return@safeUi false
+            if (root.packageName?.toString() != INSTAGRAM_PACKAGE) return@safeUi false
+            val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+            queue.addLast(root to 0)
+            var visited = 0
+            while (queue.isNotEmpty() && visited < MAX_INSTAGRAM_PROBE_NODES) {
+                val (node, depth) = queue.removeFirst()
+                visited += 1
+                if (node.isVisibleToUser && accessibilityLabels(node).any(expected::contains)) {
+                    return@safeUi true
+                }
+                if (depth >= BuildConfig.MAX_UI_DEPTH) continue
+                for (index in 0 until node.childCount) {
+                    node.getChild(index)?.let { child -> queue.addLast(child to depth + 1) }
+                }
+            }
+            false
+        }
+    }
+
+    private fun accessibilityRootsForPackage(packageName: String): List<AccessibilityNodeInfo> {
+        val roots = ArrayList<AccessibilityNodeInfo>(4)
+        fun consider(root: AccessibilityNodeInfo?) {
+            if (root != null && root.packageName?.toString() == packageName) {
+                roots.add(root)
+            }
+        }
+        consider(uiAutomation.rootInActiveWindow)
+        for (window in uiAutomation.windows) {
+            consider(window.root)
+        }
+        return roots.distinctBy { System.identityHashCode(it) }
+    }
+
     private fun performAccessibilityClick(
+        packageName: String = INSTAGRAM_PACKAGE,
+        allowActionClick: Boolean = true,
         predicate: (AccessibilityNodeInfo, Rect) -> Boolean,
     ): Boolean = safeUi(false) {
-        val root = uiAutomation.rootInActiveWindow ?: return@safeUi false
-        if (root.packageName?.toString() != INSTAGRAM_PACKAGE) return@safeUi false
-        val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
-        queue.addLast(root to 0)
+        val roots = accessibilityRootsForPackage(packageName)
+        if (roots.isEmpty()) {
+            Log.i(
+                LOG_TAG,
+                "event=accessibility_click success=false package=$packageName reason=no_root",
+            )
+            return@safeUi false
+        }
         var visited = 0
-        while (queue.isNotEmpty() && visited < MAX_INSTAGRAM_PROBE_NODES) {
-            val (node, depth) = queue.removeFirst()
-            visited += 1
-            val bounds = Rect()
-            node.getBoundsInScreen(bounds)
-            if (!bounds.isEmpty && node.isVisibleToUser && predicate(node, bounds)) {
-                var candidate: AccessibilityNodeInfo? = node
-                var ancestorDepth = 0
-                while (candidate != null && ancestorDepth <= MAX_CLICKABLE_ANCESTOR_DEPTH) {
-                    if (candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+        for (root in roots) {
+            val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+            queue.addLast(root to 0)
+            while (queue.isNotEmpty() && visited < MAX_INSTAGRAM_PROBE_NODES) {
+                val (node, depth) = queue.removeFirst()
+                visited += 1
+                val bounds = Rect()
+                node.getBoundsInScreen(bounds)
+                if (!bounds.isEmpty && predicate(node, bounds)) {
+                    var candidate: AccessibilityNodeInfo? = node
+                    var ancestorDepth = 0
+                    while (
+                        allowActionClick &&
+                        candidate != null &&
+                        ancestorDepth <= MAX_CLICKABLE_ANCESTOR_DEPTH
+                    ) {
+                        if (candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                            Log.i(
+                                LOG_TAG,
+                                "event=accessibility_click success=true package=$packageName " +
+                                    "ancestor_depth=$ancestorDepth",
+                            )
+                            return@safeUi true
+                        }
+                        candidate = candidate.parent
+                        ancestorDepth += 1
+                    }
+                    if (a11yServiceTap(bounds.centerX(), bounds.centerY())) {
                         Log.i(
                             LOG_TAG,
-                            "event=instagram_accessibility_click success=true " +
-                                "ancestor_depth=$ancestorDepth",
+                            "event=accessibility_click success=true package=$packageName via=service_tap",
                         )
                         return@safeUi true
                     }
-                    candidate = candidate.parent
-                    ancestorDepth += 1
+                }
+                if (depth >= BuildConfig.MAX_UI_DEPTH) continue
+                for (index in 0 until node.childCount) {
+                    node.getChild(index)?.let { child -> queue.addLast(child to depth + 1) }
                 }
             }
-            if (depth >= BuildConfig.MAX_UI_DEPTH) continue
-            for (index in 0 until node.childCount) {
-                node.getChild(index)?.let { child -> queue.addLast(child to depth + 1) }
-            }
         }
-        Log.i(LOG_TAG, "event=instagram_accessibility_click success=false visited=$visited")
+        Log.i(
+            LOG_TAG,
+            "event=accessibility_click success=false package=$packageName visited=$visited",
+        )
         false
     }
 
     private fun performAccessibilityScrollForward(
         allowViewPager: Boolean = false,
+        packageName: String = INSTAGRAM_PACKAGE,
     ): Boolean = safeUi(false) {
         val root = uiAutomation.rootInActiveWindow ?: return@safeUi false
-        if (root.packageName?.toString() != INSTAGRAM_PACKAGE) return@safeUi false
+        if (root.packageName?.toString() != packageName) return@safeUi false
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         val candidates = mutableListOf<Pair<AccessibilityNodeInfo, Rect>>()
         queue.addLast(root to 0)
@@ -4565,7 +5848,7 @@ class UiAutomatorDriver(
                 try {
                     // Bound hung dumps (Infinix/Transsion "could not get idle state").
                     device.executeShellCommand(
-                        "timeout ${SHELL_DUMP_TIMEOUT_SEC}s uiautomator dump $SHELL_DUMP_PATH",
+                        "timeout ${SHELL_DUMP_TIMEOUT_SEC}s uiautomator dump --compressed $SHELL_DUMP_PATH",
                     )
                     holder[0] = device.executeShellCommand("cat $SHELL_DUMP_PATH").orEmpty()
                 } catch (_: Throwable) {
@@ -4656,15 +5939,39 @@ class UiAutomatorDriver(
     private fun clickInstagramLabelViaShellDump(labels: List<String>): Boolean {
         invalidateShellDumpCache()
         val hits = shellDumpProbeNodes(labels)
-        val best = hits.maxByOrNull { node ->
-            node.bounds.width().toLong() * node.bounds.height().toLong()
-        } ?: return false
+        val best = pickInstagramShellRowTarget(hits)
+            ?: hits.maxByOrNull { node ->
+                node.bounds.width().toLong() * node.bounds.height().toLong()
+            }
+            ?: return false
         Log.i(
             LOG_TAG,
             "event=instagram_shell_dump_click label=${labels.firstOrNull()} " +
                 "bounds=${best.bounds.toShortString()}",
         )
-        return safeClickPoint(best.bounds.centerX(), best.bounds.centerY())
+        return shellTap(best.bounds.centerX(), best.bounds.centerY()) ||
+            safeClickPoint(best.bounds.centerX(), best.bounds.centerY())
+    }
+
+    private fun shellDumpProbeByResourceSuffix(suffix: String): Rect? {
+        val xml = readShellUiDump()
+        if (!xml.contains("<node")) return null
+        val nodeRe = Regex("""<node\b[^>]*>""")
+        val boundsRe = Regex("""bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"""")
+        val needle = "/$suffix"
+        for (match in nodeRe.findAll(xml)) {
+            val tag = match.value
+            val resourceId = shellDumpAttr(tag, "resource-id")
+            if (resourceId != suffix && !resourceId.endsWith(needle)) continue
+            val bounds = boundsRe.find(tag) ?: continue
+            return Rect(
+                bounds.groupValues[1].toInt(),
+                bounds.groupValues[2].toInt(),
+                bounds.groupValues[3].toInt(),
+                bounds.groupValues[4].toInt(),
+            )
+        }
+        return null
     }
 
     private fun swipeXTimeline(): Boolean {
@@ -4946,10 +6253,80 @@ class UiAutomatorDriver(
     }
 
     private fun clickSelector(selector: BySelector): Boolean {
-        val target = device.findObject(selector) ?: return false
-        target.click()
-        waitNavigation()
-        return true
+        val matches = device.findObjects(selector)
+        val target = matches.firstOrNull { value -> value.isClickable }
+            ?: matches.firstOrNull()
+            ?: return false
+        if (safeClick(target)) {
+            waitNavigation()
+            return true
+        }
+        val bounds = safeBounds(target) ?: return false
+        if (
+            safeClickPoint(bounds.centerX(), bounds.centerY()) ||
+            shellTap(bounds.centerX(), bounds.centerY())
+        ) {
+            waitNavigation()
+            return true
+        }
+        return false
+    }
+
+    private fun clickFacebookLabeledControl(
+        labels: List<String>,
+        allowActionClick: Boolean = true,
+    ): Boolean {
+        val expected = labels.map { label -> label.trim().lowercase(Locale.ROOT) }.toSet()
+        fun matchesControl(node: AccessibilityNodeInfo, bounds: Rect): Boolean {
+            val nodeLabels = accessibilityLabels(node)
+            val cls = node.className?.toString().orEmpty()
+            return nodeLabels.any(expected::contains) ||
+                (
+                    expected.contains("menu") &&
+                        bounds.top < 280 &&
+                        bounds.left < 200 &&
+                        bounds.width() in 70..180 &&
+                        (node.isClickable || cls.contains("Button"))
+                    )
+        }
+        if (
+            performAccessibilityClick(
+                FACEBOOK_PACKAGE,
+                allowActionClick = allowActionClick,
+                predicate = ::matchesControl,
+            )
+        ) {
+            waitNavigation()
+            SystemClock.sleep(350)
+            return true
+        }
+        val matches = safeUi(emptyList<UiObject2>()) {
+            labels.flatMap { label ->
+                device.findObjects(By.desc(label)) + device.findObjects(By.text(label))
+            }
+        }
+        val target = matches.firstOrNull { value -> value.isClickable }
+            ?: matches.firstOrNull()
+            ?: return false
+        val bounds = safeBounds(target) ?: return false
+        val tapped = if (allowActionClick) {
+            safeClick(target) ||
+                safeClickPoint(bounds.centerX(), bounds.centerY()) ||
+                shellTap(bounds.centerX(), bounds.centerY())
+        } else {
+            false
+        }
+        if (tapped) {
+            waitNavigation()
+            SystemClock.sleep(350)
+            return true
+        }
+        if (a11yServiceTap(bounds.centerX(), bounds.centerY())) {
+            waitNavigation()
+            SystemClock.sleep(350)
+            return true
+        }
+        return false
     }
 
     private fun hasExactText(labels: List<String>): Boolean =
@@ -4980,6 +6357,7 @@ class UiAutomatorDriver(
 
     private fun hasFacebookOwnProfileProof(): Boolean {
         if (!isForeground(FACEBOOK_PACKAGE)) return false
+        if (isFacebookProfileOnboarding()) return false
         val editVisible = hasExactLabel(EDIT_PROFILE_LABELS)
         if (!editVisible) return false
         val metricVisible = facebookProfileMetricObjects().isNotEmpty()
@@ -5047,8 +6425,10 @@ class UiAutomatorDriver(
 
     private fun hasXOwnProfileProof(): Boolean {
         if (!isForeground(X_PACKAGE)) return false
+        if (xLooksLikeOtherProfile()) return false
         val editVisible = device.hasObject(By.res(X_PACKAGE, "menu_edit_profile")) ||
             hasExactLabel(EDIT_PROFILE_LABELS)
+        if (!editVisible) return false
         val tabsVisible = xProfileTabsVisible()
         val handleVisible = hasAnyResource(X_PACKAGE, X_USERNAME_RESOURCES) ||
             safeUi(false) {
@@ -5057,8 +6437,7 @@ class UiAutomatorDriver(
                         (safeBounds(value)?.top ?: Int.MAX_VALUE) < device.displayHeight / 2
                 }
             }
-        return (editVisible && tabsVisible) || (handleVisible && tabsVisible) ||
-            (editVisible && handleVisible)
+        return tabsVisible || handleVisible
     }
 
     private fun waitForXOwnProfileProof(): Boolean {
@@ -5104,6 +6483,9 @@ class UiAutomatorDriver(
 
     private fun navigationExpired(): Boolean =
         System.currentTimeMillis() >= navigationDeadlineAtMs
+
+    private fun navigationRemainingMs(): Long =
+        (navigationDeadlineAtMs - System.currentTimeMillis()).coerceAtLeast(0L)
 
     private fun waitBudgetMs(requested: Long): Long {
         val remaining = navigationDeadlineAtMs - System.currentTimeMillis()
@@ -5152,10 +6534,13 @@ class UiAutomatorDriver(
 
     private fun deactivateScope(forceLedgerClear: Boolean = false) {
         val hadActiveScope = activePackage != null || activeScope != null
+        val keepArchiveFlag = activeScope == SocialScope.OWN_STORY_ARCHIVE
         activePackage = null
         activeScope = null
         instagramOwnPostActive = false
-        instagramArchiveListActive = false
+        if (!keepArchiveFlag) {
+            instagramArchiveListActive = false
+        }
         xTimelineActive = false
         fbFeedActive = false
         instagramGridScrollBudget = null
@@ -5165,12 +6550,22 @@ class UiAutomatorDriver(
         }
     }
 
+    private fun ensureTextOnlyCoverVisible(packageName: String = activePackage.orEmpty()) {
+        if (!CommunicationPolicy.usesTextOnlyCrawlCover(packageName)) return
+        TextOnlyCrawlCoverClient.show(context, device)
+        SystemClock.sleep(120)
+    }
+
     override fun returnToAgent() {
+        // Keep the TEXT_ONLY white cover up through the finished mapping frame.
+        // Hide only after that so the operator is not left staring at Facebook/X chrome.
         debugMapper.capture("target_automation_finished", activeScope, "finished")
+        TextOnlyCrawlCoverClient.hide(context, device)
         deactivateScope(forceLedgerClear = true)
     }
 
     override fun close() {
+        TextOnlyCrawlCoverClient.hide(context, device)
         store.close()
     }
 
@@ -5196,14 +6591,20 @@ class UiAutomatorDriver(
         private const val PROFILE_LATE_SETTLE_MS = 500L
         private const val INSTAGRAM_ACTION_SETTLE_MS = 300L
         private const val INSTAGRAM_SETTINGS_LOAD_SETTLE_MS = 1_200L
+        private const val INSTAGRAM_SETTINGS_VISIBLE_SETTLE_MS = 350L
         private const val INSTAGRAM_OPTIONS_MENU_WAIT_MS = 12_000L
         private const val INSTAGRAM_SETTINGS_SEARCH_SETTLE_MS = 900L
         private const val INSTAGRAM_SCROLL_SETTLE_MS = 250L
+        private const val INSTAGRAM_YOUR_ACTIVITY_WAIT_MS = 10_000L
+        private const val INSTAGRAM_COMMENTS_LIST_WAIT_MS = 12_000L
+        private const val INSTAGRAM_SHELL_POLL_MS = 280L
         private const val INSTAGRAM_ARCHIVE_SCROLL_SETTLE_MS = 1_200L
         private const val INSTAGRAM_ARCHIVE_LOAD_SETTLE_MS = 1_200L
         private const val INSTAGRAM_ARCHIVE_PROBE_INTERVAL_MS = 300L
         private const val UI_AUTOMATOR_IDLE_TIMEOUT_MS = 250L
         private const val UI_AUTOMATOR_SELECTOR_TIMEOUT_MS = 500L
+        private const val UI_DEVICE_BOUND_MS = 900L
+        private const val UI_DEVICE_SELECTOR_WAIT_MS = 500L
         private const val X_SCROLL_IDLE_MS = 350L
         private const val X_SIGNATURE_IDLE_MS = 250L
         private const val DEFAULT_NAVIGATION_BUDGET_MS = 120_000L
@@ -5221,13 +6622,13 @@ class UiAutomatorDriver(
         private const val ARCHIVE_PAGE_SWIPE_STEPS = 36
         private const val SHELL_DUMP_PATH = "/data/local/tmp/siksik_ig_ui_dump.xml"
         private const val SHELL_DUMP_CACHE_MS = 1_200L
-        private const val SHELL_DUMP_TIMEOUT_SEC = 2
-        private const val SHELL_DUMP_JOIN_MS = 2_800L
+        private const val SHELL_DUMP_TIMEOUT_SEC = 8
+        private const val SHELL_DUMP_JOIN_MS = 11_000L
         private const val SHELL_DUMP_COOLDOWN_MS = 20_000L
         private const val SHELL_DUMP_POLL_MIN_MS = 2_500L
         private const val VISIBLE_GRID_POSTS = 3
         private const val GRID_SCROLL_MIN_POSTS = 3
-        private const val MAX_GRID_SCROLLS = 40
+        private const val MAX_GRID_SCROLLS = 200
         private const val MAX_INSTAGRAM_PROBE_NODES = 512
         private const val MAX_INSTAGRAM_PROFILE_BACK_STEPS = 8
         private const val INSTAGRAM_MENU_OPEN_ATTEMPTS = 2
@@ -5283,6 +6684,62 @@ class UiAutomatorDriver(
             "Sunting profil",
             "Ubah profil",
             "Ubah Profil",
+        )
+        private val INSTAGRAM_COMMENTS_CHROME_LABELS = setOf(
+            "comments",
+            "komentar",
+            "select",
+            "pilih",
+            "back",
+            "kembali",
+            "newest to oldest",
+            "terbaru ke terlama",
+            "all dates",
+            "semua tanggal",
+            "all authors",
+            "semua penulis",
+            "semua pemb",
+            "filter by date",
+            "filter berdasarkan tanggal",
+            "select multiple comments to delete",
+            "pilih beberapa komentar untuk dihapus",
+        )
+        private val INSTAGRAM_COMMENTS_CHROME_FRAGMENTS = listOf(
+            "newest to oldest",
+            "terbaru ke terlama",
+            "all dates",
+            "semua tanggal",
+            "all authors",
+            "semua penulis",
+            "filter by date",
+            "filter berdasarkan",
+            "select multiple",
+            "pilih beberapa",
+        )
+        private val AUTH_WALL_LABELS = listOf(
+            "Log in",
+            "Log In",
+            "Login",
+            "Masuk",
+            "Sign in",
+            "Sign In",
+            "Sign up",
+            "Sign Up",
+            "Create account",
+            "Create Account",
+            "Buat akun",
+            "Buat Akun",
+            "Daftar",
+        )
+        private val AUTH_WALL_FRAGMENTS = listOf(
+            "use phone or email",
+            "gunakan nomor ponsel atau email",
+            "already have an account",
+            "sudah punya akun",
+            "forgot password",
+            "lupa kata sandi",
+            "create your account",
+            "buat akun anda",
         )
         private val SHARE_PROFILE_LABELS = listOf(
             "Share profile",
@@ -5470,6 +6927,25 @@ class UiAutomatorDriver(
             "Arsip cerita",
             "Arsip Cerita",
         )
+        private val INSTAGRAM_HEADER_BACK_LABELS = listOf(
+            "Back",
+            "Kembali",
+            "Navigate up",
+            "Navigate back",
+        )
+        private const val INSTAGRAM_HEADER_BACK_RESOURCE = "action_bar_button_back"
+        private val INSTAGRAM_COMMENTS_LIST_CHROME_LABELS = listOf(
+            "Newest to oldest",
+            "Oldest to newest",
+            "All dates",
+            "All authors",
+            "Select",
+            "Terbaru ke terlama",
+            "Terlama ke terbaru",
+            "Semua tanggal",
+            "Semua penulis",
+            "Pilih",
+        )
         private val STORY_ARCHIVE_NORMALIZED_LABELS =
             STORY_ARCHIVE_LABELS.map { value -> value.lowercase(Locale.ROOT) }.toSet()
         private val INSTAGRAM_NON_STORY_ARCHIVE_LABELS = listOf(
@@ -5578,7 +7054,13 @@ class UiAutomatorDriver(
             "Belum ada balasan",
             "hasn't posted",
             "hasn’t posted",
+            "haven't posted",
+            "haven’t posted",
+            "You haven't posted yet",
+            "You haven’t posted yet",
+            "When you send posts or replies",
             "belum memposting",
+            "Post now",
         )
         private val X_DETAIL_LABELS = listOf("Post", "Postingan")
         private val X_DETAIL_RESOURCES = listOf(
@@ -5591,6 +7073,8 @@ class UiAutomatorDriver(
         private val FACEBOOK_OWN_PROFILE_LABELS = listOf(
             "See your profile",
             "Lihat profil Anda",
+            "Go to profile",
+            "Buka profil",
         )
         private val FACEBOOK_PROFILE_TAB_DESC = listOf(
             "Profile, tab",
@@ -5599,13 +7083,40 @@ class UiAutomatorDriver(
             "Tab Profil",
         )
         private val FACEBOOK_MORE_LABELS = listOf("More", "Lainnya")
+        private val FACEBOOK_MORE_PROFILE_SETTINGS_LABELS = listOf(
+            "More profile settings",
+            "Pengaturan profil lainnya",
+            "Setelan profil lainnya",
+            "See more profile settings",
+            "Lihat pengaturan profil lainnya",
+            "Profile settings",
+            "Pengaturan profil",
+            "Setelan profil",
+        )
+        private val FACEBOOK_ACTIVITY_ALL_FILTER_LABELS = listOf("All", "Semua")
+        private val FACEBOOK_LIKES_REACTIONS_LABELS = listOf(
+            "Likes",
+            "Suka",
+            "Reactions",
+            "Reaksi",
+            "Likes and reactions",
+            "Suka dan reaksi",
+        )
         private val FACEBOOK_ACTIVITY_LOG_LABELS = listOf(
             "Activity log",
+            "Activity Log",
             "Log aktivitas",
+            "Log Aktivitas",
+            "Your activity",
+            "Aktivitas Anda",
+            "Facebook activity",
+            "Aktivitas Facebook",
         )
         private val FACEBOOK_YOUR_ACTIVITY_LABELS = listOf(
             "Your Facebook activity",
             "Aktivitas Facebook Anda",
+            "Your activity",
+            "Aktivitas Anda",
         )
         private val FACEBOOK_YOUR_ACTIVITY_DESC = listOf(
             "Your Facebook activity",
@@ -5634,6 +7145,39 @@ class UiAutomatorDriver(
             "Tidak ada item",
             "No Comments",
             "Belum ada komentar",
+        )
+        private val FACEBOOK_PROFILE_ONBOARDING_FRAGMENTS = listOf(
+            "Selamat datang di profil Anda",
+            "Welcome to your profile",
+            "Pilih kota asal",
+            "Choose your hometown",
+            "Add your hometown",
+            "Tambahkan kota sekarang",
+            "menyiapkan profil Anda",
+            "setting up your profile",
+        )
+        private val FACEBOOK_PROFILE_SETUP_STOP_FRAGMENTS = listOf(
+            "Berhenti menyiapkan profil",
+            "Stop setting up your profile",
+        )
+        private val FACEBOOK_PROFILE_PHOTO_SETUP_LABELS = listOf(
+            "Edit foto profil",
+            "Edit profile photo",
+            "Tambahkan foto",
+            "Add photo",
+        )
+        private val FACEBOOK_PROFILE_ONBOARDING_SKIP_LABELS = listOf(
+            "Lewati",
+            "Skip",
+            "Batal",
+            "Cancel",
+            "Kembali",
+            "Back",
+        )
+        private val FACEBOOK_PROFILE_SETUP_STOP_LABELS = listOf(
+            "BERHENTI",
+            "Berhenti",
+            "Stop",
         )
         private val FACEBOOK_POST_ACTION_DESC = listOf(
             "Comment",
@@ -5708,6 +7252,21 @@ class UiAutomatorDriver(
             "lihat terjemahan",
             "sponsored",
             "disponsori",
+            "all posts",
+            "semua postingan",
+            "filter",
+            "reel",
+            "reels",
+            "live",
+            "siaran langsung",
+            "what's on your mind?",
+            "what’s on your mind?",
+            "apa yang anda pikirkan?",
+            "apa yang anda pikirkan",
+            "manage posts",
+            "kelola postingan",
+            "add to story",
+            "tambahkan ke cerita",
         )
         private val FB_COMMENT_NOISE = setOf(
             "comments",

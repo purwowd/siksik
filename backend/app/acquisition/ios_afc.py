@@ -231,10 +231,8 @@ def _venv_python() -> Path:
 
 
 def _count_for_mode(mode: AcquisitionMode, quick: int, full: int) -> int:
-    """QUICK uses quick cap; FULL with full<=0 means uncapped (0 passed to puller)."""
-    if mode == AcquisitionMode.QUICK:
-        return max(1, quick)
-    return max(0, full)
+    selected = quick if mode == AcquisitionMode.QUICK else full
+    return max(0, selected)
 
 
 def _stage_prepare(staging: Path) -> None:
@@ -744,6 +742,9 @@ async def acquire_ios_afc_docs(
         "UDID": device_id,
         "PATH": f"{Path.home() / '.local' / 'bin'}:{os.environ.get('PATH', '')}",
     }
+    from app.acquisition.time_scope import build_time_scope
+
+    scope = build_time_scope(mode)
     try:
         result = await run_process(
             [
@@ -753,6 +754,8 @@ async def acquire_ios_afc_docs(
                 str(count),
                 "-o",
                 str(work),
+                "--not-before-epoch-s",
+                str(scope.not_before.timestamp()),
             ],
             timeout=settings.ios_afc_timeout_s,
             cwd=_puller_root(),

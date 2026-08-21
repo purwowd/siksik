@@ -76,9 +76,20 @@ class RecordPreprocessor(
 
         when (record.sourceKind) {
             "media_image", "media_video" -> {
-                val cacheKey = contentCacheKey(record, contentSha256)
+                val runOcr = OnDeviceVisionPolicy.shouldRunOcr(
+                    record.sourceKind,
+                    record.displayName,
+                    record.directoryHint,
+                )
+                val cacheKey = contentCacheKey(record, contentSha256, runOcr)
                 val cached = cacheKey?.let(visualResultCache::get)
-                val visual = cached?.asCacheHit() ?: processVisual(input, cancellation).also {
+                val visual = cached?.asCacheHit() ?: processVisual(
+                    input,
+                    cancellation,
+                    runOcr = runOcr,
+                    runModels = false,
+                    skippedOcrReason = "ocr_deferred_selective",
+                ).also {
                     if (cacheKey != null && it.isCacheable()) {
                         visualResultCache.put(cacheKey, it)
                     }
@@ -109,6 +120,8 @@ class RecordPreprocessor(
                         input,
                         cancellation,
                         runOcr = false,
+                        runModels = false,
+                        skippedOcrReason = "ocr_host_deferred",
                     )
                     executions.addAll(visual.executions)
                     payload.put("perceptual_hash", perceptualJson(visual.perceptual))
@@ -206,6 +219,8 @@ class RecordPreprocessor(
         input: PreprocessInput,
         cancellation: CancellationToken,
         runOcr: Boolean = true,
+        runModels: Boolean = true,
+        skippedOcrReason: String = "ocr_deferred_selective",
     ): VisualPreprocessing {
         val reusable = input.bitmapProvider?.let { provider ->
             ReusableBitmapProvider(provider, BuildConfig.MAX_SHARED_VISUAL_PIXELS)
@@ -216,15 +231,25 @@ class RecordPreprocessor(
             val ocrResult = if (runOcr) {
                 ocr.process(visualInput, cancellation)
             } else {
-                deferredHostOcrResult()
+                skippedOcrResult(skippedOcrReason)
             }
-            val faceResult = faces.process(visualInput, cancellation)
-            val objectResult = objects.process(visualInput, cancellation)
+            val faceResult = if (runModels) {
+                faces.process(visualInput, cancellation)
+            } else {
+                skippedFaceResult()
+            }
+            val objectResult = if (runModels) {
+                objects.process(visualInput, cancellation)
+            } else {
+                skippedObjectResult()
+            }
             val executions = buildList {
                 add(perceptual.execution)
                 if (runOcr) add(ocrResult.execution)
-                add(faceResult.execution)
-                add(objectResult.execution)
+                if (runModels) {
+                    add(faceResult.execution)
+                    add(objectResult.execution)
+                }
             }
             VisualPreprocessing(
                 perceptual,
@@ -238,9 +263,13 @@ class RecordPreprocessor(
         }
     }
 
-    private fun contentCacheKey(record: StoredPreprocessRecord, sha256: String?): String? {
+    private fun contentCacheKey(
+        record: StoredPreprocessRecord,
+        sha256: String?,
+        runOcr: Boolean = false,
+    ): String? {
         val hash = sha256?.takeIf(CONTENT_SHA256::matches) ?: return null
-        return "${record.sourceKind}\u001f${record.mimeType.lowercase()}\u001f$hash"
+        return "${record.sourceKind}\u001f${record.mimeType.lowercase()}\u001f$hash\u001f$runOcr"
     }
 
     private fun VisualPreprocessing.isCacheable(): Boolean = executions.none {
@@ -283,16 +312,36 @@ class RecordPreprocessor(
         0,
     )
 
-    private fun deferredHostOcrResult() = TextOcrResult(
+    private fun skippedOcrResult(reason: String) = TextOcrResult(
         ExecutionInfo(
-            EngineIdentity("SIKSIK host social OCR hand-off", "1"),
+            EngineIdentity("SIKSIK host selective OCR", "1"),
             ExecutionStatus.SKIPPED,
             0,
-            listOf("ocr_host_deferred"),
+            listOf(reason),
         ),
         "",
         emptyList(),
         null,
+    )
+
+    private fun skippedFaceResult() = FaceEmbeddingResult(
+        ExecutionInfo(
+            EngineIdentity("MediaPipe face skipped", "1"),
+            ExecutionStatus.SKIPPED,
+            0,
+            listOf("on_device_vision_selective"),
+        ),
+        emptyList(),
+    )
+
+    private fun skippedObjectResult() = ObjectDetectionResult(
+        ExecutionInfo(
+            EngineIdentity("MediaPipe objects skipped", "1"),
+            ExecutionStatus.SKIPPED,
+            0,
+            listOf("on_device_vision_selective"),
+        ),
+        emptyList(),
     )
 
     private fun mergeVisibleText(nodeText: String?, ocrText: String): String? {

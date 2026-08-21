@@ -13,6 +13,15 @@ from typing import Any
 from xml.etree import ElementTree as ET
 
 from lib.apps import resolve_bundle_id
+from lib.ax_text import (
+    capture_text_pages,
+    env_int,
+    extract_x_status_cells,
+    extract_x_statuses,
+    mirror_to_temp_crawl,
+    tap_label,
+    write_jsonl,
+)
 from lib.run_log import x_done, x_phase
 from lib.session import AutomatorSession, default_output_dir
 
@@ -715,6 +724,28 @@ async def _capture_post_screenshots(
     return saved
 
 
+def _status_items_from_dumps(out_dir: Path, prefix: str, pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Parse tweet/reply rows from WDA XML cells, then fall back to page text."""
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    blobs = [path.read_text(encoding="utf-8") for path in sorted(out_dir.glob(f"{prefix}_*.xml"))]
+    if not blobs:
+        blobs = [str(page.get("text") or "") for page in pages]
+    for blob in blobs:
+        statuses = (
+            extract_x_status_cells(blob)
+            if blob.lstrip().startswith("<")
+            else extract_x_statuses(blob)
+        )
+        for status in statuses:
+            key = status.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"index": len(items) + 1, "text": status})
+    return items
+
+
 async def run_x_profile(args) -> int:
     cfg = _load_selectors()
     bundle = resolve_bundle_id("x")
@@ -779,10 +810,63 @@ async def run_x_profile(args) -> int:
         await session.screenshot(out_dir / "profile.png")
         x_phase("screenshot", "profile.png")
 
-        # Warm window size cache sebelum loop scroll (hindari get_window_size lambat tiap swipe)
         await session.window_size()
-        posts = await _capture_post_screenshots(session, out_dir)
-        logger.info("Posts screenshots: %d → %s", len(posts), out_dir.resolve())
+        pages = env_int("IOS_X_MAX_SCREENSHOTS", 3)
+        x_chrome = (
+            "posts",
+            "postingan",
+            "replies",
+            "balasan",
+            "highlights",
+            "sorotan",
+            "media",
+            "likes",
+            "suka",
+            "edit profile",
+            "following",
+            "followers",
+            "mengikuti",
+            "pengikut",
+        )
+        x_phase("posts", "teks timeline Posts (setara Android TEXT_ONLY)")
+        tweets = await capture_text_pages(
+            session,
+            out_dir,
+            prefix="tweet",
+            max_pages=pages,
+            skip=x_chrome,
+            take_screenshot=False,
+        )
+        logger.info("X posts text pages: %d", len(tweets))
+        tweet_items = _status_items_from_dumps(out_dir, "tweet", tweets)
+        write_jsonl(out_dir / "tweet_items.jsonl", tweet_items)
+        write_jsonl(out_dir / "tweet_items.jsonl", tweet_items)
+        logger.info("X parsed tweets: %d", len(tweet_items))
+        try:
+            if await tap_label(session, ("Replies", "Balasan"), timeout=5.0):
+                await session.sleep(0.8)
+                x_phase("replies", "teks tab Replies")
+                replies = await capture_text_pages(
+                    session,
+                    out_dir,
+                    prefix="reply",
+                    max_pages=pages,
+                    skip=x_chrome,
+                    take_screenshot=False,
+                )
+                logger.info("X replies text pages: %d", len(replies))
+                reply_items = _status_items_from_dumps(out_dir, "reply", replies)
+                write_jsonl(out_dir / "reply_items.jsonl", reply_items)
+                write_jsonl(out_dir / "reply_items.jsonl", reply_items)
+            else:
+                logger.warning("Tab Replies tidak ketemu")
+                write_jsonl(out_dir / "reply.jsonl", [])
+        except Exception:  # noqa: BLE001
+            logger.warning("X replies skipped — posts already captured")
+            write_jsonl(out_dir / "reply.jsonl", [])
+        dest = mirror_to_temp_crawl(out_dir, "x-profile", session_id=os.environ.get("IOS_TEMP_CRAWL_SESSION", ""))
+        if dest:
+            logger.info("temp_crawl copy → %s", dest)
         x_done(out_dir, ok=True)
         return 0
     except Exception as exc:  # noqa: BLE001

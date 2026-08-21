@@ -65,7 +65,9 @@ class SelectionScorer(
             representative != input.recordId
         val requiredSocialScope = input.sourceKind == "visible_ui" &&
             input.socialScope in policy.requiredSocialScopes
+        val inScopeData = input.sourceKind in SelectionPolicyCodec.SOURCE_KINDS
         if (requiredSocialScope) matchedRules.add("scope:${input.socialScope}")
+        if (inScopeData) matchedRules.add("in_scope_data")
         if (duplicateGroup != null) {
             matchedRules.add(
                 if (isNonRepresentative) "duplicate:non_representative" else
@@ -75,10 +77,11 @@ class SelectionScorer(
 
         val boundedScore = score.coerceIn(0, MAX_BASIS_POINTS)
         val thresholdMet = boundedScore >= policy.thresholdBasisPoints
-        val autoSelected = thresholdMet || requiredSocialScope
+        val autoSelected = thresholdMet || requiredSocialScope || inScopeData
         val reasons = buildList {
             add(if (thresholdMet) "threshold_met" else "threshold_not_met")
             if (requiredSocialScope) add("required_social_scope")
+            if (inScopeData) add("in_scope_data")
             if (matchedKeywords.isNotEmpty()) add("keyword_match")
             if (modelSignals.isNotEmpty()) add("model_signal")
             if (isNonRepresentative) add("duplicate_non_representative")

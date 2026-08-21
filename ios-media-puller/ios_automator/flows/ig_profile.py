@@ -13,6 +13,7 @@ from typing import Any
 from xml.etree import ElementTree as ET
 
 from lib.apps import resolve_bundle_id
+from lib.ax_text import env_int, mirror_to_temp_crawl, tap_label, xml_lines, write_jsonl
 from lib.run_log import ig_done, ig_phase
 from lib.session import AutomatorSession, default_output_dir
 
@@ -171,6 +172,41 @@ async def _wait_and_tap_profile(session: AutomatorSession, ig: dict) -> None:
 
     logger.warning("profile tab belum ready dalam %.1fs — fallback tap_any", max_wait)
     await _tap_any(session, block)
+
+
+async def _wait_profile_ready(session: AutomatorSession, ig: dict) -> None:
+    """Pastikan layar profil sendiri benar-benar terbuka sebelum dibaca.
+
+    IG yang baru cold-start menelan tap tab Profile pertama; kalau tetap dibaca,
+    yang terambil isi story tray feed (username=avatar_view). Poll marker profil
+    dan retap tab selama feed masih terlihat.
+    """
+    timeout = float(ig.get("profile_ready_wait_sec", 40.0))
+    poll = float(ig.get("profile_ready_poll_sec", 1.0))
+    max_retaps = int(ig.get("profile_ready_retaps", 3))
+    markers = ig.get("profile_marker", {}).get("strategies", [])
+    deadline = time.time() + timeout
+    retaps = 0
+    while time.time() < deadline:
+        for strat in markers:
+            if await _element_id(session, strat["using"], strat["value"]):
+                logger.info("profil siap — marker %s", strat["value"])
+                return
+        joined = " | ".join(await _page_texts(session)).lower()
+        if "edit profile" in joined or "edit profil" in joined:
+            logger.info("profil siap — tombol Edit profile terlihat")
+            return
+        if "main-feed-screen" not in joined:
+            logger.info("feed tidak terlihat lagi — lanjut baca profil")
+            return
+        if retaps < max_retaps:
+            retaps += 1
+            logger.warning("masih di feed — retap tab Profile (%d)", retaps)
+            await _wait_and_tap_profile(session, ig)
+            await session.sleep(1.5)
+            continue
+        await session.sleep(poll)
+    raise RuntimeError(f"Profil IG tidak terbuka dalam {timeout:.0f}s (masih di feed)")
 
 
 async def _wait_home_optional(session: AutomatorSession, ig: dict) -> None:
@@ -532,25 +568,24 @@ def _archive_banner_visible(xml: str) -> bool:
 
 
 def _archive_scroll_direction() -> str:
-    """Arah scroll WDA: 'up' = jari ke bawah (default). 'down' = jari ke atas."""
-    raw = os.environ.get("IOS_ARCHIVE_SCROLL_DIRECTION", "up").strip().lower()
-    # Alias user-friendly
+    """WDA direction used only as fallback. Default 'down' = finger up = more grid."""
+    raw = os.environ.get("IOS_ARCHIVE_SCROLL_DIRECTION", "down").strip().lower()
     if raw in {"bawah", "finger-down", "finger_down"}:
         return "up"
     if raw in {"atas", "finger-up", "finger_up"}:
         return "down"
     if raw in {"up", "down"}:
         return raw
-    return "up"
+    return "down"
 
 
 def _archive_max_screenshots() -> int:
-    raw = os.environ.get("IOS_ARCHIVE_MAX_SCREENSHOTS", "5").strip()
+    # Android story archive is 3 extra captures; default 3 screenshots here.
+    raw = os.environ.get("IOS_ARCHIVE_MAX_SCREENSHOTS", "3").strip()
     try:
         n = int(raw)
     except ValueError:
-        n = 5
-    # FULL sessions may request a high budget; keep a hard ceiling for safety.
+        n = 3
     return max(1, min(n, 500))
 
 
@@ -820,6 +855,14 @@ async def _capture_archive_screenshots_once(
         path = out_dir / name
         await session.screenshot(path)
         saved.append(name)
+        try:
+            xml = await session.source_xml()
+            (out_dir / f"{prefix}_{i:02d}.txt").write_text(
+                "\n".join(xml_lines(xml, skip=IG_CHROME)),
+                encoding="utf-8",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         ig_phase("screenshot", f"{name} ({i}/{max_shots})")
 
         data = path.read_bytes()
@@ -832,8 +875,8 @@ async def _capture_archive_screenshots_once(
         if i >= max_shots:
             break
 
-        logger.info("Archive scroll %s (%s %d/%d)…", scroll_dir, prefix, i, max_shots)
-        await session.scroll(scroll_dir, distance=0.55, duration=0.35)
+        logger.info("Archive scroll feed (%s %d/%d)…", prefix, i, max_shots)
+        await session.scroll_feed(distance=0.65, duration=0.35)
         await session.sleep(pause)
 
     return saved
@@ -911,6 +954,214 @@ async def _capture_archive_screenshots(
     return saved
 
 
+IG_CHROME = (
+    "instagram",
+    "profile",
+    "profil",
+    "edit profile",
+    "edit profil",
+    "share profile",
+    "posts",
+    "postingan",
+    "followers",
+    "pengikut",
+    "following",
+    "mengikuti",
+    "reels",
+    "home",
+    "beranda",
+    "search",
+    "cari",
+    "menu",
+    "archive",
+    "arsip",
+    "back",
+    "kembali",
+)
+YOUR_ACTIVITY_LABELS = (
+    "Your activity",
+    "Aktivitas Anda",
+    "Aktivitas kamu",
+    "Your Activity",
+)
+INTERACTIONS_LABELS = ("Interactions", "Interaksi")
+COMMENTS_LABELS = ("Comments", "Komentar")
+BACK_LABELS = ("Back", "Kembali", "Close", "Tutup", "Done", "Selesai")
+
+
+async def _tap_nav_back(session: AutomatorSession) -> None:
+    if await tap_label(session, BACK_LABELS, timeout=1.5):
+        return
+    size = await session.window_size()
+    await session.tap_xy(max(12, int(size["width"] * 0.07)), max(24, int(size["height"] * 0.08)))
+
+
+async def _return_to_profile(session: AutomatorSession, ig: dict) -> None:
+    for _ in range(6):
+        xml = await session.source_xml()
+        blob = xml.lower()
+        if "edit profile" in blob or "edit profil" in blob or "share profile" in blob:
+            return
+        await _tap_nav_back(session)
+        await session.sleep(0.6)
+    await _wait_and_tap_profile(session, ig)
+    await session.sleep(0.8)
+
+
+async def _capture_profile_posts(
+    session: AutomatorSession,
+    ig: dict,
+    out_dir: Path,
+    profile: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Scroll the profile grid if the account has posts (Android OWN_POSTS)."""
+    post_count = profile.get("posts")
+    extra = _extra_post_scrolls(post_count)
+    if extra < 0:
+        logger.info("IG posts=0 — skip grid scroll")
+        write_jsonl(out_dir / "posts.jsonl", [])
+        return []
+    max_shots = 1 + extra
+    env_cap = env_int("IOS_POST_MAX_SCREENSHOTS", max(1, max_shots))
+    max_shots = min(max_shots, env_cap)
+    xml = await session.source_xml()
+    low = xml.lower()
+    if any(
+        marker in low
+        for marker in (
+            "share photos",
+            "no posts yet",
+            "belum ada postingan",
+            "when you share",
+        )
+    ) and not post_count:
+        write_jsonl(out_dir / "posts.jsonl", [])
+        return []
+    # Android: stay on own profile, capture current viewport (header+grid),
+    # then swipe 78%→28% and capture again. Do not open posts. Do not pre-scroll.
+    rows: list[dict[str, Any]] = []
+    prev_hash: str | None = None
+    for index in range(1, max_shots + 1):
+        xml = await session.source_xml()
+        (out_dir / f"post_{index:02d}.xml").write_text(xml, encoding="utf-8")
+        lines = xml_lines(xml, skip=IG_CHROME)
+        text = "\n".join(lines)
+        shot = out_dir / f"post_{index:02d}.png"
+        await session.screenshot(shot)
+        (out_dir / f"post_{index:02d}.txt").write_text(text, encoding="utf-8")
+        digest = hashlib.sha256(shot.read_bytes()).hexdigest()
+        rows.append({"index": index, "screenshot": shot.name, "text": text, "sha256": digest})
+        ig_phase("posts", f"{shot.name} ({index}/{max_shots})")
+        if prev_hash is not None and digest == prev_hash:
+            logger.info("IG grid screenshot unchanged — stop posts")
+            break
+        prev_hash = digest
+        if index >= max_shots:
+            break
+        await session.scroll_feed(duration=0.35)
+        await session.sleep(0.8)
+    write_jsonl(out_dir / "posts.jsonl", rows)
+    return rows
+
+
+def _extra_post_scrolls(post_count: Any) -> int:
+    """Android estimateInstagramGridScrolls: 0 extra if posts < 3 or <= 3 visible."""
+    try:
+        count = int(post_count)
+    except (TypeError, ValueError):
+        return -1
+    if count <= 0:
+        return -1
+    if count <= 3:
+        return 0
+    pages = (count + 3 - 1) // 3
+    return min(40, max(1, pages - 1))
+
+
+async def _open_and_capture_archive(
+    session: AutomatorSession,
+    ig: dict,
+    out_dir: Path,
+) -> list[str]:
+    """Open Archive without a 45s Settings wait; capture 3 screens if possible."""
+    await _tap_any(session, ig["menu_button"])
+    await session.sleep(1.0)
+    opened = await tap_label(session, ("Archive", "Arsip"), timeout=4.0)
+    if not opened:
+        await tap_label(
+            session,
+            (
+                "Settings and activity",
+                "Pengaturan dan aktivitas",
+                "Settings and privacy",
+                "Pengaturan dan privasi",
+            ),
+            timeout=3.0,
+        )
+        await session.sleep(0.6)
+        for _ in range(5):
+            if await tap_label(session, ("Archive", "Arsip"), timeout=1.8):
+                opened = True
+                break
+            await session.scroll_feed(duration=0.28)
+            await session.sleep(0.35)
+    if not opened:
+        logger.warning("IG Archive row tidak ketemu")
+        return []
+    await session.sleep(0.8)
+    try:
+        await _wait_archive_loaded(session, ig)
+    except Exception:  # noqa: BLE001
+        logger.warning("Archive load wait skipped")
+    shots = await _capture_archive_screenshots(session, ig, out_dir)
+    ig_phase("screenshot", f"archive ×{len(shots)}")
+    return shots
+
+
+async def _capture_comments(session: AutomatorSession, ig: dict, out_dir: Path) -> list[dict[str, Any]]:
+    """Settings → Your activity → Comments (Android OWN_COMMENTS)."""
+    max_shots = env_int("IOS_COMMENT_MAX_SCREENS", 3)
+    await _tap_any(session, ig["menu_button"])
+    await session.sleep(1.0)
+    opened_activity = await tap_label(session, YOUR_ACTIVITY_LABELS, timeout=4.0)
+    if not opened_activity:
+        for _ in range(6):
+            await session.scroll_feed(distance=0.45, duration=0.28)
+            await session.sleep(0.35)
+            if await tap_label(session, YOUR_ACTIVITY_LABELS, timeout=1.6):
+                opened_activity = True
+                break
+    if not opened_activity:
+        logger.warning("Your activity tidak ketemu — skip comments")
+        write_jsonl(out_dir / "comments.jsonl", [])
+        return []
+    await session.sleep(1.2)
+    if not await tap_label(session, COMMENTS_LABELS, timeout=5.0):
+        await tap_label(session, INTERACTIONS_LABELS, timeout=4.0)
+        await session.sleep(0.8)
+        if not await tap_label(session, COMMENTS_LABELS, timeout=6.0):
+            logger.warning("Comments row tidak ketemu")
+            write_jsonl(out_dir / "comments.jsonl", [])
+            return []
+    await session.sleep(1.0)
+    rows: list[dict[str, Any]] = []
+    for index in range(1, max_shots + 1):
+        xml = await session.source_xml()
+        lines = xml_lines(xml, skip=IG_CHROME + YOUR_ACTIVITY_LABELS + COMMENTS_LABELS)
+        text = "\n".join(lines)
+        shot = out_dir / f"comment_{index:02d}.png"
+        await session.screenshot(shot)
+        (out_dir / f"comment_{index:02d}.txt").write_text(text, encoding="utf-8")
+        rows.append({"index": index, "screenshot": shot.name, "text": text})
+        ig_phase("comments", f"{shot.name} ({index}/{max_shots})")
+        if index >= max_shots:
+            break
+        await session.scroll_feed(distance=0.62, duration=0.35)
+        await session.sleep(0.8)
+    write_jsonl(out_dir / "comments.jsonl", rows)
+    return rows
+
+
 async def run_ig_profile(args) -> int:
     ig = _load_selectors()
     bundle = resolve_bundle_id("instagram")
@@ -930,6 +1181,7 @@ async def run_ig_profile(args) -> int:
         logger.info("Tap Profile tab (segera setelah tab bar siap)")
         await _wait_and_tap_profile(session, ig)
         await session.sleep(0.8)
+        await _wait_profile_ready(session, ig)
 
         profile = await _read_profile(session, ig, out_dir)
         ig_phase(
@@ -951,21 +1203,27 @@ async def run_ig_profile(args) -> int:
             ig_done(out_dir, ok=True)
             return 0
 
-        ig_phase("archive", "tap Menu / Settings")
-        logger.info("Tap Menu / Settings")
-        await _tap_any(session, ig["menu_button"])
-        await session.sleep(1.2)
-        # IG iOS: Settings shell can show for ~10–20s before Archive row is in AX.
-        await _wait_settings_menu_ready(session, ig)
+        ig_phase("posts", "scroll grid jika ada postingan")
+        await _capture_profile_posts(session, ig, out_dir, profile)
 
-        logger.info("Tap Archive")
-        await _tap_any(session, ig["archive_item"], timeout=12.0)
-        await session.sleep(0.5)
-        ig_phase("archive", "tunggu loading selesai")
-        await _wait_archive_loaded(session, ig)
-        shots = await _capture_archive_screenshots(session, ig, out_dir)
-        ig_phase("screenshot", f"archive ×{len(shots)}")
+        ig_phase("archive", "cek Archive (3 scroll)")
+        try:
+            await _open_and_capture_archive(session, ig, out_dir)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("IG archive skipped: %s", exc)
+            ig_phase("archive", f"dilewati: {exc}")
 
+        await _return_to_profile(session, ig)
+        ig_phase("comments", "cek Comments (3 scroll)")
+        try:
+            await _capture_comments(session, ig, out_dir)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("IG comments skipped: %s", exc)
+            write_jsonl(out_dir / "comments.jsonl", [])
+
+        dest = mirror_to_temp_crawl(out_dir, "ig-profile", session_id=os.environ.get("IOS_TEMP_CRAWL_SESSION", ""))
+        if dest:
+            logger.info("temp_crawl copy → %s", dest)
         logger.info("Done → %s", out_dir.resolve())
         ig_done(out_dir, ok=True)
         return 0

@@ -2,6 +2,7 @@ package com.siksik.agent.source.inventory
 
 import android.webkit.MimeTypeMap
 import java.security.MessageDigest
+import java.util.Locale
 
 object InventoryPolicy {
     val documentExtensions = setOf("pdf", "doc", "docx", "xls", "xlsx", "csv", "txt", "rtf")
@@ -17,6 +18,14 @@ object InventoryPolicy {
         "rtf" to "application/rtf",
     )
     private val documentMimes = documentMimeByExtension.values + "text/rtf"
+    private val favoriteTokens = listOf(
+        "favorite",
+        "favorites",
+        "favourite",
+        "favourites",
+        "favorit",
+    )
+    val favoriteSqlLikePatterns = listOf("%favorit%", "%favourite%")
     private val publicPathFragments = mapOf(
         SourceAdapter.PUBLIC_WHATSAPP to listOf(
             "android/media/com.whatsapp/whatsapp/media/",
@@ -117,6 +126,13 @@ object InventoryPolicy {
     }
 
     fun extension(displayName: String): String = displayName.substringAfterLast('.', "").lowercase()
+
+    fun looksFavorite(vararg parts: String?): Boolean {
+        val haystack = parts.joinToString(" ") { part -> part.orEmpty() }
+            .lowercase(Locale.ROOT)
+        if (haystack.isBlank()) return false
+        return favoriteTokens.any { token -> haystack.contains(token) }
+    }
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8))

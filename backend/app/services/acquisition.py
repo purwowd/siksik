@@ -32,9 +32,24 @@ from app.models.schemas import (
 )
 
 TEXT_EXT = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm", ".log", ".vcard", ".vcf"}
-DOC_EXT = {".pdf", ".doc", ".docx", ".rtf", ".odt"}
+DOC_EXT = {
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".rtf",
+    ".odt",
+    ".xls",
+    ".xlsx",
+    ".ods",
+    ".ppt",
+    ".pptx",
+    ".pages",
+    ".numbers",
+    ".key",
+}
 IMG_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".bmp", ".imgmeta"}
 VID_EXT = {".mp4", ".mov", ".mkv", ".avi", ".3gp", ".webm", ".vidmeta"}
+AUDIO_EXT = {".mp3", ".m4a", ".aac", ".wav", ".ogg", ".opus", ".flac", ".amr"}
 CHAT_HINTS = ("whatsapp", "telegram", "wa-", "msgstore", "chat")
 logger = logging.getLogger("siksik.services.acquisition")
 
@@ -49,7 +64,12 @@ _JUNK_BASENAMES = frozenset(
         ".thumbnails",
     }
 )
-_MEDIA_EXT = IMG_EXT | VID_EXT | TEXT_EXT | DOC_EXT
+_MEDIA_EXT = IMG_EXT | VID_EXT | AUDIO_EXT | TEXT_EXT | DOC_EXT
+
+
+def looks_favorite_path(path_str: str) -> bool:
+    value = path_str.casefold()
+    return any(token in value for token in ("favorite", "favourite", "favorit"))
 
 
 def _is_junk_media_path(path_str: str) -> bool:
@@ -247,6 +267,8 @@ def _classify_source(path_str: str) -> str:
     # Prefer media type from extension so Download/*.mp4 tetap dianalisis sebagai video
     if ext in VID_EXT:
         return "video"
+    if ext in AUDIO_EXT:
+        return "audio"
     if ext in IMG_EXT:
         if any(x in low for x in ("whatsapp", "/wa/")):
             return "whatsapp"
@@ -277,6 +299,8 @@ def guess_mime(path: Path) -> str:
         return "image/jpeg"
     if ext in VID_EXT:
         return "video/mp4"
+    if ext in AUDIO_EXT:
+        return "audio/mpeg"
     if ext in TEXT_EXT or ext in DOC_EXT:
         return "text/plain"
     return "application/octet-stream"
@@ -394,6 +418,7 @@ async def _adb_list_files(
     remote_dirs: list[str],
     limit: int,
     transport: AsyncAdbTransport | None = None,
+    not_before_epoch_s: float | None = None,
 ) -> list[str]:
     """List files via ADB and prioritize relevant paths and extensions."""
     scored: list[tuple[float, str]] = []
@@ -436,6 +461,13 @@ async def _adb_list_files(
                     path = line
             if not path or path.endswith("/"):
                 continue
+            if (
+                not_before_epoch_s is not None
+                and mtime > 0
+                and mtime < not_before_epoch_s
+                and not looks_favorite_path(path)
+            ):
+                continue
             if _is_junk_media_path(path):
                 continue
             low = path.lower()
@@ -464,7 +496,7 @@ async def _adb_list_files(
             continue
         seen.add(p)
         uniq.append(p)
-        if len(uniq) >= limit:
+        if limit > 0 and len(uniq) >= limit:
             break
     return uniq
 
@@ -490,7 +522,16 @@ async def acquire_android_adb(
     limit = settings.adb_max_files_quick if mode == AcquisitionMode.QUICK else settings.adb_max_files_full
 
     await on_progress(SessionStatus.ACQUIRING, 8, f"Listing file via ADB ({device_id})…", acquisition_method="adb")
-    remote_files = await _adb_list_files(device_id, paths, limit, transport)
+    from app.acquisition.time_scope import build_time_scope
+
+    not_before = build_time_scope(mode).not_before.timestamp()
+    remote_files = await _adb_list_files(
+        device_id,
+        paths,
+        limit,
+        transport,
+        not_before_epoch_s=not_before,
+    )
     listed = len(remote_files)
     if listed == 0:
         raise RuntimeError(
@@ -581,11 +622,17 @@ async def acquire_ios_libimobiledevice(
         p
         for p in backup_dir.rglob("*")
         if p.is_file()
-        and p.suffix.lower() in (IMG_EXT | VID_EXT | DOC_EXT | TEXT_EXT | {".heic"})
+        and p.suffix.lower() in (IMG_EXT | VID_EXT | AUDIO_EXT | DOC_EXT | TEXT_EXT | {".heic"})
         and p.suffix.lower() not in {".db", ".sqlite"}
     ]
-    if mode == AcquisitionMode.QUICK:
-        candidates = candidates[: settings.adb_max_files_quick]
+    from app.acquisition.time_scope import build_time_scope
+
+    not_before = build_time_scope(mode).not_before.timestamp()
+    candidates = [
+        path
+        for path in candidates
+        if path.stat().st_mtime >= not_before or looks_favorite_path(str(path))
+    ]
 
     total = max(len(candidates), 1)
     for idx, src in enumerate(candidates, start=1):
@@ -637,15 +684,20 @@ def _zip_skip(name: str) -> bool:
 
 def _bucket_for_file(name: str) -> str:
     ext = Path(name).suffix.lower()
+    low = name.lower()
+    if ext in {".eml", ".msg"} or "email" in low or "gmail" in low:
+        return "email"
     if ext in VID_EXT:
         return "video"
+    if ext in AUDIO_EXT:
+        return "audio"
     if ext in IMG_EXT:
         return "gallery"
     if ext in TEXT_EXT | DOC_EXT:
         return "documents"
     # path hints
     source = _classify_source(name)
-    if source in {"gallery", "video", "documents", "whatsapp", "telegram"}:
+    if source in {"gallery", "video", "audio", "documents", "whatsapp", "telegram", "email"}:
         return "gallery" if source in {"whatsapp", "telegram"} else source
     return "other"
 
@@ -686,7 +738,7 @@ async def acquire_from_zip(
             members = [m for m in zf.infolist() if not m.is_dir() and not _zip_skip(m.filename)]
             # Deteksi apakah ZIP sudah terstruktur (gallery/video/…)
             tops = {Path(m.filename).parts[0].lower() for m in members if Path(m.filename).parts}
-            structured = bool(tops & {"gallery", "video", "documents", "dcim", "pictures", "download", "movies"})
+            structured = bool(tops & {"gallery", "video", "documents", "dcim", "pictures", "download", "movies", "email", "gmail"})
 
             for i, member in enumerate(members):
                 raw_name = member.filename.replace("\\", "/")
@@ -698,7 +750,7 @@ async def acquire_from_zip(
                     continue
 
                 if structured:
-                    # Normalisasi DCIM/Pictures → gallery, Movies → video, Download → documents
+                    # Normalisasi DCIM/Pictures → gallery, Movies → video, Download → documents, Email → email
                     parts = list(Path(raw_name).parts)
                     top = parts[0].lower() if parts else "other"
                     if top in {"dcim", "pictures", "camera", "screenshot", "screenshots"}:
@@ -710,7 +762,10 @@ async def acquire_from_zip(
                     elif top in {"download", "downloads", "documents", "docs"}:
                         bucket = "documents"
                         rel = Path(bucket, *parts[1:]) if len(parts) > 1 else Path(bucket, target_name)
-                    elif top in {"gallery", "video", "documents", "other", "whatsapp", "telegram"}:
+                    elif top in {"email", "gmail", "mail", "emails"}:
+                        bucket = "email"
+                        rel = Path(bucket, *parts[1:]) if len(parts) > 1 else Path(bucket, target_name)
+                    elif top in {"gallery", "video", "documents", "other", "whatsapp", "telegram", "email"}:
                         rel = Path(*parts)
                     else:
                         bucket = _bucket_for_file(raw_name)
@@ -843,6 +898,75 @@ async def acquire_dispatch(
                 ),
                 provider=result.provider,
             )
+
+    if (
+        settings.gmail_acquisition_enabled
+        and (device_type == DeviceType.ANDROID or simulated)
+        and not ((result.staging / "email").is_dir() and any((result.staging / "email").iterdir()))
+    ):
+        from app.acquisition.gmail_service import GmailAcquisitionService
+
+        try:
+            token = None
+            account_name = None
+            if not simulated and agent_runner is not None:
+                from app.acquisition.runtime import agent_runtime_registry
+
+                runtime = await agent_runtime_registry.get(session_id)
+                account_name = runtime.google_account
+                token = runtime.google_token
+                if not token:
+                    from app.acquisition.agent_client import AgentClient, AgentClientConfig
+
+                    runtime_client = AgentClient(
+                        runtime.forward_host_port,
+                        runtime.token,
+                        config=AgentClientConfig(
+                            timeout_seconds=settings.android_agent_request_timeout_s,
+                            max_attempts=settings.android_agent_request_attempts,
+                            max_response_bytes=(
+                                settings.android_agent_max_response_mb * 1024 * 1024
+                            ),
+                        ),
+                    )
+                    if not account_name:
+                        accounts = await runtime_client.list_google_accounts(session_id)
+                        if accounts:
+                            account_name = accounts[0].name
+                    if account_name:
+                        token = await runtime_client.get_google_auth_token(
+                            session_id,
+                            account_name,
+                            scope=settings.resolved_gmail_scope,
+                        )
+                        if not token and settings.resolved_gmail_scope != settings.gmail_scope:
+                            token = await runtime_client.get_google_auth_token(
+                                session_id,
+                                account_name,
+                                scope=settings.gmail_scope,
+                            )
+            gmail_svc = GmailAcquisitionService()
+            gmail_count, _ = await gmail_svc.acquire(
+                session_id=session_id,
+                staging=result.staging,
+                mode=mode,
+                token=token,
+                account_name=account_name,
+                simulated=simulated,
+                on_progress=on_progress,
+                request_id=context.request_id,
+            )
+            if gmail_count > 0:
+                result = AcquisitionResult(
+                    staging=result.staging,
+                    item_count=result.item_count + gmail_count,
+                    duration_ms=result.duration_ms,
+                    method=f"{result.method}+gmail_api",
+                    provider=result.provider,
+                )
+        except Exception as exc:
+            logger.warning("gmail_acquisition_dispatch_skipped", extra={"error": str(exc)})
+
     return result.as_legacy_tuple()
 
 
@@ -948,10 +1072,14 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                 captured_year = year if 1970 <= year <= 9999 else None
             except ValueError:
                 captured_year = None
+        from app.services.gallery import gallery_meta_from_canonical
+
+        gallery_meta = gallery_meta_from_canonical(payload)
         crawl_capture_meta[record_id] = {
             "captured_at": captured_at if isinstance(captured_at, str) else None,
             "captured_year": captured_year,
             "date_source": "android_agent_canonical",
+            **gallery_meta,
         }
 
     async def one(p: Path) -> tuple:
@@ -1001,6 +1129,7 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                 capture = capture_meta(p)
             meta = {"ext": p.suffix.lower(), **capture}
             if artifact is not None:
+                capture_extra = crawl_capture_meta.get(str(artifact["record_id"]), {})
                 meta.update(
                     {
                         "acquisition_method": "android_agent_direct_manifest",
@@ -1008,6 +1137,13 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         "crawl_artifact_role": artifact["role"],
                         "social_scope": artifact["social_scope"],
                         "source_app": artifact["source_app"],
+                        "directory_hint": capture_extra.get("directory_hint"),
+                        "display_name": capture_extra.get("display_name"),
+                        "is_favorite": bool(capture_extra.get("is_favorite")),
+                        "date_added": capture_extra.get("date_added"),
+                        "date_modified": capture_extra.get("date_modified"),
+                        "date_taken": capture_extra.get("date_taken"),
+                        "album": capture_extra.get("album"),
                     }
                 )
             if recovered is not None:
@@ -1031,6 +1167,21 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         "ios_original_filename": ios_artifact.original_filename,
                     }
                 )
+            from app.services.gallery import album_leaf, looks_favorite
+
+            if not meta.get("album"):
+                hint = meta.get("directory_hint")
+                meta["album"] = album_leaf(
+                    hint if isinstance(hint, str) else None,
+                    rel,
+                    str(source),
+                )
+            meta["is_favorite"] = bool(meta.get("is_favorite")) or looks_favorite(
+                rel,
+                str(meta.get("album") or ""),
+                str(meta.get("display_name") or ""),
+                str(meta.get("directory_hint") or ""),
+            )
             if mime == "application/vnd.siksik.crawl-record+json":
                 from app.acquisition.agent_client import InventoryRecordV1
 

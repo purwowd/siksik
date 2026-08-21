@@ -1,10 +1,669 @@
 # SIKSIK Flow Implementation Changelog
 
-- Work period: 2026-07-16 to 2026-08-14
+- Work period: 2026-07-16 to 2026-08-20
 - Status: Unreleased local changes
-- Git baseline: `9f0d91c`
+- Git baseline: `ac8d1fc`
 - Android agent: `0.7.0`, API `1.0`
 - Primary project: `/Users/macbook/Documents/Product1/siksik`
+
+## 2026-08-21: IG comments body text wired into analysis
+
+- Instagram `own_comments` now merges UiDevice TextView bodies into capture
+  nodes and `normalized_text` (chrome labels stripped for signature/body).
+- Host social OCR cleans comment chrome before enrichment; analysis merges
+  `social_snapshot_enrichments.ocr_text` into visible_ui crawl-record text and
+  OCR findings so comment bodies are not skipped when a11y text is chrome-only.
+
+## 2026-08-21: Auth-wall skip + X replies gate + FB activity hub
+
+- Unsigned X/FB/IG sessions fail with explicit `account_not_signed_in` instead of
+  a generic launch timeout. Credential Manager overlays are dismissed with Back
+  (no auto-login). Host/engine map that reason to `failed`.
+- X Replies require tab confirmation (`xProfileTabConfirmed` /
+  `xRepliesSurfaceReady`) so Posts timeline is not stored as replies.
+- Facebook comments hub accepts broader Activity Log / Your activity labels and
+  verifies Comments and reactions before capture.
+
+## 2026-08-20: Exhaust scrolls + long host timeout + TEXT_ONLY a11y preflight
+
+- Completeness over soft budgets: IG comments, X tweets/replies, and FB
+  posts/comments use exhaust scroll budgets (200) with stagnant/empty end
+  detection; IG archive stays exactly 3; IG posts still page from profile
+  post count with a higher grid ceiling (200).
+- Host `target_timeout_s` default 1800s; navigation deadline follows that
+  timeout (no 240s cap). Feed scroll/capture no longer aborts solely because
+  the navigation deadline is near.
+- TEXT_ONLY targets (X/FB) fail fast with `accessibility_required` when
+  SIKSIK Agent accessibility is not granted before instrumentation.
+- Contract/unit tests updated for exhaust constants, archive=3, and deadline
+  policy. Sacred IG click ladders and scope order unchanged.
+
+## 2026-08-20: Restore TEXT_ONLY build, all-source windows, and responsive previews
+
+- Completed the Android TEXT_ONLY contract with shared cover/tap actions,
+  Facebook/X-only cover policy, accessibility service lifecycle, bounded gesture
+  dispatch, and the internal receiver. Both APK modules now compile, test, and
+  assemble with the cover enabled; Instagram remains uncovered.
+- Selection policy v5 now automatically includes every in-scope Android source
+  kind after inventory time filtering: image, video, audio, document, SMS,
+  contact, visible UI, and notification. QUICK remains a three-calendar-month
+  window and FULL a six-calendar-month window. The legacy Android and active iOS
+  media/document/message paths apply the same cutoff and no longer use default
+  per-type count caps. QUICK video analysis no longer stops at 80 files.
+- Gmail now follows every `nextPageToken` inside the mode cutoff, handles nested
+  attachments, uses the bound agent runtime correctly on fallback, and defaults
+  to no message-count cap. Rendered email body content is converted to escaped
+  readable text; source HTML is not inserted into the preview document.
+- Gallery now separates the device-facing logical path from the staging preview
+  path. Nested device paths under Download resolve to the Download album and a
+  `Download/<name>` display path while media still opens from its verified
+  staging file. Audio, documents, text, SMS, contacts, notifications, and social
+  records are included; binary canonical duplicates, screenshots, and Gmail
+  metadata JSON are excluded.
+- Video and audio are no longer downloaded eagerly by every Gallery/Findings
+  row. A ten-minute, user/session/path-bound media ticket feeds Starlette range
+  streaming only after the operator clicks the item. OCR and structured JSON
+  previews extract readable text instead of rendering raw JSON. Email/PDF HTML
+  previews run in a sandboxed iframe.
+- Added coverage for semantic Download paths, non-image Gallery records, exact
+  three/six calendar-month edges, safe email rendering, Gmail runtime fallback,
+  scoped range tickets, and all eight Android selection source kinds.
+
+## 2026-08-20: TEXT_ONLY overlay pinned + X drawer/avatar fix + FB profile proof
+
+- Crawl evidence (session `35b2e006`): debug frames showed **no white cover** on FB/X
+  and X opening a full-screen profile photo instead of the account drawer. Root cause:
+  `onForegroundPackage` hid the cover on agent/automation FG switches; IG→FB handoff
+  left it off. Cover is now **pinned** until an explicit hide broadcast at crawl end.
+  `ensureTextOnlyCoverVisible()` re-applies show on launch, each scope, and capture.
+- X: removed top-left `ImageView`/coordinate fallbacks that opened profile **media
+  viewer** or other accounts. Drawer opens only via labeled
+  `Tampilkan penarik navigasi` / Account menu with proof (`Profil`, `Markah`, …).
+  `recoverXFromWrongSurface()` backs out of media viewer / Follow profiles.
+  `xLooksLikeOtherProfile()` treats any Follow/Subscribe without Edit as foreign.
+- Facebook: deferred profile verify no longer returns true without
+  `hasFacebookOwnProfileProof()` (was accepting onboarding/home as profile).
+- **Operator:** re-enable SIKSIK Agent accessibility after each APK install (MIUI clears it).
+
+## 2026-08-20: Facebook profile setup wizard (Xiaomi) — skip before profile/comments
+
+- Physical M2101K7AG: tapping `Buka profil` opens FB's new setup flow
+  (`Selamat datang di profil Anda` → photo → city), not the profile wall.
+  Crawler then failed comments/posts because it never reached Edit profil /
+  Pengaturan profil lainnya.
+- Additive universal handler: detect onboarding fragments, tap `Lewati`/`Skip`
+  through multi-step setup, confirm `BERHENTI` on “Berhenti menyiapkan profil”.
+  `hasFacebookOwnProfileProof()` rejects onboarding surfaces (e.g. `Edit foto profil`
+  without About/Semua). Called from `navigateFacebook`, `openFacebookOwnProfile`,
+  and `openFacebookMoreProfileSettings`. Infinix/Samsung profile-tab path unchanged.
+- APK rebuilt and installed on `9d2bb285`. **Re-enable accessibility** for
+  SIKSIK Agent in Settings → Aksesibilitas (MIUI blocks `adb settings put`).
+  Overlay TEXT_ONLY putih tetap aktif sepanjang mapping FB/X.
+
+## 2026-08-20: Facebook/X TEXT_ONLY — keep white cover, own profile, comments/likes, feed scroll
+
+- TEXT_ONLY solid white cover stays up for the whole Facebook/X mapping,
+  including the finished frame. Hide only after that snapshot, when returning
+  to the agent. Instagram remains uncovered. Never `descContains("Profile")` on X.
+- X own-profile proof requires Edit profile / Edit profil. Follow+Message without
+  Edit is treated as someone else's profile (back out). Profil is tapped only from
+  the account drawer or a bottom tab — not from home-timeline text.
+- Facebook comments: Indonesian `Pengaturan profil lainnya` (and EN equivalents)
+  before generic More. Activity log → Comments and reactions hub (All filter) so
+  comments and likes/reactions can be captured. Generic More only if the settings
+  sheet is actually visible.
+- Facebook/X feed: `UiDevice.swipe` often reports success on MIUI without moving.
+  If the viewport did not change, retry accessibility ACTION_SCROLL_FORWARD.
+  Filter profile chrome (`Semua postingan`, Filter, Reel, composer) out of posts.
+- Infinix/Samsung action-click and Instagram visual path unchanged.
+
+## 2026-08-20: Xiaomi X/Facebook — ACTION_CLICK false-positive, a11y service-tap retry
+
+- Physical M2101K7AG: latest crawl still `x_profile_not_verified` /
+  `facebook_profile_not_verified` while Instagram scopes verified. Manual dumps
+  in `temp_crawl/manual_xfb_20260820/` show the working path is
+  accessibility-service tap only (`A11Y_TAP`): X `Tampilkan penarik navigasi`
+  then exact `Profil` → Edit profil / Postingan / @handle; Facebook clickable
+  `Buka profil` → Edit profil / Tambahkan ke cerita / Semua. Overlay TEXT_ONLY
+  unchanged. Never `descContains("Profile")` on X.
+- MIUI `ACTION_CLICK` and `UiObject2.click()` often return true without moving
+  the UI, so the crawler skipped the real tap. Keep existing Infinix/Samsung
+  action-click first. If own-profile chrome is still missing, retry the same
+  labeled node with `allowActionClick=false` (service gesture only). Drawer
+  `Profil` must leave the drawer; do not treat a no-op click as success.
+- X Posts/Replies tab band widened from 2/3 to 4/5 of display height so tall
+  Xiaomi profile chrome still counts; English/Infinix tabs stay inside the band.
+
+## 2026-08-20: Gmail non-root acquisition via AccountManager + REST API & Gallery filter
+
+- Added non-root Gmail acquisition to SIKSIK via Android `AccountManager` token broker and Google Gmail REST API.
+- Android Agent: Added `AccountRoutes` (`/v1/accounts/google`, `/v1/accounts/google/token`) with `GET_ACCOUNTS` and `USE_CREDENTIALS` permissions to request OAuth2 Bearer token for `oauth2:https://www.googleapis.com/auth/gmail.readonly`.
+- Backend: Implemented `GmailAcquisitionService` (`backend/app/acquisition/gmail_service.py`) to fetch message headers, plain/html body, labels, attachments, and generate rendered email HTML cards in `staging/email/`.
+- Gallery & Findings: Enabled `source in {"email", "gmail"}` in `is_gallery_media` with `album="Email"`, ensuring all email messages (both flagged and non-flagged) appear in Gallery under the `Email` filter and in `Semua` (`ACCESS_ALL`).
+- Added full unit and integration test suite in `backend/tests/test_gmail_acquisition.py`.
+
+## 2026-08-19: Xiaomi trash + X/Facebook profile navigation
+
+- Gallery Recycle on M2101K7AG keeps JPEGs in
+  `/sdcard/MIUI/Gallery/cloud/.trashBin/{-trash-}*`. QUICK already finds them
+  under `MIUI/`. Recover then hashed every live MediaStore path; one row is
+  `/storage/emulated` (outside shared storage) and aborted the run with
+  `validation_error`, so trash never landed in the report. Skip invalid live
+  paths while hashing disk-cache duplicates. Infinix imgcache path unchanged.
+- X Indonesian drawer is `Tampilkan penarik navigasi`, not `laci navigasi`.
+  Match that exact/contains label; still never `descContains("Profile")`.
+- Facebook bottom bar has no Profile tab. Use clickable `Menu` / `Buka profil`
+  (a11y, then point/shell tap). Ignore the duplicate non-clickable `Buka profil`
+  node. Overlay TEXT_ONLY unchanged.
+
+## 2026-08-19: Xiaomi special access — ADB put-secure denial is not operator denial
+
+- MIUI often returns `SecurityException` / `Permission denial` on
+  `settings put secure enabled_accessibility_services`. Bootstrap treated that
+  as `DENIED` and failed immediately with "Special access Android ditolak"
+  without opening Accessibility settings.
+- Retry once after `pm grant WRITE_SECURE_SETTINGS`. If still blocked, wait on
+  the Accessibility settings screen like other OEMs. Operator denial during
+  that wait is still `DENIED`. Infinix/Samsung restore-success path unchanged.
+
+## 2026-08-19: IG Xiaomi — settings deeplink, archive row, comments extra-scroll
+
+- Archive still tries own profile first (Infinix/Samsung hamburger path). Xiaomi
+  may miss the profile tab; `instagram://settings` stays last resort only.
+- Physical Xiaomi M2101K7AG (`9d2bb285`): UiObject2 / UiDevice / a11y / `input tap`
+  on profile `Opsi` never open Settings (INJECT_EVENTS). `instagram://settings`
+  opens the same "Pengaturan dan aktivitas" sheet (Arsip / Tersimpan / Aktivitas Anda).
+  Infinix/Samsung still use hamburger first; deeplink is last resort only.
+- Archive: clicking `Arsip` via UiDevice returned success while still on Settings,
+  then `instagramArchivePageVisible` treated the Settings "Arsip" label as the
+  archive page. Require Settings to leave, click a11y first (same as comments),
+  reject Settings-as-archive.
+- Comments: list already opened (`Komentar` / `Terbaru ke terlama`) then
+  `scope_verification_failed` because own-account was only marked after profile
+  tab. Mark verified from Settings/comments chrome. Extra comment scrolls threw
+  `RuntimeException` (`uiautomator dump` vs instrumentation UiAutomation) and
+  marked the whole crawl `partial` after a stored capture. Keep the initial
+  capture; log exception type only; screenshot-only comments/archive if a11y
+  nodes are empty. Overlay unchanged.
+
+## 2026-08-19: IG Xiaomi — UiObject2.click() on Opsi is a no-op
+
+- Session `e14a51d3` (APK 17:22): instrumentation log `instagram_options_uidevice_click success=true`
+  then `instagram_options_wait_aborted_still_on_profile`. Mapping 019=020 still own profile.
+- UiAutomator dump of own profile (`temp_crawl/xiaomi_uiautomator_ig_20260819/ig_own_profile_header.xml`):
+  hamburger is `ImageView` desc=`Opsi` bounds `[926,93][1058,247]`, **no resource-id**.
+  Threads sibling desc=`Lihat profil di Threads` `[794,93][926,247]`.
+- `safeClick` always returns true after `UiObject2.click()`, so the existing
+  `device.click(center)` fallback never ran. Infinix object-click already opens
+  Settings; Xiaomi needs the point click. After object-click, open the sheet only
+  if Archive/Saved is visible; otherwise `UiDevice.click` on the Opsi center.
+  Infinix skips the point click so Search is not tapped.
+
+## 2026-08-19: Xiaomi trash/cache + ID social labels (additive, no OEM regress)
+
+- Physical Xiaomi M2101K7AG (`9d2bb285`, session `cf23410e`): Gallery trash lives at
+  `/sdcard/MIUI/Gallery/cloud/.trashBin/` (`{-trash-}*` files). Androjait recovered
+  2 payloads there; SikSik QUICK only scanned Android/DCIM/Pictures/Movies/Download
+  so `candidates_discovered=0`. MediaStore `is_trashed=1` is empty on this OEM.
+- Emptied-trash previews on Infinix remain Gallery3D `imgcache*.idx` + `.thumbnails/{id}.jpg`
+  skipped when the MediaStore id is still live. Xiaomi has no imgcache; leftover
+  JPEGs are DiskLruCache under `.../gallery_disk_cache/{small_size,full_size}/*.0`
+  (magic `FFD8FFE0`). Live `.thumbnails` ids 1729–1816 are still in MediaStore so
+  they must not be recovered as deleted.
+- Recovery: QUICK also scans `MIUI/` if that directory exists (no-op on Infinix/
+  Samsung). Disk-cache JPEGs are pulled only when their SHA-256 is not a live
+  MediaStore file. Existing imgcache/thumbnail/`.trashed-*` paths are unchanged.
+- Social (ADB dump, not `input tap` — MIUI blocks INJECT_EVENTS): X drawer
+  `Tampilkan laci navigasi` (keep exact `Show navigation drawer`; do not revive
+  `descContains("Profile")` which clicked tweet avatars). X home `Untuk Anda` /
+  `Mengikuti`. Facebook has no Profile tab (Beranda/Reels/Teman/Notifikasi/Grup);
+  add `Menu` + `Buka profil` after the existing `Profil, tab` path. Instagram
+  clicks `profile_header_menu` before desc/coordinate; sheet still must show
+  Archive/Saved. Host reason `scope_runtime_error_${scope}` has no colon so
+  `instrumentation_result_invalid` cannot drop Facebook. Overlay unchanged.
+
+## 2026-08-19: iOS FB comments — accordion AX names, jangan tap tab Groups
+
+- Dump `38490b13`: Activity log iOS adalah accordion satu halaman
+  (YOURACTIVITYGROUPING → YOURACTIVITYCOMMENTSANDREACTIONSSCHEMA →
+  COMMENTSCLUSTER / LIKEDCONTENT / LANDING-BUTTON). Bukan stack halaman
+  Android.
+- Row Comments y=724 nabrak tab Groups y=734; tap label Comments buka Groups.
+- Implementasi: expand by name, scroll sampai row di atas tab bar, tap
+  Manage comments and reactions (landing) atau COMMENTSCLUSTER. Tolak
+  permukaan Groups. Jangan tap_xy jika titik tengah di strip tab.
+
+## 2026-08-19: iOS FB comments — WDA tap off-screen Your Facebook activity
+
+- Sesi `6ecd93f1`: komentar FB gagal verifikasi, dump comments tidak
+  tertulis. Hub Activity log ketemu di sesi sebelumnya tapi row Your
+  Facebook activity (y negatif) tidak tertap.
+- Navigator sekarang tap dulu lewat WDA name/xpath (elemen off-screen
+  tetap bisa diklik), dump XML tiap langkah, leaf Comments exact-match
+  supaya tidak kena header Comments and reactions.
+
+## 2026-08-19: iOS FB comments — Activity log hub vs Comments list
+
+- Dump `9a6f936e` masuk header Activity log tapi itu hub Your information
+  (Personal information / Connections). Baris Your Facebook activity ada di
+  XML, y negatif (di atas fold). Verifier lama lolos karena teks tersembunyi
+  mengandung "comments".
+- Navigator universal: label EN/ID + name `profile-tools-action-button` /
+  `YOURACTIVITYGROUPING-SECTION-ITEM`, scroll ke atas bila target hidden,
+  tolak hub sebagai surface komentar. Sibling Likes and reactions hanya
+  jika leaf Comments tidak ada.
+- Ingest membuang chrome grouping-section-item.
+
+## 2026-08-19: iOS Facebook comments match Android Activity log
+
+- Comments Facebook iOS tidak lagi tap hamburger Menu. Pintu masuk:
+  Profile Tools (padanan More profile settings) → Activity log →
+  Comments and reactions → Comments, lalu TEXT_ONLY row.
+- Daftar komentar kosong disimpan sebagai 0 row (sukses, sama Android).
+- Parser wall menggabungkan title + timestamp + body (lahir 1997 tidak
+  lagi terpotong jadi nama saja).
+
+## 2026-08-19: iOS IG/X/FB match Android row capture + temp_crawl
+
+- Instagram posts: extra grid swipe only when post count > 0 (Android
+  estimateInstagramGridScrolls; 0 posts = no scroll). Archive 3 screens
+  without a 45s Settings wait so comments still run. Comments always
+  scroll 3 times; Your activity is searched by scrolling the sheet.
+- X: parse XCUIElementTypeCell labels into tweet_items.jsonl (one tweet
+  per row, TEXT_ONLY like Android), not the full chrome page.
+- Facebook: dismiss Review audience / composer, never fallback-tap those
+  sheets, parse cell-header-title wall rows into fb_post_items.jsonl.
+- Host ingest prefers *items.jsonl; dumps still copy to temp_crawl/ios_wda.
+
+## 2026-08-19: FB/X kosong karena WDA mati; IG post = swipe grid Android
+
+- Sesi `104d44dc`: IG profil ada, FB/X hanya `job.json`. WDA putus setelah IG,
+  HTTP timeout job 30s. Sekarang WDA di-restart sebelum tiap app, timeout 90s,
+  `invoke.log` ikut ke temp_crawl.
+- IG posts: seperti Android — screenshot viewport (header+grid), swipe
+  78%→28% (jari ke atas), screenshot lagi. Tidak buka post, tidak pre-scroll.
+
+## 2026-08-19: iOS social scroll direction + temp_crawl debug
+
+- Scroll feed memakai jari ke atas (`scroll_feed` / WDA down). Arah lama `up`
+  hanya menggeser header, jadi grid IG/X/FB terlihat tidak bergerak.
+- IG posts: scroll dulu masuk grid, bandingkan hash PNG (bukan teks AX).
+- Setiap flow disalin ke `siksik/temp_crawl/ios_wda/<session_id>/` (png/xml/jsonl)
+  sebelum staging dihapus.
+
+## 2026-08-19: iOS social scopes match Android (posts/archive/comments + text)
+
+- Instagram: scroll grid jika ada postingan, archive 3 layar, lalu Your
+  activity → Comments. Teks diambil dari accessibility tree (bukan OCR).
+- X dan Facebook: TEXT_ONLY seperti Android — scroll + dump teks AX
+  (tweets/replies, wall/comments). Screenshot hanya untuk profil.
+- Host ingest `posts.jsonl` / `comments.jsonl` / `tweet.jsonl` /
+  `reply.jsonl` / `fb_post.jsonl` / `fb_comment.jsonl` ke scope
+  own_posts / own_comments / own_tweets / own_replies.
+
+## 2026-08-18: Host skipped social — urllib cannot read WDA /status
+
+- Manual invoke IG/X/FB succeeded (profile + screenshots). Sesi akuisisi 23:15
+  tetap `ios_afc_media+ios_backup_comms` tanpa record sosmed. `run_stack.sh`
+  (curl) menulis "WDA HTTP ready"; host `_wda_ready` memakai `urllib.urlopen`
+  / `http.client.read()` lalu `IncompleteRead` / `RemoteDisconnected` →
+  fail-soft skip, flow tidak pernah dipanggil (tidak ada log `[IG]`).
+- Probe host sekarang `curl -sf /status` seperti stack; fallback http.client
+  mengabaikan IncompleteRead. Backend harus di-restart supaya terpakai.
+
+## 2026-08-18: iOS social auto-setup per iPhone (DDI + UDID)
+
+- Akar gagal sosmed: `ios image list` = `none`. Tanpa Developer Disk Image,
+  `runwda` minta device port 0 → DTX broken pipe → WDA tidak pernah :8100.
+  Mount hilang setiap reboot / ganti iPhone. `run_stack.sh` sekarang
+  **wajib** auto-mount (pymobiledevice3, lalu `ios image auto`), restart
+  tunnel, dan **gagal keras** kalau image masih kosong.
+- Stack mengikuti **UDID sesi ini**: reset tunnel/WDA kalau HP berganti,
+  tunnel hanya di-reuse jika `/tunnels` berisi UDID itu, cache bundle WDA
+  per-UDID, USB `idevicepair` + Developer Mode + keep-awake dijalankan
+  tiap akuisisi. Host tidak lagi skip `:8100` milik iPhone lama.
+- iPhone baru: stack **tidak** `IOS_SKIP_WDA_INSTALL`; coba `ios install`
+  IPA, AltServer hanya fallback. Flow JSON (`invoke.py`) tetap skip install
+  karena WDA sudah hidup. Timeout boot 300s. Operator tetap ketuk Trust USB /
+  Developer Mode / Trust profil WDA (Apple tidak mengizinkan otomasi itu).
+
+## 2026-08-18: Restore bee88e45 / Product1 WDA stack (stuck on tunnel)
+
+- UI hung on “Menyalakan WebDriverAgent (tunnel iOS)…”. Host `run_stack.sh` had
+  been rewritten (tunnel `restart`, 3× `runwda`, 8s attach, 240s wait).
+  `start_tunnel.sh restart` + `ios apps --list` without timeout blocked the
+  stack. Product1 `ios-media-puller` and bee88e45 use `ensure` + one
+  `runwda`/`forward` + 12s/30s HTTP wait, then `automator.py --skip-wda-install`.
+- Restored those two scripts from Product1. Host `ensure_ios_wda_stack` matches
+  bee88e45 again (120s, no extra poll). Social still runs before AFC/backup2.
+
+## 2026-08-18: iOS social after backup2 — WDA DTX broken pipe, fail-soft skip
+
+- Debug log for session `5f52343f` (21:27): social *did* run (`tools_ok`,
+  3 targets). WDA HTTP was down; `run_stack` exit 1; `ios runwda` died with
+  DTX `broken pipe` to the go-ios tunnel. Host then fail-soft skipped
+  (`agent_unreachable`) so the session finished as
+  `ios_afc_media+ios_backup_comms` with no IG/FB/X. Same failure as
+  `eab62a42` / `63b2efff`. Standalone `run_all_profiles.sh` (bee88e45) never
+  runs pymobiledevice3 backup2 first.
+- IOSProvider now starts WDA social *before* AFC/backup2 (clean USB, same
+  order as the puller wrappers). Flows call `automator.py --skip-wda-install
+  {ig,fb,x}-profile --http … -o …` like `run_ig_profile.sh`. Debug logs kept.
+
+## 2026-08-18: Cancelled iOS session — stale tunnel after backup, not “social skipped”
+
+- Session `63b2efff` (21:00 WIB) was cancelled while `acquisition_method` was
+  already `ios_wda_social`. Contacts/SMS were in; IG/X/FB never launched.
+  `runwda` died at 21:00:38 with DTX `broken pipe` to `127.0.0.1:60109`.
+  `start_tunnel.sh ensure` reused a tunnel that still answered `/tunnels` and
+  `apps --list` (USB lockdown) after AFC + backup2 — the comment in that
+  script already says those checks do not prove userspace DTX is alive.
+  Standalone `run_all_profiles.sh` works because it does not run backup2
+  first. Host now `restart`s the userspace tunnel before WDA, restarts it
+  again if `runwda` dies with broken pipe, skips a long `/status` wait when
+  `runwda` is gone, and shows “Menyalakan WebDriverAgent” then “Membuka
+  Instagram, Facebook, dan X”.
+
+## 2026-08-18: iOS social apps never opened — WDA died before HTTP
+
+- Session `ddffd953` (20:46 WIB) still had no visible_ui. Gallery/SMS/contacts
+  committed; IG/X/FB never launched. `/tmp/ios-media-puller-wda.log` shows
+  `ios runwda` dying at ~5s (`Failed running WDA` / DTX broken pipe to the
+  go-ios tunnel). `ios forward` stayed up, so `/status` probes hit error
+  code 2 (`could not connect to phone`). Apps cannot open without that HTTP
+  session. This is the same stack `bee88e45` / `run_all_profiles.sh` used
+  when social worked; the host was not waiting like those wrappers.
+- Causes: `pkill` then `runwda` after 0.5s (XCTest session still tearing
+  down); curl `/status` 2s later during IDE init; `.env`
+  `IOS_WDA_HTTP_WAIT_SEC=30` overwriting the host 120s budget; Python only
+  polling 20s after `run_stack.sh` exited.
+- `run_stack.sh` now keeps host wait env, waits 3s after pkill, 8s for
+  XCTest attach before forward/curl, retries `runwda` three times, and the
+  host polls for the full boot timeout then settles 3s (same as
+  `run_ig_profile.sh`). Product1 `ios-media-puller` remains reference-only.
+
+## 2026-08-18: iOS social crawl produced no records (WDA HTTP + CLI)
+
+- Session `af030716` (iOS QUICK) finished as `ios_afc_media+ios_backup_comms` with
+  contacts/SMS only. Gallery came through; social did not. `automation.log`
+  reached tunnel + developer mode + WDA bundle at 17:22 and never logged
+  HTTP ready. `run_stack.sh` waited 12s boot + 30s HTTP, then exited; background
+  `ios runwda` / `ios forward` were not disowned, so bash SIGHUP tore them down
+  before port 8100 stayed up. Host checked HTTP once and fail-soft skipped
+  social. Facebook `fb-profile` existed in the in-tree puller but was not a
+  target.
+- Host no longer calls `automator.py --skip-wda-install … --http … -o …`.
+  Caps, WDA URL, UDID, and output dir are written to a JSON job and
+  `ios_wda/invoke.py` runs the in-tree flows with the puller venv (no operator
+  `--` flags). Product1 `ios-media-puller` stayed reference-only (no runtime
+  path). `run_stack.sh` nohup/disowns WDA processes; host polls HTTP for the
+  configured boot timeout. Facebook is included in `ios_social_targets`.
+- Verification: backend unit tests for IG/X/FB record mapping and job payload.
+  Physical iPhone recrawl not run in this step.
+
+## 2026-08-18: Repair mashed Instagram Spotify profile-link OCR
+
+- Owner-view IG profile a11y only exposes username + metrics (`profile_header_familiar_*`).
+  Bio/link are not in the tree (`profile_header_link` / `bio` missing). Screenshot still
+  shows `open.spotify.com/user/…`. EasyOCR emitted `open spotify comluser/31 …`; repair
+  only matched `com/`, so `profile_links` stayed empty and the report showed "—".
+- `repair_ocr_link_text` now restores `comluser` → `open.spotify.com/user/` and joins
+  split path tokens. Reports reuse that helper, so an already-ingested session can
+  show the link on refresh without recrawl.
+
+## 2026-08-18: Social crawl failed after overlay runner swap
+
+- Sessions `80282cd9` / `217971a5`: `accessibility_visible_ui` partial
+  `ig:instrumentation_failed;x:instrumentation_failed;fb:instrumentation_failed`.
+  No mapping files. Crawl row finished in ~2s. Session `1f6d7200` minutes earlier
+  still had IG+FB records.
+- Cause: automation APK registered only `SiksikAndroidJUnitRunner`, while a live
+  backend can still invoke `androidx.test.runner.AndroidJUnitRunner`. Device then
+  returns `Unable to find instrumentation` for every target, including Instagram.
+- Fix: register **both** runners on the automation APK. Overlay runner stays the
+  host default (`FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES`). Stock runner remains
+  so crawl still works if the backend process was not restarted.
+
+## 2026-08-18: TEXT_ONLY cover stays up during FB/X instrumentation
+
+- First overlay build never appeared: default `AndroidJUnitRunner` UiAutomation
+  **suppresses** `CaptureAccessibilityService` for the whole social crawl, so the
+  cover window was torn down (or never attached). Crawl now uses
+  `SiksikAndroidJUnitRunner` with `FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES`.
+- Cover also follows the foreground package (show on Facebook/X, hide on
+  Instagram/agent) and is triggered with an explicit component + `am broadcast`,
+  not only an implicit sendBroadcast.
+
+## 2026-08-18: Solid white cover for Facebook/X TEXT_ONLY crawls
+
+- Facebook and X stay `TEXT_ONLY` (no content screenshots). While those targets
+  run, `CaptureAccessibilityService` shows one opaque `TYPE_ACCESSIBILITY_OVERLAY`
+  (`FLAG_NOT_TOUCHABLE`) so the operator sees solid white. The cover is attached
+  once before launch and removed in `returnToAgent` — not rebuilt on scroll, and
+  not toggled via enabling/disabling accessibility (that flicker path is from the
+  research overlay APK).
+- Instagram is unchanged (`VISUAL`). `usesTextOnlyCrawlCover` is only
+  `com.twitter.android` and `com.facebook.katana`.
+
+## 2026-08-18: IG comments ready-check is UiDevice/a11y, dump fallback
+
+- Session `d1beba46` (Samsung A73) left archive, clicked Your activity, then failed
+  `instagram_activity_not_ready`. Screenshot `041` already showed Your activity with
+  Comments visible. Host ADB dump+tap on the same phone reached Comments list and
+  scrolled (`temp_crawl/ig_comments_map_20260818_110312/`). Agent wait was dump-only,
+  so empty/cooldown dumps failed while the screen was correct.
+- Ready/click now: bounded UiDevice + accessibility + dump (dump is fallback, not a
+  gate). Your activity / Comments rows still prefer dump `input tap` on Button-sized
+  bounds when dump exists (Compose `clickable=false`). Retry Your activity once if
+  Settings is still showing during the wait. Same path for Infinix and Samsung.
+
+## 2026-08-18: IG comments wait for Your activity, shellTap row (not max-area)
+
+- Session `726a823a` reached `archive_back_cleared` but failed
+  `instagram_interactions_not_found` ~3s later. Manual ADB on the same
+  Infinix build: Your activity → `input tap` on Comments bounds opens the list
+  (`Newest to oldest` / `All dates`). Agent missed because it only slept 300ms,
+  then `clickInstagramLabeledRow` relied on a11y/UiDevice while shell dump was
+  often in cooldown after archive back; `clickInstagramLabelViaShellDump` also
+  preferred the full-width Interactions header over the Comments button.
+- Comments navigation now clears shell cooldown, waits up to 10s for Comments or
+  Interactions in dump, taps row-sized Button nodes via `input tap` first, and
+  polls up to 12s for list chrome before failing.
+
+## 2026-08-17: Stop extra IG backs after Settings; inject all IS_FAVORITE rows
+
+- Session `0bf2a2a5` still `ig:instagram_archive_back_failed`. Mapping `036 archive_back_0`
+  via a11y already showed Settings; the loop kept backing because it required
+  `!instagramOnStoriesArchive() && Settings` while the archive flag / empty dump
+  still looked like Stories archive. Leave-archive now stops on Settings first,
+  or after a non-geometry back once the dump no longer has `Stories archive`.
+- Galeri Favorit on that crawl was 4 unique Camera photos, not 8. Device has 8
+  `IS_FAVORITE=1` images, all in `DCIM/Camera` (no Favorit album token), all
+  older than QUICK 3 months. `(time OR favorite) + LIMIT 100` ranks recent
+  in-window rows first, so 4 starred files never entered inventory. First
+  MediaStore page now queries `IS_FAVORITE=1` separately and merges those
+  records in front.
+
+## 2026-08-17: Comments skipped archive back because scope switch cleared the flag
+
+- Session `43949596` still `ig:automation_timeout`. Mapping stopped at
+  `instagram_profile_before_navigation` on Stories archive — no
+  `archive_back_start`. `navigateToScope` calls `deactivateScope()` which
+  cleared `instagramArchiveListActive`, so leave-archive thought it was already
+  out and tried to prove own profile on the archive grid.
+- Leave-archive now uses dump title `Stories archive` (and keeps the archive
+  flag across the archive→comments switch). UiDevice comments-chrome is not
+  probed while that title is visible.
+
+## 2026-08-17: IG comments Back is generic first, dump fallback
+
+- Probe on Infinix (`temp_crawl/ig_back_probe_20260817_221818/`): KEYCODE_BACK,
+  live `action_bar_button_back`, desc Back, header ImageView, and 8%/7% geometry
+  all leave Stories archive to Settings. No hardcoded Infinix pixels.
+- Agent order: accessibility → bounded UiDevice (`wait` ≤900ms, no unbounded
+  `findObjects`) → compressed dump + `input tap` (live bounds) → %-geometry.
+  Dump is fallback for OEMs where UiDevice hangs. Same order for Your activity
+  / Comments rows and comments-list chrome.
+
+## 2026-08-17: IG comments mapped on device, dump+tap (no findObjects)
+
+- Host ADB mapping (`scripts/map_instagram_comments.py`, compressed dump) reached
+  Comments from Stories archive on Infinix X6837. Evidence:
+  `temp_crawl/ig_comments_map_20260817_215317/`. Back is
+  `action_bar_button_back` desc=Back bounds `[0,108][168,276]`. One tap returns
+  Settings; Your activity → Comments list (`Newest to oldest` / `All dates`).
+- Agent no longer calls UiDevice `findObjects`/`hasObject` on that path (those
+  hang on IG Compose and never reach the geometry fallback). Header Back, Settings
+  detection, Your activity, Comments, and list chrome use compressed
+  `uiautomator dump` + coordinate tap. Uncompressed dump on this device prints
+  `could not get idle state`.
+
+## 2026-08-17: IG comments from archive, operator counts, device favorites
+
+- Instagram comments no longer require a full own-profile proof after Stories
+  archive. Header Back is clicked first; if Settings is still open, Your
+  activity → Comments runs from there. Stuck archive is `instagram_archive_back_failed`.
+- Operator counters are Record (selected), File (indexed), Dianalisis — not
+  mixed transfer artifact / files_pulled (720 / 699).
+- MediaStore keeps IS_FAVORITE=1 and Favorites/Favorit album paths outside the
+  3/6-month window. Galeri still shows those starred items.
+
+## 2026-08-17: Host accepts media records without a binary
+
+- Agent fail-soft already finishes transfer with canonical JSON when a
+  media/document stream is missing, unreadable, or past the byte budget.
+- Host ingest no longer rejects that with "Binary source Android tidak lengkap."
+  Zero or one `source_binary` is valid; extra binaries or screenshots on those
+  kinds still fail. Visible UI screenshots may be a subset of `attachment_ids`.
+
+## 2026-08-17: Selective OCR on phone, vision on operator Mac
+
+- Phone preprocess keeps hash/pHash. ML Kit OCR runs only for screenshot/chat/
+  download/document origins. MediaPipe face/objects are skipped for media and
+  social screenshots (selection v4 already takes in-window media).
+- After ADB pull, Mac EasyOCR uses directory_hint/display_name/album because
+  staged names are hashed. QUICK skips camera-roll DCIM/Pictures unless
+  screenshot/dokumen/edge. Files stay in `data/staging/<sesi>` on this Mac.
+- Operator rincian waktu splits Akuisisi into Inventaris, Preprocess HP,
+  Seleksi, and Transfer.
+
+## 2026-08-17: X overlay/empty, IG comments budget, fail-soft transfer
+
+- X no longer re-clicks an already-active Posts tab (that opened Posts/Highlights
+  and blocked scrolling). Overlay sheet is dismissed; empty replies
+  ("You haven't posted yet") complete without 12 fake extra captures.
+- Instagram archive extra scrolls now leave ~50s for comments. Opening comments
+  from Stories archive backs out of the subpage first.
+- Staging copy no longer aborts the whole transfer on one unreadable/missing
+  binary. Canonical JSON still lands; host error text includes `error_category`.
+
+## 2026-08-17: In-window media is kept without extra exceptions
+
+- QUICK still means every in-window item for 3 months; FULL for 6 months. The bound
+  is the time query, not a row cap.
+- Inventory `includes()` now matches MediaStore: keep if **any** of DATE_TAKEN /
+  DATE_ADDED / DATE_MODIFIED (or capture time) is inside the window; unknown dates
+  stay. A photo taken years ago but added last month is kept.
+- Galeri uses the same OR rule, anchored to **session created_at** so opening an
+  old sesi later does not shrink the window.
+- Selection `siksik-selection-v4` auto-selects in-window `media_image` /
+  `media_video` / `document` so they actually transfer. Candidate count cap is
+  100_000 (QUICK) / 1_000_000 (FULL); byte budget is unchanged. SMS/contacts/
+  notifications still use the 5500 bp threshold. Duplicate non-representatives
+  stay unselected.
+
+## 2026-08-17: Galeri tab for full session crawl media
+
+- Tab **Galeri** sits between Temuan and Laporan (`/galeri`). Temuan stays
+  findings-only (Semua / Menunggu / Dikonfirmasi / Ditolak).
+- Galeri lists media already indexed in the session (flagged and unflagged),
+  deduped by sha256. It does not pull extra files from the phone; previews are
+  paginated (max 48) and lazy-loaded from staging.
+- Chips: Semua, Paling sering, Terbaru diakses, Favorit, then origin albums from
+  the last path segment (Screenshots, Download, Previews, …). QUICK 3 months /
+  FULL 6 months.
+- Inventory metadata (`directory_hint`, dates, MediaStore `is_favorite` on API
+  30+) ranks the access chips. `android-media-puller` is reference-only.
+- Scan ulang HP yang sama = sesi baru. Review confirmed/rejected dan rekomendasi
+  LULUS/TIDAK LULUS tidak disalin; temuan di-dedup per (sha256, label).
+
+## 2026-08-17: Document grant wait, Instagram archive before comments, 3/6-month inventory
+
+Bootstrap and documents:
+
+- QUICK now waits for Semua file (`MANAGE_EXTERNAL_STORAGE`) the same way FULL
+  already did: Settings opens on the device and the operator console enters
+  `awaiting_access`. The progress message names the permission
+  (“Menunggu izin Semua file pada perangkat”). Accessibility remains required.
+  Timeout or deny is fail-soft — acquisition continues without documents rather
+  than aborting the session.
+- Granting Semua file is the path that unlocks `shared_storage_document`.
+  `document_tree` stays a SAF fallback and is marked not-required once All files
+  is granted. Runtime photo/video/SMS/contacts grants are unchanged.
+
+Instagram Story Archive and comments:
+
+- Scope order is now profile → posts → **archive** → comments, so Archive is
+  attempted before comments consume the deadline.
+- Settings clicks target the visible Compose row (icon/row coordinates) as soon
+  as “Archive” or “Your activity” is on screen. The old 1.2s settle plus
+  Search-first path is the fallback. Settings Search runs only if ≥12s remain.
+- Inner navigation deadline is 240s; host instrumentation timeout is 250s
+  (was 175s / 180s). Posts still do not extra-scroll when count is below three.
+  Comments and archive remain initial plus three extra viewports. Parsed UI
+  dates (`4mo`, `13 Mei`) still stop posts/archive/comments at the 3/6-month
+  window. Profile stays unwindowed.
+
+Non-social inventory and analysis:
+
+- QUICK inventory no longer stops at 200 rows per source after the time filter.
+  The 3-month (QUICK) / 6-month (FULL) query is the bound. Contacts stay
+  unbounded. Notifications remain the live listener buffer, not a 90-day archive.
+- Analysis image caps are 0 (uncapped) so in-window gallery files are not
+  skipped during Analisis.
+- iOS SMS/iMessage parsing applies the same 3/6-month cutoff; unknown dates
+  stay.
+- Media inventory still accepts a row if `date_taken`, `date_added`, **or**
+  `date_modified` is inside the window. That OR was reviewed and left unchanged.
+
+Operator console:
+
+- MASUK `9 / 7` was audited as a display mix (`files_pulled` after recovery vs
+  `transfer_artifacts`). The formula was not changed in this batch.
+
+Tests: backend bootstrap (all-files wait + QUICK/FULL policy), iOS SMS cutoff,
+Instagram capture-order unit test, and social crawl contract (archive before
+comments, three archive scrolls). Physical recrawl was not run; the next
+JALANKAN AKUISISI rebuilds and reinstalls the agent APK.
+
+Cursor rules + `AGENTS.md` record the same runtime authority (code, then this
+changelog).
+
+## 2026-08-15: Reproducible WebDriverAgent IPA artifacts
+
+- Changed the GitHub Actions WDA build from `main`-only to every pushed branch,
+  with per-ref concurrency so a newer revision cancels an obsolete build.
+- Pinned the runner to `macos-15` with Xcode 16.4 and pinned Appium
+  WebDriverAgent 16.2.0 to commit
+  `cd3efe0c27b0924cc34488843e8cd7b6c6f775fa` instead of building an
+  unversioned moving upstream branch.
+- The workflow now checks out and verifies the triggering SIKSIK SHA before
+  building WDA. Each unsigned IPA embeds a versioned provenance record with
+  the SIKSIK revision, WDA revision/version, repository, and Actions run
+  identity. The uploaded artifact also includes the same sidecar record and a
+  SHA-256 checksum, and the workflow verifies both copies before upload.
+- Clarified that WDA is the iOS UI bridge; acquisition, selectors, crawl limits,
+  and ingestion changes remain host-side SIKSIK code and are not compiled into
+  the IPA. Signing/install remains the existing local AltServer step.
+- The setup now identifies the tracked IPA as a legacy fallback and prefers a
+  verified download in `~/wda`. When both the regular IPA and a stripped-dSYM
+  cache exist, install/runtime selection uses the newer file so a stale cache
+  cannot silently override a newly downloaded Actions artifact.
+- Verification: `actionlint` 1.7.7, YAML and source-pin JSON parsing, Bash
+  syntax and newest-IPA selection smoke, workflow diff checks, IPA
+  ZIP/checksum validation, and embedded-versus-sidecar provenance comparison
+  passed. The macOS/Xcode compile remains the workflow's required release gate
+  after these local changes are committed and pushed.
 
 ## 2026-08-14: Reliable deleted/cache nudity and bounded iOS Photos recovery
 

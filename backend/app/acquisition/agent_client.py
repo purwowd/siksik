@@ -271,6 +271,7 @@ class InventoryMetadataV1(StrictAgentModel):
         "unknown",
     ]
     directory_hint: str | None = Field(default=None, max_length=512)
+    is_favorite: bool = False
     exif: InventoryExifV1 | None = None
     warning_codes: list[str] = Field(max_length=16)
     thumbnail_available: bool
@@ -922,6 +923,24 @@ def format_validation_issue(issues: list[dict[str, str]]) -> str:
     return f"{first['location']}={first['type']}"
 
 
+class GoogleAccountInfoV1(StrictAgentModel):
+    name: str = Field(min_length=1, max_length=256)
+    type: str = Field(default="com.google", max_length=128)
+
+
+class GoogleAccountsResponseV1(StrictAgentModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    accounts: list[GoogleAccountInfoV1] = Field(default_factory=list, max_length=64)
+
+
+class GoogleTokenResponseV1(StrictAgentModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    account_name: str = Field(min_length=1, max_length=256)
+    token: str | None = Field(default=None, max_length=2048)
+    scope: str | None = Field(default=None, max_length=512)
+    error: str | None = Field(default=None, max_length=256)
+
+
 class AgentClient:
     def __init__(
         self,
@@ -1456,6 +1475,39 @@ class AgentClient:
             request_id=request_id,
             idempotency_key=idempotency_key,
         )
+
+    async def list_google_accounts(
+        self,
+        session_id: str,
+        *,
+        request_id: str | None = None,
+    ) -> list[GoogleAccountInfoV1]:
+        self._validate_id(session_id, "session")
+        res = await self.request(
+            "GET",
+            "/v1/accounts/google",
+            GoogleAccountsResponseV1,
+            request_id=request_id,
+        )
+        return res.body.accounts
+
+    async def get_google_auth_token(
+        self,
+        session_id: str,
+        account_name: str,
+        scope: str = "oauth2:https://www.googleapis.com/auth/gmail.readonly",
+        *,
+        request_id: str | None = None,
+    ) -> str | None:
+        self._validate_id(session_id, "session")
+        res = await self.request(
+            "POST",
+            "/v1/accounts/google/token",
+            GoogleTokenResponseV1,
+            json_body={"account_name": account_name, "scope": scope},
+            request_id=request_id,
+        )
+        return res.body.token
 
     async def _inventory_action(
         self,

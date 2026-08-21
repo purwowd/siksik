@@ -28,6 +28,17 @@ def main() -> None:
         raise SystemExit("Instagram bio link was accepted as a username")
     if social_ocr.PROFILE_LINK.fullmatch("ltfzp.blog") is None:
         raise SystemExit("Instagram .blog bio link was not recognized")
+    mashed = (
+        "3 handle.name = v Just curious. 130 217 6 following posts followers 2 "
+        "open spotify comluser/31 gyitwhplxygsmSlvxidn_ Add banners Edit profile"
+    )
+    repaired = social_ocr.repair_ocr_link_text(mashed)
+    recovered = [match.group(0) for match in social_ocr.PROFILE_LINK.finditer(repaired)]
+    if not any("open.spotify.com/user/31" in value for value in recovered):
+        raise SystemExit(f"mashed Spotify profile link was not repaired: {repaired!r}")
+    report_links = reports._profile_links({"profile_links": []}, mashed, None)
+    if not any("open.spotify.com/user/31" in value for value in report_links):
+        raise SystemExit(f"report link extraction missed repaired Spotify URL: {report_links!r}")
     if social_ocr._metric_from_text(sample, "followers") != 471:
         raise SystemExit("Instagram follower OCR extraction failed")
     if social_ocr._metric_from_text(sample, "following") != 432:
@@ -70,7 +81,7 @@ def main() -> None:
     enriched = social_ocr._profile_metadata(node_metadata, sample, regions)
     if enriched["profile_username"] != "lutfizp":
         raise SystemExit("resource-backed Instagram username extraction failed")
-    if enriched["profile_metrics"] != {"posts": 0, "followers": 471, "following": 432}:
+    if enriched["profile_metrics"]["posts"] != 0 or enriched["profile_metrics"]["followers"] != 471 or enriched["profile_metrics"]["following"] != 432:
         raise SystemExit("resource-backed Instagram profile metrics extraction failed")
     if "ltfzp.blog" not in enriched["profile_links"]:
         raise SystemExit("resource-backed Instagram bio link extraction failed")

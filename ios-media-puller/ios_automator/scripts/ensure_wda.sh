@@ -55,21 +55,13 @@ detect_wda_bundle_usb() {
     | awk -F', ' '/WebDriverAgentRunner/ {gsub(/,.*/,"",$1); print $1; exit}'
 }
 
-BUNDLE_CACHE="${IOS_WDA_BUNDLE_CACHE:-/tmp/ios-media-puller-wda-bundle.txt}"
+BUNDLE_CACHE="${IOS_WDA_BUNDLE_CACHE:-/tmp/ios-media-puller-wda-bundle.${UDID}.txt}"
 
 detect_wda_bundle() {
   local bundle=""
-  # Cache dulu (cepat), lalu USB, baru tunnel
   if [[ -n "${WDA_BUNDLE:-}" ]]; then
     echo "$WDA_BUNDLE"
     return 0
-  fi
-  if [[ -f "$BUNDLE_CACHE" ]]; then
-    bundle="$(tr -d '[:space:]' <"$BUNDLE_CACHE" || true)"
-    if [[ "$bundle" == com.facebook.WebDriverAgentRunner* ]]; then
-      echo "$bundle"
-      return 0
-    fi
   fi
   bundle="$(detect_wda_bundle_usb || true)"
   if [[ -n "$bundle" ]]; then
@@ -83,7 +75,30 @@ detect_wda_bundle() {
     echo "$bundle"
     return 0
   fi
+  if [[ -f "$BUNDLE_CACHE" ]]; then
+    bundle="$(tr -d '[:space:]' <"$BUNDLE_CACHE" || true)"
+    if [[ "$bundle" == com.facebook.WebDriverAgentRunner* ]]; then
+      # Cache per-UDID hanya sebagai fallback setelah list apps gagal.
+      echo "$bundle"
+      return 0
+    fi
+  fi
   return 1
+}
+
+try_install_wda_ipa() {
+  local ipa=""
+  ipa="$(prepare_wda_ipa || true)"
+  [[ -n "$ipa" && -f "$ipa" ]] || return 1
+  log "install WDA IPA ke device $UDID via go-ios ($ipa)…"
+  if ios install --path "$ipa" \
+    --tunnel-info-port="$TUNNEL_INFO_PORT" \
+    ${UDID:+--udid "$UDID"} >/dev/null 2>&1; then
+    return 0
+  fi
+  ios install "$ipa" \
+    --tunnel-info-port="$TUNNEL_INFO_PORT" \
+    ${UDID:+--udid "$UDID"} >/dev/null 2>&1
 }
 
 wda_on_device() {
@@ -108,18 +123,27 @@ find_altserver() {
 
 prepare_wda_ipa() {
   mkdir -p "$WDA_DIR"
-  if [[ -f "$WDA_DIR/WebDriverAgentRunner-nodsym.ipa" ]]; then
-    echo "$WDA_DIR/WebDriverAgentRunner-nodsym.ipa"
+  local ipa="$WDA_DIR/WebDriverAgentRunner.ipa"
+  local nodsym_ipa="$WDA_DIR/WebDriverAgentRunner-nodsym.ipa"
+  if [[
+    -f "$nodsym_ipa" &&
+    ( ! -f "$ipa" || "$nodsym_ipa" -nt "$ipa" )
+  ]]; then
+    echo "$nodsym_ipa"
     return 0
   fi
-  if [[ -f "$WDA_DIR/WebDriverAgentRunner.ipa" ]]; then
-    echo "$WDA_DIR/WebDriverAgentRunner.ipa"
+  if [[ -f "$ipa" ]]; then
+    echo "$ipa"
+    return 0
+  fi
+  if [[ -f "$nodsym_ipa" ]]; then
+    echo "$nodsym_ipa"
     return 0
   fi
   if [[ -f "$REPO_IPA" ]]; then
-    log "salin IPA repo → $WDA_DIR/WebDriverAgentRunner.ipa"
-    cp "$REPO_IPA" "$WDA_DIR/WebDriverAgentRunner.ipa"
-    echo "$WDA_DIR/WebDriverAgentRunner.ipa"
+    log "salin IPA repo → $ipa"
+    cp "$REPO_IPA" "$ipa"
+    echo "$ipa"
     return 0
   fi
   return 1
@@ -275,9 +299,14 @@ ensure_wda_ready() {
 
   if [[ -z "$bundle" ]]; then
     if declare -F log_wda_missing >/dev/null 2>&1; then log_wda_missing; fi
-    log "WDA belum terpasang di iPhone"
-    install_wda
-    bundle="$(wait_detect_bundle 25)" || die "Install selesai tapi WDA tidak terdeteksi. Di iPhone: Settings → VPN & Device Management → Trust, lalu jalankan ulang script"
+    log "WDA belum terpasang di iPhone ini ($UDID)"
+    if try_install_wda_ipa; then
+      bundle="$(wait_detect_bundle 15 || true)"
+    fi
+    if [[ -z "$bundle" ]]; then
+      install_wda
+      bundle="$(wait_detect_bundle 25)" || die "Install selesai tapi WDA tidak terdeteksi. Di iPhone: Settings → VPN & Device Management → Trust, lalu jalankan ulang akuisisi"
+    fi
     if declare -F log_wda_install_done >/dev/null 2>&1; then log_wda_install_done "$bundle"; fi
     echo "$bundle"
     return 0

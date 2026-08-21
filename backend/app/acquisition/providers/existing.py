@@ -99,6 +99,30 @@ class IOSProvider:
                 shutil.rmtree(staging)
             ensure_ios_staging(staging)
 
+        # Social first: WDA runs on a clean USB before backup2/AFC hold lockdown.
+        if settings.ios_social_ui_enabled:
+            from app.acquisition.ios_social import acquire_ios_social_ui
+
+            try:
+                social_count = await acquire_ios_social_ui(
+                    context.session_id,
+                    context.device_id,
+                    staging,
+                    context.mode,
+                    context.on_progress,
+                )
+                count += social_count
+                if social_count > 0:
+                    methods.append("ios_wda_social")
+            except AcquisitionError as exc:
+                errors.append(exc.public_message)
+                await context.on_progress(
+                    SessionStatus.ACQUIRING,
+                    24,
+                    f"iOS social UI dilewati: {exc.public_message}",
+                    acquisition_method="ios_wda_social",
+                )
+
         # AFC gallery/video — primary media path when full backup is off/empty.
         if settings.ios_afc_media_enabled:
             try:
@@ -163,29 +187,6 @@ class IOSProvider:
                     42,
                     f"iOS Messages/Contacts dilewati: {exc.public_message}",
                     acquisition_method="ios_backup_comms",
-                )
-
-        if settings.ios_social_ui_enabled:
-            from app.acquisition.ios_social import acquire_ios_social_ui
-
-            try:
-                social_count = await acquire_ios_social_ui(
-                    context.session_id,
-                    context.device_id,
-                    staging,
-                    context.mode,
-                    context.on_progress,
-                )
-                count += social_count
-                if social_count > 0:
-                    methods.append("ios_wda_social")
-            except AcquisitionError as exc:
-                errors.append(exc.public_message)
-                await context.on_progress(
-                    SessionStatus.ACQUIRING,
-                    48,
-                    f"iOS social UI dilewati: {exc.public_message}",
-                    acquisition_method="ios_wda_social",
                 )
 
         duration = (time.perf_counter() - t0) * 1000

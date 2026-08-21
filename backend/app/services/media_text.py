@@ -23,14 +23,13 @@ _SCREENSHOT_HINTS = (
     "whatsapp",
     "telegram",
     "chat",
-    "line",
     "signal",
     "message",
     "notif",
+    "messenger",
 )
 
-# Aset di folder dokumen / unduhan sering poster berteks pada latar polos
-# (edge heuristic gagal) — selalu coba OCR jika media_text on.
+# Poster/dokumen di unduhan — bukan kamera-roll DCIM/Pictures.
 _FORCE_OCR_DIR_NAMES = frozenset(
     {
         "documents",
@@ -39,8 +38,6 @@ _FORCE_OCR_DIR_NAMES = frozenset(
         "downloads",
         "screenshots",
         "screenshot",
-        "dcim",
-        "pictures",
         "browser",
         "telegram",
         "whatsapp",
@@ -49,19 +46,29 @@ _FORCE_OCR_DIR_NAMES = frozenset(
 )
 
 
-def looks_like_chat_or_screenshot(path: Path) -> bool:
-    hay = f"{path.parent.as_posix()} {path.name}".lower().replace("\\", "/")
+def origin_haystack(path: Path, origin_hint: str | None = None) -> str:
+    parts = [path.parent.as_posix(), path.name]
+    if origin_hint:
+        parts.append(origin_hint)
+    return " ".join(parts).lower().replace("\\", "/")
+
+
+def looks_like_chat_or_screenshot(path: Path, origin_hint: str | None = None) -> bool:
+    hay = origin_haystack(path, origin_hint)
     return any(h in hay for h in _SCREENSHOT_HINTS)
 
 
-def looks_like_document_or_download(path: Path) -> bool:
-    parts = {p.lower() for p in path.parts}
-    return bool(parts & _FORCE_OCR_DIR_NAMES)
+def looks_like_document_or_download(path: Path, origin_hint: str | None = None) -> bool:
+    hay = origin_haystack(path, origin_hint)
+    return any(name in hay for name in _FORCE_OCR_DIR_NAMES)
 
 
-def looks_like_text_heavy_image(path: Path) -> bool:
+def looks_like_text_heavy_image(path: Path, origin_hint: str | None = None) -> bool:
     """Heuristic: screenshot/dokumen, atau edge density tinggi ≈ UI / teks / poster."""
-    if looks_like_chat_or_screenshot(path) or looks_like_document_or_download(path):
+    if looks_like_chat_or_screenshot(path, origin_hint) or looks_like_document_or_download(
+        path,
+        origin_hint,
+    ):
         return True
     try:
         from PIL import Image, ImageFilter, ImageStat
@@ -75,14 +82,14 @@ def looks_like_text_heavy_image(path: Path) -> bool:
         return False
 
 
-def should_try_ocr(path: Path, *, force: bool = False) -> bool:
+def should_try_ocr(path: Path, *, force: bool = False, origin_hint: str | None = None) -> bool:
     if force:
         return True
     if not settings.media_text_enabled and not settings.gpu_stack_enabled:
         return False
     if settings.gpu_stack_enabled:
         return True
-    if looks_like_text_heavy_image(path):
+    if looks_like_text_heavy_image(path, origin_hint):
         return True
     # Mode FULL + ocr_full_gallery: OCR semua gambar di gallery / pictures / dcim
     if settings.ocr_full_gallery:
@@ -91,8 +98,19 @@ def should_try_ocr(path: Path, *, force: bool = False) -> bool:
 
         mode = get_analysis_mode()
         if mode == AcquisitionMode.FULL:
-            parts = {p.lower() for p in path.parts}
-            if parts & {"gallery", "pictures", "dcim", "camera", "documents", "download", "downloads"}:
+            hay = origin_haystack(path, origin_hint)
+            if any(
+                name in hay
+                for name in (
+                    "gallery",
+                    "pictures",
+                    "dcim",
+                    "camera",
+                    "documents",
+                    "download",
+                    "downloads",
+                )
+            ):
                 return True
     return False
 
@@ -115,7 +133,12 @@ def _pick_ocr_backend():
     return None
 
 
-def ocr_image_best_effort(path: Path, *, force: bool = False) -> list[dict]:
+def ocr_image_best_effort(
+    path: Path,
+    *,
+    force: bool = False,
+    origin_hint: str | None = None,
+) -> list[dict]:
     """OCR foto/screenshot/dokumen → findings (word-boundary lexicon).
 
     Jika SADT_OCR_ENABLED=1, biarkan path legacy `analyze_image_ocr` menangani
@@ -123,7 +146,7 @@ def ocr_image_best_effort(path: Path, *, force: bool = False) -> list[dict]:
     """
     from app.services import ocr as ocr_mod
 
-    if not should_try_ocr(path, force=force):
+    if not should_try_ocr(path, force=force, origin_hint=origin_hint):
         return []
 
     # Avoid double OCR when legacy flag already covers the same image
@@ -145,10 +168,10 @@ def ocr_image_best_effort(path: Path, *, force: bool = False) -> list[dict]:
         backend=result.backend,
         keywords=video_keyword_corpus() if force else None,
     )
-    if looks_like_chat_or_screenshot(path):
+    if looks_like_chat_or_screenshot(path, origin_hint):
         for f in findings:
             f["label"] = f["label"].replace("OCR:", "OCR chat/screenshot:", 1)
-    elif looks_like_document_or_download(path):
+    elif looks_like_document_or_download(path, origin_hint):
         for f in findings:
             f["label"] = f["label"].replace("OCR:", "OCR dokumen:", 1)
     return findings

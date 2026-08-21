@@ -50,6 +50,13 @@ find "$1" -type f \( -ipath '*/.thumbnails/*' -o -ipath '*/.thumbnail/*' \) \
   -print0 2>/dev/null
 """.strip()
 
+DISK_CACHE_FIND_SCRIPT = r"""
+find "$1" -type d -iname 'gallery_disk_cache' -print0 2>/dev/null |
+while IFS= read -r -d '' dir; do
+  find "$dir" -type f ! -name 'journal' ! -name '*.tmp' -print0 2>/dev/null
+done
+""".strip()
+
 
 @dataclass(frozen=True, slots=True)
 class DiscoveryResult:
@@ -200,6 +207,45 @@ class RecoveryAdbGateway:
             elif THUMBDATA_NAME.match(name):
                 thumbdata.append(path)
         return tuple(classic), tuple(thumbdata), result.truncated or result.failed
+
+    async def discover_disk_cache_jpegs(
+        self,
+        serial: str,
+        roots: Sequence[str],
+        *,
+        timeout: float,
+    ) -> DiscoveryResult:
+        return await self._discover(
+            serial,
+            roots,
+            DISK_CACHE_FIND_SCRIPT,
+            timeout,
+            "recovery_disk_cache_discovery",
+        )
+
+    async def file_sha256(
+        self,
+        serial: str,
+        path: str,
+        roots: Sequence[str],
+    ) -> str | None:
+        try:
+            validated = validate_shared_path(path, roots)
+        except AcquisitionError:
+            return None
+        result = await self._transport.run(
+            serial,
+            ["shell", "sha256sum", device_shared_path(validated)],
+            operation="recovery_file_sha256",
+            timeout=20.0,
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout:
+            return None
+        token = result.stdout.strip().split(None, 1)[0].lower()
+        if len(token) != 64 or any(char not in "0123456789abcdef" for char in token):
+            return None
+        return token
 
     async def _discover(
         self,

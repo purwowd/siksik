@@ -125,6 +125,15 @@ class InventoryPolicyTest {
     }
 
     @Test
+    fun favoriteTokensMatchAlbumAndFlagPaths() {
+        assertTrue(InventoryPolicy.looksFavorite("Pictures/Favorites", "photo.jpg"))
+        assertTrue(InventoryPolicy.looksFavorite("DCIM/Favorit", null))
+        assertTrue(InventoryPolicy.looksFavorite(null, "favourite-001.jpg"))
+        assertFalse(InventoryPolicy.looksFavorite("DCIM/Camera", "IMG_0001.jpg"))
+        assertEquals(listOf("%favorit%", "%favourite%"), InventoryPolicy.favoriteSqlLikePatterns)
+    }
+
+    @Test
     fun sharedPathFingerprintDeduplicatesMediaStoreAndDocumentTreeVisibility() {
         val mediaStore = InventoryPolicy.overlapDedupeHash(
             "media-fallback",

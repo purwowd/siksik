@@ -56,7 +56,75 @@ def main() -> None:
     frontend_api = read("frontend/src/api.ts")
     report_page = read("frontend/src/pages/ReportPage.tsx")
 
-    require(driver, "private const val MAX_ARCHIVE_SCROLLS = 3", "archive must stop after three scrolls")
+    require(
+        contract,
+        "internal const val INSTAGRAM_ARCHIVE_SCROLL_LIMIT = 3",
+        "archive must stop after three scrolls",
+    )
+    require(
+        contract,
+        "internal const val INSTAGRAM_COMMENTS_EXHAUST_SCROLL_BUDGET = 200",
+        "Instagram comments must exhaust instead of a tiny fixed scroll count",
+    )
+    require(
+        contract,
+        "internal const val SOCIAL_FEED_EXHAUST_SCROLL_BUDGET = 200",
+        "X/FB and Instagram posts must use exhaust scroll budgets",
+    )
+    require(driver, "instagramCommentsEvidenceFromUiDevice", "IG comments UiDevice body capture is missing")
+    require(driver, "instagramCommentsBodyText", "IG comments body text merge is missing")
+    analysis = read("backend/app/services/analysis.py")
+    require(analysis, "social_ocr.get", "analysis must consume social OCR enrichments")
+    require(
+        analysis,
+        'source in {"visible_ui", "accessibility_visible_ui"}',
+        "visible_ui OCR merge into analysis text is missing",
+    )
+    social_ocr = read("backend/app/acquisition/social_ocr.py")
+    require(social_ocr, "_comments_body_from_ocr", "IG comments OCR body cleanup is missing")
+
+    require(driver, "dismissCredentialOverlays", "Credential Manager dismiss path is missing")
+    require(driver, "xRepliesSurfaceReady", "X replies surface proof is missing")
+    require(driver, "xProfileTabConfirmed", "X profile tab confirmation is missing")
+    require(contract, "requireSignedInSession", "signed-in session gate is missing")
+    require(
+        contract,
+        "SocialScope.OWN_STORY_ARCHIVE,\n        SocialScope.OWN_COMMENTS",
+        "Instagram archive must run before comments",
+    )
+    require(driver, "MAX_GRID_SCROLLS = 200", "Instagram grid scroll ceiling is too low")
+    require(
+        driver,
+        "instagramArchiveScrollBudget = INSTAGRAM_ARCHIVE_SCROLL_LIMIT",
+        "archive scroll budget must stay exactly three",
+    )
+    require(automation, '"accessibility_required"', "TEXT_ONLY accessibility preflight is missing")
+    require(
+        automation,
+        "max(15.0, self._config.target_timeout_seconds - 10.0)",
+        "navigation deadline must follow host target timeout",
+    )
+    if "min(240" in automation:
+        raise SystemExit("navigation deadline must not be capped at 240 seconds")
+    require(
+        config,
+        "android_agent_automation_target_timeout_s: float = 1800.0",
+        "host target timeout must be long enough for exhaust crawls",
+    )
+    require(
+        config,
+        "android_agent_social_quick_scrolls: int = 200",
+        "quick scroll budget must allow exhaust",
+    )
+    require(
+        config,
+        "android_agent_social_full_scrolls: int = 400",
+        "full scroll budget must allow exhaust",
+    )
+    require(instrumentation, 'boundedInt(arguments, "max_scrolls", 0, 400)', "instrumentation scroll limit is inconsistent")
+    require(instrumentation, "3_600_000", "instrumentation navigation deadline ceiling is too low")
+    require(driver, "if (!feedScroll && navigationExpired())", "feed scrolls must not abort on navigation deadline")
+    require(driver, "if (!feedCapture && navigationExpired())", "feed captures must not abort on navigation deadline")
     require(driver, "if (postCount <= VISIBLE_GRID_POSTS) return 0", "small Instagram grids must not scroll")
     require(driver, "swipeInstagramGrid()", "Instagram must use an overlapping grid gesture")
     require(driver, "activeWindowBounds()", "coordinate fallback must use active-window bounds")
@@ -65,7 +133,7 @@ def main() -> None:
     require(driver, "INSTAGRAM_OPTIONS_MENU_COMPANION_LABELS", "Instagram menu state proof is weak")
     require(driver, "INSTAGRAM_PROFILE_MENU_EXCLUDED_LABELS", "unsafe profile-menu targets are not blocked")
     require(driver, "INSTAGRAM_NON_STORY_ARCHIVE_LABELS", "archive mode switching is missing")
-    require(driver, "PROFILE_NAVIGATION_BUDGET_MS = 8_000L", "Instagram profile fast-path budget is missing")
+    require(driver, "PROFILE_NAVIGATION_BUDGET_MS = 28_000L", "Instagram profile navigation budget is missing")
     require(driver, "PROFILE_PROOF_ATTEMPTS = 24", "Instagram profile render wait is too short")
     require(driver, "INSTAGRAM_OWN_PROFILE_LABELS", "strong own-profile proof is missing")
     require(driver, "editVisible ||", "Edit Profile must be accepted as own-account proof")
@@ -94,7 +162,7 @@ def main() -> None:
         raise SystemExit("Instagram profile proof still runs before the first profile tap")
     require(driver, "clickInstagramProfileMenuCoordinate()", "bounded hamburger tap is missing")
     require(driver, "waitForInstagramOptionsMenuNodes()", "bounded Archive-menu proof is missing")
-    require(driver, "INSTAGRAM_ARCHIVE_PROBE_ATTEMPTS = 16", "Archive render wait is too short")
+    require(driver, "INSTAGRAM_ARCHIVE_PROBE_ATTEMPTS = 24", "Archive render wait is too short")
     require(debug_mapper, "device.takeScreenshot(screenshot)", "full-screen debug mapping is missing")
     require(debug_mapper, 'MANIFEST_FILE_NAME = "mapping.json"', "debug mapping manifest is missing")
     require(instrumentation, 'arguments.getString("debug_snapshots")', "debug mapping flag is missing")
@@ -119,7 +187,7 @@ def main() -> None:
         raise SystemExit("X must remain text-only")
     if "SocialCaptureMode.VISUAL" in x_block:
         raise SystemExit("XOwnAccountStrategy must not use VISUAL")
-    require(contract, "SocialScope.OWN_STORY_ARCHIVE -> 3", "archive strategy limit is invalid")
+    require(contract, "INSTAGRAM_ARCHIVE_SCROLL_LIMIT = 3", "archive strategy limit is invalid")
     require(contract, "require(maxScreenshots in 0..48)", "Instagram viewport capture budget is too small")
     require(instrumentation, 'boundedInt(arguments, "max_screenshots", 0, 48)', "instrumentation screenshot limit is inconsistent")
     require(inventory_routes, "screenshotValues.length() > 48", "agent API screenshot limit is inconsistent")
@@ -130,6 +198,21 @@ def main() -> None:
     require(config, "android_agent_social_full_screenshots: int = 46", "full Instagram viewport budget is invalid")
     require(contract, "SocialScope.OWN_TWEETS,", "X Posts scrolling contract is missing")
     require(contract, "SocialScope.OWN_REPLIES,", "X Replies scrolling contract is missing")
+    require(driver, "Pengaturan profil lainnya", "Facebook more-profile-settings ID label is missing")
+    require(driver, "xLooksLikeOtherProfile", "X must reject other-account profiles")
+    require(driver, "performAccessibilityScrollForward(packageName = FACEBOOK_PACKAGE)", "Facebook accessibility feed scroll is missing")
+    require(driver, "advanceFacebookProfilePastOnboarding", "Facebook profile onboarding skip is missing")
+    require(driver, "ensureTextOnlyCoverVisible", "TEXT_ONLY cover must be re-applied during FB/X crawl")
+    require(driver, "recoverXFromWrongSurface", "X must recover from profile media viewer / other accounts")
+    text_only_cover = read(
+        "android-agent/app/src/main/java/com/siksik/agent/accessibility/TextOnlyCrawlCover.kt"
+    )
+    require(text_only_cover, "setPinned", "TEXT_ONLY cover must stay pinned during FB/X crawl")
+    return_to_agent = driver.split("override fun returnToAgent", 1)[1].split("override fun close", 1)[0]
+    if return_to_agent.find("target_automation_finished") > return_to_agent.find(
+        "TextOnlyCrawlCoverClient.hide"
+    ):
+        raise SystemExit("TEXT_ONLY cover must stay up through the finished mapping frame")
 
     for field in ("profile_display_name", "profile_bio", "profile_metrics"):
         require(inventory_json, f'"{field}"', f"Android profile field {field} is missing")

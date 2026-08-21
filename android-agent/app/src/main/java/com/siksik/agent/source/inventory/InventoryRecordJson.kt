@@ -82,6 +82,7 @@ object InventoryRecordJson {
         .put("capture_time", nullableTimestamp(record.captureTimeEpochMs))
         .put("capture_time_source", record.captureTimeSource)
         .put("directory_hint", record.directoryHint ?: JSONObject.NULL)
+        .put("is_favorite", record.isFavorite)
         .put("exif", record.exif?.let(::exif) ?: JSONObject.NULL)
         .put("warning_codes", JSONArray(record.warningCodes))
         .put("thumbnail_available", record.thumbnailAvailable)

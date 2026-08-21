@@ -24,18 +24,20 @@ class ContentAnalysisResult:
     cacheable: bool
 
 
-def _skip_heavy_ocr_for_gallery(path: Path, source: str) -> bool:
-    """QUICK gallery camera-roll: skip EasyOCR unless screenshot/chat path."""
-    if source != "gallery":
+def _skip_heavy_ocr_for_gallery(
+    path: Path,
+    source: str,
+    origin_hint: str | None = None,
+) -> bool:
+    """QUICK camera-roll: skip EasyOCR unless screenshot/chat/dokumen/edge."""
+    if source not in {"gallery", "media_image", "media_video"}:
         return False
     from app.services.hash_cache import get_analysis_mode
     from app.services import media_text
 
     if get_analysis_mode() != AcquisitionMode.QUICK:
         return False
-    if media_text.looks_like_chat_or_screenshot(path):
-        return False
-    return True
+    return not media_text.should_try_ocr(path, origin_hint=origin_hint)
 
 
 def _normalize(text: str) -> str:
@@ -195,11 +197,32 @@ def analyze_content_result(
     *,
     precomputed_ocr_text: str | None = None,
     precomputed_ocr_backend: str | None = None,
+    origin_hint: str | None = None,
 ) -> ContentAnalysisResult:
     ext = path.suffix.lower()
     if mime == CANONICAL_CRAWL_RECORD_MIME:
         findings = analyze_text_l1_l2(text, keywords) if text.strip() else []
-        return ContentAnalysisResult(tuple(findings), True)
+        if precomputed_ocr_text and precomputed_ocr_text.strip():
+            from app.services import ocr as ocr_mod
+
+            findings.extend(
+                ocr_mod.ocr_findings_from_text(
+                    precomputed_ocr_text,
+                    backend=precomputed_ocr_backend or "host_ocr",
+                )
+            )
+            if precomputed_ocr_text.strip() not in (text or ""):
+                findings.extend(
+                    analyze_text_l1_l2(precomputed_ocr_text, keywords)
+                )
+        seen: set[str] = set()
+        uniq: list[dict] = []
+        for f in findings:
+            key = f"{f['label']}|{f['evidence'][:80]}"
+            if key not in seen:
+                seen.add(key)
+                uniq.append(f)
+        return ContentAnalysisResult(tuple(uniq), True)
     findings: list[dict] = []
     cacheable = True
     findings.extend(analyze_path_signals(str(path), keywords))
@@ -241,7 +264,7 @@ def analyze_content_result(
                 )
             else:
                 findings.extend(vis._analyze_pil_image(path))
-        elif _skip_heavy_ocr_for_gallery(path, source):
+        elif _skip_heavy_ocr_for_gallery(path, source, origin_hint):
             # iOS AFC dumps raw camera HEIC; Android already samples a few media.
             # QUICK: PIL/path signals only — EasyOCR on every HEIC is why iOS lags.
             findings.extend(vis._analyze_pil_image(path))
@@ -251,6 +274,7 @@ def analyze_content_result(
                     path,
                     precomputed_ocr_text=precomputed_ocr_text,
                     precomputed_ocr_backend=precomputed_ocr_backend,
+                    origin_hint=origin_hint,
                 )
             )
     elif ext == ".vidmeta":
@@ -281,6 +305,7 @@ def analyze_content(
     *,
     precomputed_ocr_text: str | None = None,
     precomputed_ocr_backend: str | None = None,
+    origin_hint: str | None = None,
 ) -> list[dict]:
     """Compatibility wrapper for callers that only need findings."""
     return list(
@@ -292,6 +317,7 @@ def analyze_content(
             keywords,
             precomputed_ocr_text=precomputed_ocr_text,
             precomputed_ocr_backend=precomputed_ocr_backend,
+            origin_hint=origin_hint,
         ).findings
     )
 
@@ -428,6 +454,19 @@ async def _analyze_session_body(
         "SELECT label FROM findings WHERE session_id = ?",
         (session_id,),
     )
+    seen_finding_keys: set[tuple[str, str]] = {
+        (str(row["ident"]), str(row["label"]))
+        for row in await db.fetchall(
+            """
+            SELECT f.label AS label,
+                   COALESCE(NULLIF(fi.sha256, ''), f.file_id) AS ident
+            FROM findings f
+            JOIN files fi ON fi.id = f.file_id
+            WHERE f.session_id = ?
+            """,
+            (session_id,),
+        )
+    }
     hits_ocr = sum(
         1
         for row in existing_labels
@@ -480,13 +519,48 @@ async def _analyze_session_body(
             except (TypeError, json.JSONDecodeError):
                 meta = {}
             precomputed = None
+            record_id_for_ocr = None
             if meta.get("crawl_artifact_role") == "screenshot":
-                precomputed = social_ocr.get(str(meta.get("crawl_record_id") or ""))
+                record_id_for_ocr = str(meta.get("crawl_record_id") or "")
+                precomputed = social_ocr.get(record_id_for_ocr) if record_id_for_ocr else None
+            elif row["source"] in {"visible_ui", "accessibility_visible_ui"}:
+                record_id_for_ocr = str(
+                    meta.get("crawl_record_id")
+                    or meta.get("record_id")
+                    or Path(str(row["path"])).stem.split("__")[0]
+                    or ""
+                )
+                if record_id_for_ocr.startswith("record_"):
+                    precomputed = social_ocr.get(record_id_for_ocr)
+                else:
+                    path_name = Path(str(row["path"])).name
+                    for rid, payload in social_ocr.items():
+                        if rid and rid in path_name:
+                            record_id_for_ocr = rid
+                            precomputed = payload
+                            break
             if cached is not None:
                 results = cached
             else:
                 text = await read_preview(path, row["mime"] or "")
+                if (
+                    precomputed
+                    and precomputed[0].strip()
+                    and row["source"] in {"visible_ui", "accessibility_visible_ui"}
+                ):
+                    source_text = text.strip() if isinstance(text, str) else ""
+                    ocr_text = precomputed[0].strip()
+                    if ocr_text and ocr_text not in source_text:
+                        text = "\n".join(
+                            value
+                            for value in (source_text, ocr_text)
+                            if value
+                        )[:200_000]
                 ext = Path(row["path"]).suffix.lower()
+                origin_hint = " ".join(
+                    str(meta.get(key) or "")
+                    for key in ("directory_hint", "display_name", "album")
+                ).strip() or None
                 is_heavy = (
                     ext in VID_EXT
                     or ext in IMG_EXT
@@ -503,10 +577,18 @@ async def _analyze_session_body(
                         keywords,
                         precomputed_ocr_text=precomputed[0] if precomputed else None,
                         precomputed_ocr_backend=precomputed[1] if precomputed else None,
+                        origin_hint=origin_hint,
                     )
                 else:
                     outcome = analyze_content_result(
-                        path, row["mime"] or "", row["source"], text, keywords
+                        path,
+                        row["mime"] or "",
+                        row["source"],
+                        text,
+                        keywords,
+                        precomputed_ocr_text=precomputed[0] if precomputed else None,
+                        precomputed_ocr_backend=precomputed[1] if precomputed else None,
+                        origin_hint=origin_hint,
                     )
                 results = list(outcome.findings)
                 if row["sha256"] and outcome.cacheable:
@@ -581,6 +663,18 @@ async def _analyze_session_body(
 
     async def commit_results(results: list[tuple[Any, list[tuple]]]) -> None:
         nonlocal findings_count
+        filtered: list[tuple[Any, list[tuple]]] = []
+        for row, items in results:
+            kept: list[tuple] = []
+            ident = str(row["sha256"] or row["id"])
+            for item in items:
+                key = (ident, str(item[6]))
+                if key in seen_finding_keys:
+                    continue
+                seen_finding_keys.add(key)
+                kept.append(item)
+            filtered.append((row, kept))
+        results = filtered
         rows_to_insert = [item for _, items in results for item in items]
         async with db.transaction() as conn:
             await conn.executemany(

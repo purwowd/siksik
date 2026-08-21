@@ -400,9 +400,15 @@ class DirectCrawlTransferService:
         if transfer.state == "cancelled":
             raise asyncio.CancelledError
         if transfer.state != "completed":
+            detail = transfer.error_category
+            message = (
+                f"Staging transfer Android gagal ({detail})."
+                if detail
+                else "Staging transfer Android gagal."
+            )
             raise acquisition_error(
                 ErrorCategory.AGENT_UNAVAILABLE,
-                "Staging transfer Android gagal.",
+                message,
                 retryable=True,
             )
         if transfer.completed_records != transfer.total_records:
@@ -747,18 +753,14 @@ class DirectCrawlTransferService:
             binaries = [item for item in related if item.role == "source_binary"]
             screenshots = [item for item in related if item.role == "screenshot"]
             if record.source_kind == "visible_ui":
-                attachment_ids = {item.attachment_id for item in screenshots}
-                if (
-                    binaries
-                    or len(screenshots) != len(record.attachment_ids)
-                    or attachment_ids != set(record.attachment_ids)
-                ):
+                screenshot_ids = {item.attachment_id for item in screenshots}
+                if binaries or not screenshot_ids.issubset(set(record.attachment_ids)):
                     raise acquisition_error(
                         ErrorCategory.AGENT_INVALID_RESPONSE,
                         "Attachment visible UI Android tidak lengkap.",
                     )
             elif record.source_kind in BINARY_SOURCE_KINDS:
-                if len(binaries) != 1 or screenshots:
+                if len(binaries) > 1 or screenshots:
                     raise acquisition_error(
                         ErrorCategory.AGENT_INVALID_RESPONSE,
                         "Binary source Android tidak lengkap.",

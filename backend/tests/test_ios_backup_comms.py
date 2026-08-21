@@ -65,6 +65,7 @@ def _make_contacts_db(path: Path) -> None:
 @pytest.mark.unit
 def test_limit_for_mode_full_zero_is_unlimited() -> None:
     assert _limit_for_mode(AcquisitionMode.QUICK, 50, 0) == 50
+    assert _limit_for_mode(AcquisitionMode.QUICK, 0, 50) is None
     assert _limit_for_mode(AcquisitionMode.FULL, 50, 0) is None
     assert _limit_for_mode(AcquisitionMode.FULL, 50, 100) == 100
 
@@ -92,6 +93,16 @@ def test_parse_messages_distinguishes_sms_and_imessage(tmp_path: Path) -> None:
 
     capped = parse_messages_db(db_path, limit=1)
     assert len(capped) == 1
+
+
+@pytest.mark.unit
+def test_parse_messages_applies_not_before_cutoff(tmp_path: Path) -> None:
+    db_path = tmp_path / "sms.db"
+    _make_sms_db(db_path)
+    kept = parse_messages_db(db_path, limit=None, not_before_epoch_s=1_600_000_000)
+    dropped = parse_messages_db(db_path, limit=None, not_before_epoch_s=1_900_000_000)
+    assert len(kept) == 2
+    assert dropped == []
 
 
 @pytest.mark.unit

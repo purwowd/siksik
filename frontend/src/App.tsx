@@ -11,8 +11,9 @@ import {
   type DashboardStats,
   type DeviceInfo,
   type Finding,
+  type GalleryAlbum,
+  type GalleryItem,
   type Paginated,
-  type ReviewStatus,
   type SessionReport,
   type SessionSummary,
   type VisionHealth,
@@ -28,8 +29,10 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { FindingsPage } from "./pages/FindingsPage";
 import { OperatorPage } from "./pages/OperatorPage";
 import { ReportPage } from "./pages/ReportPage";
+import { GalleryPage } from "./pages/GalleryPage";
 import {
   buildTabUrl,
+  DEFAULT_GALLERY_ALBUM,
   parseTabSearch,
   pathFromTab,
   resolveSessionId,
@@ -71,9 +74,14 @@ export default function App() {
   const [dash, setDash] = useState<DashboardStats | null>(null);
   const [dashLoading, setDashLoading] = useState(false);
   const [findingsData, setFindingsData] = useState<Paginated<Finding> | null>(null);
+  const [galleryData, setGalleryData] = useState<Paginated<GalleryItem> | null>(null);
+  const [galleryAlbums, setGalleryAlbums] = useState<GalleryAlbum[]>([]);
   const [findingsLoading, setFindingsLoading] = useState(false);
+  const [galleryLoading, setGalleryLoading] = useState(false);
   const [findingsPage, setFindingsPage] = useState(1);
-  const [reviewFilter, setReviewFilter] = useState<"all" | ReviewStatus>("all");
+  const [galleryPage, setGalleryPage] = useState(1);
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilterParam>("all");
+  const [galleryAlbum, setGalleryAlbum] = useState<string>(DEFAULT_GALLERY_ALBUM);
   const [reportFindings, setReportFindings] = useState<Paginated<Finding> | null>(null);
   const [reportData, setReportData] = useState<SessionReport | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
@@ -170,15 +178,16 @@ export default function App() {
   }, [auth, allowedTabs]);
 
   const goToTab = useCallback(
-    (next: Tab, opts?: { sesi?: string | null; filter?: ReviewFilterParam | null }) => {
+    (next: Tab, opts?: { sesi?: string | null; filter?: ReviewFilterParam | null; album?: string | null }) => {
       navigate(
         buildTabUrl(next, {
           sesi: opts?.sesi ?? session?.id ?? null,
           filter: opts?.filter ?? (next === "findings" ? reviewFilter : null),
+          album: opts?.album ?? (next === "gallery" ? galleryAlbum : null),
         }),
       );
     },
-    [navigate, session?.id, reviewFilter],
+    [navigate, session?.id, reviewFilter, galleryAlbum],
   );
 
   useEffect(() => {
@@ -196,20 +205,22 @@ export default function App() {
       if (can(auth, "findings:review")) setReviewFilter("pending");
       urlFilterApplied.current = true;
     }
-    const { filter } = parseTabSearch(location.search);
+    const { filter, album } = parseTabSearch(location.search);
     if (tab === "findings" && filter) setReviewFilter(filter);
+    if (tab === "gallery") setGalleryAlbum(album ?? DEFAULT_GALLERY_ALBUM);
   }, [auth, location.search, tab]);
 
   useEffect(() => {
     if (!auth || !tab) return;
-    if (tab !== "findings" && tab !== "report" && tab !== "dashboard") return;
+    if (tab !== "findings" && tab !== "gallery" && tab !== "report" && tab !== "dashboard") return;
     const url = buildTabUrl(tab, {
       sesi: session?.id ?? null,
       filter: tab === "findings" ? reviewFilter : null,
+      album: tab === "gallery" ? galleryAlbum : null,
     });
     const current = `${location.pathname}${location.search}`;
     if (current !== url) navigate(url, { replace: true });
-  }, [auth, tab, session?.id, reviewFilter, location.pathname, location.search, navigate]);
+  }, [auth, tab, session?.id, reviewFilter, galleryAlbum, location.pathname, location.search, navigate]);
 
   const refreshSessionList = useCallback(async (opts?: { soft?: boolean }) => {
     if (!opts?.soft) setSessionsLoading(true);
@@ -408,13 +419,27 @@ export default function App() {
                 s.id,
                 findingsPage,
                 DEFAULT_PAGE_SIZE,
-                reviewFilter === "all" ? undefined : { review_status: reviewFilter },
+                reviewFilter !== "all" ? { review_status: reviewFilter } : undefined,
               );
               if (!stopped && pollEpochRef.current === epoch) {
                 setFindingsData(liveFindings);
               }
             } catch {
               // Poll sesi berikutnya tetap berjalan saat refresh daftar temuan gagal sementara.
+            }
+          }
+          if (tab === "gallery") {
+            try {
+              const [albums, items] = await Promise.all([
+                api.galleryAlbums(s.id),
+                api.gallery(s.id, galleryAlbum, galleryPage, DEFAULT_PAGE_SIZE),
+              ]);
+              if (!stopped && pollEpochRef.current === epoch) {
+                setGalleryAlbums(albums);
+                setGalleryData(items);
+              }
+            } catch {
+              // Poll sesi berikutnya tetap berjalan saat refresh galeri gagal sementara.
             }
           }
           if (tab === "report") {
@@ -440,11 +465,25 @@ export default function App() {
             s.id,
             1,
             DEFAULT_PAGE_SIZE,
-            reviewFilter === "all" ? undefined : { review_status: reviewFilter },
+            reviewFilter !== "all" ? { review_status: reviewFilter } : undefined,
           );
           if (pollEpochRef.current !== epoch) return;
           setFindingsData(f);
           setFindingsPage(1);
+          if (tab === "gallery") {
+            try {
+              const [albums, items] = await Promise.all([
+                api.galleryAlbums(s.id),
+                api.gallery(s.id, galleryAlbum, 1, DEFAULT_PAGE_SIZE),
+              ]);
+              if (pollEpochRef.current !== epoch) return;
+              setGalleryAlbums(albums);
+              setGalleryData(items);
+              setGalleryPage(1);
+            } catch {
+              // Galeri di-refresh saat operator membuka tab.
+            }
+          }
           if (tab === "report") {
             const [completedReportFindings, completedReport] = await Promise.all([
               api.findings(s.id, 1, DEFAULT_PAGE_SIZE),
@@ -482,6 +521,8 @@ export default function App() {
     auth,
     tab,
     findingsPage,
+    galleryPage,
+    galleryAlbum,
     reportPage,
     reviewFilter,
     refreshSessionList,
@@ -535,7 +576,7 @@ export default function App() {
   }, [tab, refreshSessionList]);
 
   useEffect(() => {
-    if (tab !== "findings" && tab !== "report") return;
+    if (tab !== "findings" && tab !== "gallery" && tab !== "report") return;
     if (sessionList.length === 0) void refreshSessionList();
   }, [tab, sessionList.length, refreshSessionList]);
 
@@ -560,17 +601,15 @@ export default function App() {
     }
     let cancelled = false;
     setFindingsLoading(true);
-
     api
       .findings(
         session.id,
         findingsPage,
         DEFAULT_PAGE_SIZE,
-        reviewFilter === "all" ? undefined : { review_status: reviewFilter },
+        reviewFilter !== "all" ? { review_status: reviewFilter } : undefined,
       )
       .then((data) => {
-        if (cancelled) return;
-        setFindingsData(data);
+        if (!cancelled) setFindingsData(data);
       })
       .catch((e) => {
         if (!cancelled) setError(String(e.message || e));
@@ -583,9 +622,42 @@ export default function App() {
     };
   }, [tab, session?.id, findingsPage, reviewFilter]);
 
+  useEffect(() => {
+    if (tab !== "gallery") return;
+    if (!session?.id) {
+      setGalleryData(null);
+      setGalleryAlbums([]);
+      setGalleryLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setGalleryLoading(true);
+    Promise.all([
+      api.galleryAlbums(session.id),
+      api.gallery(session.id, galleryAlbum, galleryPage, DEFAULT_PAGE_SIZE),
+    ])
+      .then(([albums, items]) => {
+        if (cancelled) return;
+        setGalleryAlbums(albums);
+        setGalleryData(items);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String(e.message || e));
+      })
+      .finally(() => {
+        if (!cancelled) setGalleryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, session?.id, session?.status, galleryAlbum, galleryPage]);
+
   // Ganti sesi → buang list lama supaya tidak flash data sesi lain
   useEffect(() => {
     setFindingsData(null);
+    setGalleryData(null);
+    setGalleryAlbums([]);
+    setGalleryPage(1);
     setReportFindings(null);
     setReportData(null);
   }, [session?.id]);
@@ -636,17 +708,22 @@ export default function App() {
 
   const modeHint =
     mode === "quick"
-      ? `≤${imageCapQuick} foto galeri · ≤${QUICK_VIDEO_CAP} video · OCR selektif (screenshot/dokumen/edge)`
-      : `≤${imageCapFull} foto · semua video · OCR penuh gallery/documents (jika engine ada) · lebih lambat`;
+      ? `${imageCapQuick > 0 ? `≤${imageCapQuick} foto galeri` : "Semua foto 3 bulan"} · ≤${QUICK_VIDEO_CAP} video dianalisis · OCR selektif (screenshot/dokumen/edge)`
+      : `${imageCapFull > 0 ? `≤${imageCapFull} foto` : "Semua foto 6 bulan"} · semua video · OCR penuh gallery/documents (jika engine ada) · lebih lambat`;
 
   const mediaTextOn = !!vision.media_text?.enabled;
   const ocrEngineOn = !!(vision.ocr?.enabled && vision.ocr?.available);
   const whisperOn = !!(vision.media_text?.whisper || vision.gpu_stack?.backends?.whisper?.available);
   const gpuStackOn = !!vision.gpu_stack?.enabled;
 
-  const changeReviewFilter = useCallback((next: "all" | ReviewStatus) => {
+  const changeReviewFilter = useCallback((next: ReviewFilterParam) => {
     setReviewFilter(next);
     setFindingsPage(1);
+  }, []);
+
+  const changeGalleryAlbum = useCallback((next: string) => {
+    setGalleryAlbum(next);
+    setGalleryPage(1);
   }, []);
 
   async function onPickSession(id: string) {
@@ -877,6 +954,8 @@ export default function App() {
     setAuth(null);
     setSession(null);
     setFindingsData(null);
+    setGalleryData(null);
+    setGalleryAlbums([]);
     setReportFindings(null);
     setReportData(null);
     setReviewSummary(null);
@@ -907,6 +986,7 @@ export default function App() {
 
   const topBarActive =
     findingsLoading ||
+    galleryLoading ||
     reportLoading ||
     dashLoading ||
     busy ||
@@ -949,6 +1029,7 @@ export default function App() {
               to={buildTabUrl(t.id, {
                 sesi: session?.id,
                 filter: t.id === "findings" ? reviewFilter : null,
+                album: t.id === "gallery" ? galleryAlbum : null,
               })}
               role="tab"
               aria-selected={tab === t.id}
@@ -1064,6 +1145,26 @@ export default function App() {
                 onPage={setFindingsPage}
                 focusedFindingId={focusedFindingId}
                 setFocusedFindingId={setFocusedFindingId}
+              />
+            }
+          />
+        )}
+
+        {can(auth, "findings:read") && (
+          <Route
+            path="/galeri"
+            element={
+              <GalleryPage
+                session={session}
+                sessionList={sessionList}
+                sessionsLoading={sessionsLoading && sessionList.length === 0}
+                loading={galleryLoading}
+                albums={galleryAlbums}
+                album={galleryAlbum}
+                setAlbum={changeGalleryAlbum}
+                data={galleryData}
+                onPickSession={(id) => void onPickSession(id)}
+                onPage={setGalleryPage}
               />
             }
           />

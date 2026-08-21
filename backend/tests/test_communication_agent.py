@@ -15,6 +15,7 @@ from app.acquisition.automation import (
     RESULT_PREFIX,
     AndroidUiAutomationOrchestrator,
     AutomationConfig,
+    instrumentation_failure_token,
     parse_instrumentation_result,
 )
 from app.acquisition.errors import AcquisitionError, ErrorCategory
@@ -244,11 +245,23 @@ def test_instrumentation_result_is_strict_and_target_bound() -> None:
     }
     output = RESULT_PREFIX + json.dumps(payload, separators=(",", ":"))
     result = parse_instrumentation_result(output, "com.instagram.android")
-
     assert result.scroll_count == 3
     with pytest.raises(AcquisitionError) as captured:
         parse_instrumentation_result(output, "com.facebook.katana")
     assert captured.value.category == ErrorCategory.AGENT_INVALID_RESPONSE
+
+
+@pytest.mark.unit
+def test_instrumentation_failure_token_does_not_echo_payload() -> None:
+    assert (
+        instrumentation_failure_token(
+            "INSTRUMENTATION_FAILED: Unable to find instrumentation info for: ComponentInfo{com.siksik.agent.automation/androidx.test.runner.AndroidJUnitRunner}",
+            "",
+        )
+        == "runner_not_registered"
+    )
+    assert instrumentation_failure_token("PROCESS_CRASHED", "") == "process_crashed"
+    assert instrumentation_failure_token("other", "") == "instrument_nonzero_exit"
 
 
 class FakeBuilder:
@@ -311,7 +324,7 @@ def automation_config(apk: Path) -> AutomationConfig:
         apk_path=apk,
         package_name="com.siksik.agent.automation",
         runner_component=(
-            "com.siksik.agent.automation/androidx.test.runner.AndroidJUnitRunner"
+            "com.siksik.agent.automation/com.siksik.agent.automation.SiksikAndroidJUnitRunner"
         ),
         test_class="com.siksik.agent.automation.SocialCrawlInstrumentation",
         agent_component="com.siksik.agent/.session.BootstrapActivity",

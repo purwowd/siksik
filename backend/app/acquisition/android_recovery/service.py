@@ -292,7 +292,14 @@ class AndroidRecoveryService:
         if mode == AcquisitionMode.QUICK:
             scan_roots = []
             for root in roots:
-                for suffix in ("Android", "DCIM", "Pictures", "Movies", "Download"):
+                for suffix in (
+                    "Android",
+                    "DCIM",
+                    "Pictures",
+                    "Movies",
+                    "Download",
+                    "MIUI",
+                ):
                     value = f"{root.rstrip('/')}/{suffix}"
                     if await self._gateway.is_directory(serial, value, roots):
                         scan_roots.append(value)
@@ -429,6 +436,18 @@ class AndroidRecoveryService:
                 warnings,
             )
             await self._recover_thumbnails(
+                serial,
+                roots,
+                staging,
+                temp_root,
+                media_index,
+                policy,
+                artifacts,
+                stats,
+                known_hashes,
+                warnings,
+            )
+            await self._recover_disk_cache_jpegs(
                 serial,
                 roots,
                 staging,
@@ -684,6 +703,90 @@ class AndroidRecoveryService:
                         return
             except (OSError, ValueError):
                 warnings.add("thumbdata_parse_failed")
+
+    async def _recover_disk_cache_jpegs(
+        self,
+        serial: str,
+        roots: Sequence[str],
+        staging: Path,
+        temp_root: Path,
+        media_index: MediaIndex,
+        policy: RecoveryPolicy,
+        artifacts: list[RecoveryArtifactV1],
+        stats: MutableStats,
+        known_hashes: set[str],
+        warnings: set[str],
+    ) -> None:
+        """OEM DiskLruCache JPEGs (Xiaomi gallery_disk_cache) after trash is emptied.
+
+        Infinix/Samsung keep Gallery3D imgcache*.idx; that path is unchanged.
+        Skip blobs whose hash matches a live MediaStore file so current photos
+        are not re-imported as recovery.
+        """
+        discovery = await self._gateway.discover_disk_cache_jpegs(
+            serial,
+            roots,
+            timeout=policy.scan_timeout_s,
+        )
+        if discovery.truncated or discovery.failed:
+            warnings.add("disk_cache_discovery_partial")
+        if not discovery.paths:
+            return
+        live_hashes = set(known_hashes)
+        for path in media_index.paths:
+            try:
+                digest = await self._gateway.file_sha256(serial, path, roots)
+            except AcquisitionError:
+                continue
+            if digest:
+                live_hashes.add(digest)
+        for index, remote in enumerate(discovery.paths):
+            if self._budget_reached(policy, artifacts, stats):
+                warnings.add("recovery_budget_truncated")
+                return
+            stats.cache_sources_scanned += 1
+            local = temp_root / f"disk_cache_{index}.bin"
+            capture = await self._gateway.transfer(
+                serial,
+                remote_path=remote,
+                content_uri=None,
+                roots=roots,
+                destination=local,
+                max_bytes=settings.android_recovery_max_cache_source_bytes,
+                timeout=policy.transfer_timeout_s,
+            )
+            if not capture.captured:
+                continue
+            try:
+                raw = await asyncio.to_thread(local.read_bytes)
+            except OSError:
+                warnings.add("disk_cache_read_failed")
+                continue
+            images = await asyncio.to_thread(_whole_file_images, raw)
+            if not images:
+                continue
+            image = max(images, key=lambda item: item.end - item.offset)
+            encoded = raw[image.offset : image.end]
+            digest = hashlib.sha256(encoded).hexdigest()
+            if digest in live_hashes:
+                stats.duplicate_payloads += 1
+                continue
+            artifact = await asyncio.to_thread(
+                self._store_preview,
+                staging,
+                stable_candidate_id(RecoverySource.CLASSIC_THUMBNAIL.value, remote),
+                RecoverySource.CLASSIC_THUMBNAIL,
+                "orphan_disk_cache",
+                RecoveryConfidence.MEDIUM,
+                encoded,
+                image,
+                policy,
+                stats,
+                known_hashes,
+            )
+            if artifact is not None:
+                artifacts.append(artifact)
+                live_hashes.add(digest)
 
     @staticmethod
     def _store_preview(

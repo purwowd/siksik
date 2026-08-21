@@ -99,6 +99,7 @@ data class InventoryRecord(
     val thumbnailAvailable: Boolean,
     val observedAtEpochMs: Long,
     val contentUri: Uri?,
+    val isFavorite: Boolean = false,
     val normalizedText: String? = null,
     val contentSha256: String? = null,
     val smsMetadata: SmsRecordMetadata? = null,

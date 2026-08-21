@@ -5,6 +5,12 @@ import java.security.MessageDigest
 import java.util.Locale
 
 object CommunicationPolicy {
+    const val TEXT_ONLY_COVER_ACTION = "com.siksik.agent.action.TEXT_ONLY_CRAWL_COVER"
+    const val TEXT_ONLY_COVER_VISIBLE_EXTRA = "visible"
+    const val A11Y_TAP_ACTION = "com.siksik.agent.action.A11Y_TAP"
+    const val A11Y_TAP_X_EXTRA = "x"
+    const val A11Y_TAP_Y_EXTRA = "y"
+
     val supportedSocialTargets = linkedSetOf(
         "com.twitter.android",
         "com.facebook.katana",
@@ -34,6 +40,11 @@ object CommunicationPolicy {
 
     fun supportsSocialScope(packageName: String, socialScope: String): Boolean =
         socialScope in socialScopesByPackage[packageName].orEmpty()
+
+    fun usesTextOnlyCrawlCover(packageName: String): Boolean = packageName in setOf(
+        "com.twitter.android",
+        "com.facebook.katana",
+    )
 
     fun validateTargets(values: Collection<String>): Set<String> {
         require(values.size <= supportedSocialTargets.size) { "target package limit exceeded" }

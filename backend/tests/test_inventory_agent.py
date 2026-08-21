@@ -88,16 +88,22 @@ def test_runtime_permission_matrix_covers_android_storage_branches_and_audio() -
     assert api_33["android.permission.ACCESS_MEDIA_LOCATION"] is False
     assert api_33["android.permission.READ_SMS"] is False
     assert api_33["android.permission.READ_CONTACTS"] is False
+    assert api_33["android.permission.GET_ACCOUNTS"] is False
+    assert api_33["android.permission.USE_CREDENTIALS"] is False
     assert api_29 == {
         "android.permission.READ_EXTERNAL_STORAGE": True,
         "android.permission.ACCESS_MEDIA_LOCATION": False,
         "android.permission.READ_SMS": False,
         "android.permission.READ_CONTACTS": False,
+        "android.permission.GET_ACCOUNTS": False,
+        "android.permission.USE_CREDENTIALS": False,
     }
     assert api_28 == {
         "android.permission.READ_EXTERNAL_STORAGE": True,
         "android.permission.READ_SMS": False,
         "android.permission.READ_CONTACTS": False,
+        "android.permission.GET_ACCOUNTS": False,
+        "android.permission.USE_CREDENTIALS": False,
     }
 
 

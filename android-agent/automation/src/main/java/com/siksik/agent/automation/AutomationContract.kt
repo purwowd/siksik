@@ -9,7 +9,7 @@ data class AutomationLimits(
     val stableWaitMs: Long,
 ) {
     init {
-        require(maxScrolls in 0..40)
+        require(maxScrolls in 0..400)
         require(maxScreenshots in 0..48)
         require(launchTimeoutMs in 1_000..60_000)
         require(stableWaitMs in 250..10_000)
@@ -31,11 +31,14 @@ enum class SocialCaptureMode {
 }
 
 internal const val INSTAGRAM_ARCHIVE_SCROLL_LIMIT = 3
-internal const val INSTAGRAM_COMMENTS_SCROLL_LIMIT = 3
+internal const val INSTAGRAM_COMMENTS_EXHAUST_SCROLL_BUDGET = 200
+internal const val SOCIAL_FEED_EXHAUST_SCROLL_BUDGET = 200
+internal const val INSTAGRAM_COMMENTS_SCREENSHOT_BUDGET = 24
 
 data class ScopeCapture(
     val stored: Boolean,
     val screenshotId: String?,
+    val exhausted: Boolean = false,
 )
 
 data class AutomationOutcome(
@@ -58,6 +61,7 @@ interface AutomationDriver {
     fun captureScope(scope: SocialScope, takeScreenshot: Boolean): ScopeCapture
     fun lastFailureReason(): String? = null
     fun recommendedAdditionalCaptures(scope: SocialScope): Int? = null
+    fun requireSignedInSession(targetPackage: String): Boolean = true
     fun returnToAgent()
 }
 
@@ -84,8 +88,8 @@ class InstagramOwnAccountStrategy : TargetNavigationStrategy {
     override val scopes = listOf(
         SocialScope.OWN_PROFILE,
         SocialScope.OWN_POSTS,
-        SocialScope.OWN_COMMENTS,
         SocialScope.OWN_STORY_ARCHIVE,
+        SocialScope.OWN_COMMENTS,
     )
 
     override fun scrollWeight(scope: SocialScope): Int = when (scope) {
@@ -98,8 +102,8 @@ class InstagramOwnAccountStrategy : TargetNavigationStrategy {
 
     override fun additionalCaptureCount(scope: SocialScope): Int = when (scope) {
         SocialScope.OWN_STORY_ARCHIVE -> INSTAGRAM_ARCHIVE_SCROLL_LIMIT
-        SocialScope.OWN_POSTS -> 40
-        SocialScope.OWN_COMMENTS -> INSTAGRAM_COMMENTS_SCROLL_LIMIT
+        SocialScope.OWN_POSTS -> SOCIAL_FEED_EXHAUST_SCROLL_BUDGET
+        SocialScope.OWN_COMMENTS -> INSTAGRAM_COMMENTS_EXHAUST_SCROLL_BUDGET
         else -> 0
     }
 
@@ -110,7 +114,7 @@ class InstagramOwnAccountStrategy : TargetNavigationStrategy {
             (totalLimit - 1).coerceAtLeast(0),
         )
         SocialScope.OWN_COMMENTS -> minOf(
-            INSTAGRAM_COMMENTS_SCROLL_LIMIT + 1,
+            INSTAGRAM_COMMENTS_SCREENSHOT_BUDGET,
             (totalLimit - 1).coerceAtLeast(0),
         )
         SocialScope.OWN_POSTS -> (totalLimit - 9).coerceAtLeast(0)
@@ -136,7 +140,7 @@ class XOwnAccountStrategy : TargetNavigationStrategy {
     override fun additionalCaptureCount(scope: SocialScope): Int = when (scope) {
         SocialScope.OWN_TWEETS,
         SocialScope.OWN_REPLIES,
-        -> 12
+        -> SOCIAL_FEED_EXHAUST_SCROLL_BUDGET
         else -> 0
     }
 
@@ -159,8 +163,9 @@ class FacebookOwnAccountStrategy : TargetNavigationStrategy {
     }
 
     override fun additionalCaptureCount(scope: SocialScope): Int = when (scope) {
-        SocialScope.OWN_POSTS -> 12
-        SocialScope.OWN_COMMENTS -> 8
+        SocialScope.OWN_POSTS,
+        SocialScope.OWN_COMMENTS,
+        -> SOCIAL_FEED_EXHAUST_SCROLL_BUDGET
         else -> 0
     }
 
@@ -210,18 +215,29 @@ class AutomationEngine(
                     reason = "target_launch_failed"
                 }
                 !driver.waitVisible(strategy.targetPackage, limits.launchTimeoutMs) -> {
-                    state = "timeout"
-                    reason = "target_launch_timeout"
+                    val launchReason = driver.lastFailureReason()
+                    if (launchReason == "account_not_signed_in") {
+                        state = "failed"
+                        reason = launchReason
+                    } else {
+                        state = "timeout"
+                        reason = launchReason ?: "target_launch_timeout"
+                    }
                 }
                 else -> {
                     driver.waitStable(limits.stableWaitMs)
-                    strategy.scopes.forEachIndexed { index, scope ->
+                    if (!driver.requireSignedInSession(strategy.targetPackage)) {
+                        state = "failed"
+                        reason = driver.lastFailureReason() ?: "account_not_signed_in"
+                    } else {
+                        strategy.scopes.forEachIndexed { index, scope ->
                         if (state == "cancelled") return@forEachIndexed
                         if (!isActive()) {
                             state = "cancelled"
                             reason = "crawl_cancelled"
                             return@forEachIndexed
                         }
+                        var capturedThisScope = false
                         try {
                             Log.i(
                                 AUTOMATION_LOG_TAG,
@@ -229,7 +245,6 @@ class AutomationEngine(
                                     "scope=${scope.wireName} index=$index",
                             )
                             if (!driver.isForeground(strategy.targetPackage)) {
-                                // Runtime permission / heads-up may steal FG after launch.
                                 driver.waitStable(limits.stableWaitMs)
                             }
                             if (!driver.isForeground(strategy.targetPackage)) {
@@ -282,12 +297,16 @@ class AutomationEngine(
                                 return@forEachIndexed
                             }
                             completedScopes += 1
+                            capturedThisScope = true
                             Log.i(
                                 AUTOMATION_LOG_TAG,
                                 "event=social_scope stage=initial_captured " +
                                     "target=${strategy.targetPackage} scope=${scope.wireName} " +
                                     "screenshot=${initial.screenshotId != null}",
                             )
+                            if (initial.exhausted) {
+                                return@forEachIndexed
+                            }
                             var remainingForScope = (
                                 driver.recommendedAdditionalCaptures(scope)
                                     ?: strategy.additionalCaptureCount(scope)
@@ -316,9 +335,12 @@ class AutomationEngine(
                                     screenshots.add(screenshotId)
                                     scopeScreenshotCount += 1
                                 }
+                                if (capture.exhausted) break
                                 if (!capture.stored) {
-                                    failedScopes += 1
-                                    if (reason == null) reason = driver.lastFailureReason()
+                                    if (!capturedThisScope) {
+                                        failedScopes += 1
+                                        if (reason == null) reason = driver.lastFailureReason()
+                                    }
                                     break
                                 }
                                 Log.i(
@@ -328,21 +350,30 @@ class AutomationEngine(
                                         "scroll_count=$scrollCount screenshot=${capture.screenshotId != null}",
                                 )
                             }
-                        } catch (_: RuntimeException) {
-                            failedScopes += 1
-                            if (reason == null) reason = driver.lastFailureReason()
-                                ?: "scope_runtime_error:${scope.wireName}"
-                        }
-                    }
-                    if (state != "cancelled") {
-                        when {
-                            completedScopes == 0 -> {
-                                state = "failed"
-                                if (reason == null) reason = "scope_navigation_failed"
+                        } catch (error: RuntimeException) {
+                            Log.w(
+                                AUTOMATION_LOG_TAG,
+                                "event=social_scope stage=runtime_error " +
+                                    "target=${strategy.targetPackage} " +
+                                    "scope=${scope.wireName} type=${error.javaClass.simpleName}",
+                            )
+                            if (!capturedThisScope) {
+                                failedScopes += 1
+                                if (reason == null) reason = driver.lastFailureReason()
+                                    ?: "scope_runtime_error_${scope.wireName}"
                             }
-                            failedScopes > 0 || completedScopes != strategy.scopes.size -> {
-                                state = "partial"
-                                if (reason == null) reason = "scope_navigation_incomplete"
+                        }
+                        }
+                        if (state != "cancelled") {
+                            when {
+                                completedScopes == 0 -> {
+                                    state = "failed"
+                                    if (reason == null) reason = "scope_navigation_failed"
+                                }
+                                failedScopes > 0 || completedScopes != strategy.scopes.size -> {
+                                    state = "partial"
+                                    if (reason == null) reason = "scope_navigation_incomplete"
+                                }
                             }
                         }
                     }

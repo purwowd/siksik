@@ -6,6 +6,18 @@
     "profile_tab_poll_sec": 0.25,
     "settings_menu_wait_sec": 45.0,
     "settings_menu_poll_sec": 1.5,
+    "profile_ready_wait_sec": 40.0,
+    "profile_ready_poll_sec": 1.0,
+    "profile_ready_retaps": 3,
+    "profile_marker": {
+      "strategies": [
+        {"using": "accessibility id", "value": "user-profile-header-username"},
+        {"using": "accessibility id", "value": "profile-more-button"},
+        {"using": "accessibility id", "value": "edit-profile-button"},
+        {"using": "name", "value": "Edit profile"},
+        {"using": "name", "value": "Edit profil"}
+      ]
+    },
     "home_marker": {
       "strategies": [
         {"using": "accessibility id", "value": "mainfeed-tab"},

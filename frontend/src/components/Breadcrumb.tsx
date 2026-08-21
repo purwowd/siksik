@@ -6,6 +6,7 @@ import type { Tab } from "../types";
 const TAB_LABELS: Record<Tab, string> = {
   operator: "Operator",
   findings: "Temuan",
+  gallery: "Galeri",
   report: "Laporan",
   dashboard: "Dasbor",
 };
@@ -17,7 +18,7 @@ export function Breadcrumb({ pathname, session }: { pathname: string; session: S
   const crumbs: { label: string; to?: string }[] = [{ label: "SADT", to: pathFromTab(tab) }];
   crumbs.push({ label: TAB_LABELS[tab] });
 
-  if (session && (tab === "findings" || tab === "report" || tab === "dashboard")) {
+  if (session && (tab === "findings" || tab === "gallery" || tab === "report" || tab === "dashboard")) {
     crumbs.push({
       label: `${session.label || session.device_id} (${session.id.slice(0, 8)})`,
     });

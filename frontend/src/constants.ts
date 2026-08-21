@@ -50,13 +50,15 @@ export const TAB_PERMS: Record<Tab, string> = {
   operator: "sessions:start",
   dashboard: "dashboard",
   findings: "findings:read",
+  gallery: "findings:read",
   report: "report:read",
 };
 
-/** Urutan nav: Temuan sebelum Dasbor. */
+/** Urutan nav: Temuan → Galeri → Laporan → Dasbor. */
 export const TAB_DEFS: { id: Tab; label: string }[] = [
   { id: "operator", label: "Operator" },
   { id: "findings", label: "Temuan" },
+  { id: "gallery", label: "Galeri" },
   { id: "report", label: "Laporan" },
   { id: "dashboard", label: "Dasbor" },
 ];

@@ -94,6 +94,7 @@ class RecoveryArtifactV1(StrictRecoveryModel):
         "trash_resident",
         "source_missing",
         "orphan_mediastore_id",
+        "orphan_disk_cache",
         "unmatched_thumbdata_slot",
     ]
     confidence: Literal["high", "medium", "low"]

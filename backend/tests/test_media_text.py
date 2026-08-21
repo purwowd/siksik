@@ -18,6 +18,15 @@ def test_looks_like_chat_screenshot():
     assert media_text.looks_like_chat_or_screenshot(Path("/tmp/Screenshots/IMG_001.jpg"))
     assert media_text.looks_like_chat_or_screenshot(Path("/media/whatsapp/chat.png"))
     assert not media_text.looks_like_chat_or_screenshot(Path("/gallery/IMG_90210.jpg"))
+    hashed = Path("/tmp/staging/session/artifacts/deadbeef.jpg")
+    assert media_text.looks_like_chat_or_screenshot(
+        hashed,
+        origin_hint="Pictures/Screenshots Screenshot_20260817.png",
+    )
+    assert not media_text.looks_like_document_or_download(
+        hashed,
+        origin_hint="DCIM/Camera IMG_20260817.jpg",
+    )
 
 
 @pytest.mark.unit

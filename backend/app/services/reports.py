@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.acquisition.social_ocr import repair_ocr_link_text
 from app.core.config import settings
 from app.core.db import db
 
@@ -18,8 +19,12 @@ SOCIAL_SCOPES = {
     "own_profile": "Profil akun",
     "own_posts": "Postingan akun",
     "own_tweets": "Tweet akun",
+    "own_tweets": "Tweet akun",
+    "own_story_archive": "Arsip story",
     "own_story_archive": "Arsip story",
     "own_comments": "Komentar akun",
+    "own_comments": "Komentar akun",
+    "own_replies": "Balasan akun",
     "own_replies": "Balasan akun",
 }
 MAX_SOCIAL_REPORT_ITEMS = 500
@@ -367,43 +372,7 @@ def _dedupe_profile_links(candidates: list[str]) -> list[str]:
 
 
 def _repair_ocr_link_text(value: str) -> str:
-    """Repair common EasyOCR spacing on profile links (open spotify com/…)."""
-    text = value
-    text = re.sub(r"(?i)\bopen\s+spotify\s+com/", "open.spotify.com/", text)
-    text = re.sub(r"(?i)\bwww\s+([a-z0-9-]+)\s+com/", r"www.\1.com/", text)
-    text = re.sub(r"(?i)\b([a-z0-9-]+)\s+com/(user|in|p)/", r"\1.com/\2/", text)
-    stop = PROFILE_NOISE | {
-        "banners",
-        "edit",
-        "share",
-        "sunting",
-        "bagikan",
-        "follow",
-        "following",
-        "followers",
-        "posts",
-        "postingan",
-    }
-
-    def _join_path(match: re.Match[str]) -> str:
-        left, right = match.group(1), match.group(2)
-        if right.casefold() in stop or not re.fullmatch(r"[A-Za-z0-9._%-]{4,64}", right):
-            return match.group(0)
-        return left + right
-
-    # Join path fragments split by spaces: /user/31 gyit… → /user/31gyit…
-    for _ in range(4):
-        updated = re.sub(
-            r"(?i)((?:https?://|www\.)?[a-z0-9.-]+\."
-            r"(?:com|net|org|id|co|me|io|app|link|bio|blog)"
-            r"/(?:user|in|p|status|reel)/[A-Za-z0-9._%-]*)\s+([A-Za-z0-9._%-]+)",
-            _join_path,
-            text,
-        )
-        if updated == text:
-            break
-        text = updated
-    return text
+    return repair_ocr_link_text(value)
 
 
 def _valid_username(value: object) -> str | None:

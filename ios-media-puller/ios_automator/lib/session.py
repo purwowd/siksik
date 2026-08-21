@@ -165,6 +165,21 @@ class AutomatorSession:
         else:
             raise ValueError("direction must be up|down|left|right")
 
+    async def scroll_feed(self, *, distance: float = 0.62, duration: float = 0.35) -> None:
+        """Finger swipe up so content below (posts/archive) comes into view.
+
+        Matches Android `swipeInstagramGrid`: 78% height → 28% height, same
+        center-X. Do not use `scroll('up')` — that is a finger-down swipe and
+        only reveals the profile header.
+        """
+        size = await self.window_size()
+        width = int(size["width"])
+        height = int(size["height"])
+        cx = width // 2
+        y0 = int(height * 0.78)
+        y1 = int(height * 0.28)
+        await self.swipe(cx, y0, cx, y1, duration=duration)
+
     async def type_text(self, text: str, *, bundle_id: Optional[str] = None) -> None:
         await self.ensure_session(bundle_id or self.bundle_id)
         await self._call(self.client.send_keys, text, self.session_id)

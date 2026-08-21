@@ -1,1 +1,1 @@
-export type Tab = "operator" | "dashboard" | "findings" | "report";
+export type Tab = "operator" | "dashboard" | "findings" | "gallery" | "report";

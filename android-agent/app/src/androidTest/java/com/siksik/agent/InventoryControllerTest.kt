@@ -56,7 +56,7 @@ class InventoryControllerTest {
     }
 
     @Test
-    fun quickModeStopsAtDocumentedBoundWithoutGrowingPageMemory() {
+    fun quickModePagesEveryInWindowRecordWithoutSampleCap() {
         val sources = SourceAdapter.entries.map { adapter ->
             val records = if (adapter == SourceAdapter.PUBLIC_WHATSAPP) {
                 (0 until 1_000).map { record(adapter, "record-$it") }
@@ -71,14 +71,13 @@ class InventoryControllerTest {
                 controller.start(sessionId, InventoryMode.QUICK, null),
                 pageSize = 100,
             )
-            val sampled = completed.sources.first {
+            val whatsapp = completed.sources.first {
                 it.source == SourceAdapter.PUBLIC_WHATSAPP
             }
 
             assertEquals(InventoryRunState.COMPLETE, completed.state)
-            assertEquals(BuildConfig.QUICK_INVENTORY_ITEMS_PER_SOURCE, sampled.discoveredCount)
-            assertTrue(sampled.sampled)
-            assertEquals("quick_sample_limit", sampled.reason)
+            assertEquals(1_000, whatsapp.discoveredCount)
+            assertEquals(false, whatsapp.sampled)
             assertTrue(sources.all { (it as FakeSource).maxRequestedLimit <= 100 })
         }
     }

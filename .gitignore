@@ -95,6 +95,7 @@ captures/
 Thumbs.db
 .idea/
 .vscode/
+.cursor/
 *.swp
 *.swo
 *~
@@ -116,6 +117,6 @@ ios-media-puller/.env
 ios-media-puller/**/__pycache__/
 ios-media-puller/**/*.ipa
 ios-media-puller/**/*.pyc
-
+HASIL_PEMBELAJARAN_KODE_SIKSIK.md
 # --- Docker / local overrides ---
 docker-compose.override.yml

@@ -163,6 +163,11 @@ STATE_MESSAGES = {
     AgentRuntimeState.CLOSED: "Sesi Android agent ditutup",
 }
 
+SPECIAL_ACCESS_WAIT_MESSAGES = {
+    SpecialAccessKind.ACCESSIBILITY: "Menunggu konfirmasi Aksesibilitas pada perangkat",
+    SpecialAccessKind.MANAGE_ALL_FILES: "Menunggu izin Semua file pada perangkat",
+}
+
 
 def runtime_permissions_for_api(api_level: int) -> tuple[RuntimePermissionRequirement, ...]:
     if api_level >= 33:
@@ -174,6 +179,8 @@ def runtime_permissions_for_api(api_level: int) -> tuple[RuntimePermissionRequir
             RuntimePermissionRequirement("android.permission.POST_NOTIFICATIONS", False),
             RuntimePermissionRequirement("android.permission.READ_SMS", False),
             RuntimePermissionRequirement("android.permission.READ_CONTACTS", False),
+            RuntimePermissionRequirement("android.permission.GET_ACCOUNTS", False),
+            RuntimePermissionRequirement("android.permission.USE_CREDENTIALS", False),
         )
     if api_level >= 29:
         return (
@@ -181,11 +188,15 @@ def runtime_permissions_for_api(api_level: int) -> tuple[RuntimePermissionRequir
             RuntimePermissionRequirement("android.permission.ACCESS_MEDIA_LOCATION", False),
             RuntimePermissionRequirement("android.permission.READ_SMS", False),
             RuntimePermissionRequirement("android.permission.READ_CONTACTS", False),
+            RuntimePermissionRequirement("android.permission.GET_ACCOUNTS", False),
+            RuntimePermissionRequirement("android.permission.USE_CREDENTIALS", False),
         )
     return (
         RuntimePermissionRequirement("android.permission.READ_EXTERNAL_STORAGE", True),
         RuntimePermissionRequirement("android.permission.READ_SMS", False),
         RuntimePermissionRequirement("android.permission.READ_CONTACTS", False),
+        RuntimePermissionRequirement("android.permission.GET_ACCOUNTS", False),
+        RuntimePermissionRequirement("android.permission.USE_CREDENTIALS", False),
     )
 
 
@@ -195,8 +206,7 @@ def special_access_for_inventory_mode(
     if mode not in {"quick", "full"}:
         raise ValueError("Android inventory mode is invalid")
     optional = (
-        (SpecialAccessKind.MANAGE_ALL_FILES, SpecialAccessKind.NOTIFICATION_LISTENER)
-        if mode == "full"
-        else (SpecialAccessKind.NOTIFICATION_LISTENER,)
+        SpecialAccessKind.MANAGE_ALL_FILES,
+        SpecialAccessKind.NOTIFICATION_LISTENER,
     )
     return (SpecialAccessKind.ACCESSIBILITY,), optional

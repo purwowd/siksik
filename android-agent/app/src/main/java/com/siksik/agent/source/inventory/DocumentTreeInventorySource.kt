@@ -354,6 +354,7 @@ class DocumentTreeInventorySource(
                 else -> "unknown"
             },
             directoryHint = node.directoryHint,
+            isFavorite = InventoryPolicy.looksFavorite(node.directoryHint, name),
             exif = mergedExif,
             warningCodes = warningCodes,
             thumbnailAvailable = cursor.int(DocumentsContract.Document.COLUMN_FLAGS)?.let {

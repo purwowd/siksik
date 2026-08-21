@@ -17,6 +17,7 @@ from app.acquisition.adb import (
     SpecialAccessState,
 )
 from app.acquisition.bootstrap_contracts import (
+    SPECIAL_ACCESS_WAIT_MESSAGES,
     AgentBootstrapConfig,
     AgentClientFactory,
     BootstrapWorkingState,
@@ -334,7 +335,7 @@ class AgentAccessCoordinator:
         serial: str,
         request_id: str | None,
         work: BootstrapWorkingState,
-        publish_awaiting: Callable[[], Awaitable[None]],
+        publish_awaiting: Callable[..., Awaitable[None]],
         required_access: tuple[SpecialAccessKind, ...] | None = None,
         optional_access: tuple[SpecialAccessKind, ...] = (),
     ) -> None:
@@ -394,9 +395,21 @@ class AgentAccessCoordinator:
                 work.special_access[access.value] = state.value
                 if state == SpecialAccessState.GRANTED:
                     continue
-                # Restore can return UNAVAILABLE when foreign enabled services
-                # fail strict component validation. Fall through to Settings.
-                if state == SpecialAccessState.UNAVAILABLE and component is not None:
+                # Restore can return UNAVAILABLE (foreign a11y entries) or DENIED
+                # (MIUI blocks settings put secure). Neither is operator denial.
+                if (
+                    state in {SpecialAccessState.UNAVAILABLE, SpecialAccessState.DENIED}
+                    and component is not None
+                ):
+                    logger.info(
+                        "agent_accessibility_restore_deferred",
+                        extra={
+                            "request_id": request_id,
+                            "session_id": session_id,
+                            "device_ref": device_ref(serial),
+                            "access_state": state.value,
+                        },
+                    )
                     state = SpecialAccessState.NOT_GRANTED
                     work.special_access[access.value] = state.value
             if access == SpecialAccessKind.NOTIFICATION_LISTENER:
@@ -464,8 +477,11 @@ class AgentAccessCoordinator:
                 self._config.package_name,
                 access,
                 user_id=user_id,
+                component=component,
             )
-            await publish_awaiting()
+            await publish_awaiting(
+                message=SPECIAL_ACCESS_WAIT_MESSAGES.get(access),
+            )
             logger.info(
                 "agent_access_waiting",
                 extra={

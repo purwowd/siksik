@@ -91,8 +91,8 @@ class AutomationConfig:
             or "/" not in self.agent_component
             or "/" not in self.accessibility_component
             or "\x00" in self.agent_component
-            or self.quick_scrolls not in range(0, 41)
-            or self.full_scrolls not in range(0, 41)
+            or self.quick_scrolls not in range(0, 401)
+            or self.full_scrolls not in range(0, 401)
             or self.quick_screenshots not in range(0, 49)
             or self.full_screenshots not in range(0, 49)
             or (self.debug_snapshots and self.debug_dir is None)
@@ -418,6 +418,37 @@ class AndroidUiAutomationOrchestrator:
                 False,
                 False,
             )
+        if target_package in TEXT_ONLY_SOCIAL_TARGETS:
+            try:
+                access_state = await self._adb.special_access_state(
+                    serial,
+                    self._config.agent_package_name,
+                    SpecialAccessKind.ACCESSIBILITY,
+                    component=self._config.accessibility_component,
+                    user_id=await self._adb.current_user_id(serial),
+                )
+            except AcquisitionError:
+                access_state = SpecialAccessState.UNAVAILABLE
+            if access_state != SpecialAccessState.GRANTED:
+                logger.error(
+                    "automation_text_only_accessibility_missing",
+                    extra={
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "crawl_id": crawl_id,
+                        "target_package": target_package,
+                        "access_state": getattr(access_state, "value", str(access_state)),
+                    },
+                )
+                return (
+                    failure_result(
+                        target_package,
+                        "failed",
+                        "accessibility_required",
+                    ),
+                    False,
+                    False,
+                )
         scrolls = self._config.quick_scrolls if mode == "quick" else self._config.full_scrolls
         screenshots = 0
         if target_package not in TEXT_ONLY_SOCIAL_TARGETS:
@@ -441,7 +472,7 @@ class AndroidUiAutomationOrchestrator:
             },
         )
         navigation_deadline_ms = int(
-            min(175.0, max(15.0, self._config.target_timeout_seconds - 10.0)) * 1000,
+            max(15.0, self._config.target_timeout_seconds - 10.0) * 1000,
         )
         try:
             result = await self._adb.run_instrumentation(
@@ -469,6 +500,21 @@ class AndroidUiAutomationOrchestrator:
             reason = "automation_timeout" if state == "timeout" else "automation_adb_failure"
             return failure_result(target_package, state, reason), True, True
         if result.returncode != 0 or result.output_truncated:
+            logger.warning(
+                "automation_instrumentation_failed",
+                extra={
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "crawl_id": crawl_id,
+                    "target_package": target_package,
+                    "returncode": result.returncode,
+                    "truncated": result.output_truncated,
+                    "failure_token": instrumentation_failure_token(
+                        result.stdout,
+                        result.stderr,
+                    ),
+                },
+            )
             return (
                 failure_result(target_package, "failed", "instrumentation_failed"),
                 True,
@@ -513,6 +559,17 @@ class AndroidUiAutomationOrchestrator:
                 "Build tidak menghasilkan APK automation yang valid.",
             )
         return path
+
+
+def instrumentation_failure_token(stdout: str, stderr: str) -> str:
+    blob = f"{stdout}\n{stderr}"
+    if "Unable to find instrumentation" in blob:
+        return "runner_not_registered"
+    if "Unable to instantiate instrumentation" in blob:
+        return "runner_instantiate_failed"
+    if "PROCESS_CRASHED" in blob:
+        return "process_crashed"
+    return "instrument_nonzero_exit"
 
 
 def parse_instrumentation_result(
