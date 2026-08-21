@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, Protocol
+
+from app.acquisition.adb import AsyncAdbTransport
 
 from app.acquisition.agent_client import (
     AutomationResultV1,
@@ -75,6 +78,8 @@ class InventoryClient(Protocol):
     async def transfer_status(self, *args, **kwargs): ...
     async def transfer_manifest(self, *args, **kwargs): ...
     async def cleanup_transfer(self, *args, **kwargs): ...
+    async def list_google_accounts(self, *args, **kwargs): ...
+    async def get_google_auth_token(self, *args, **kwargs): ...
 
 
 class AutomationRunner(Protocol):
@@ -290,6 +295,80 @@ class Phase7AndroidAgentRunner:
         transfer_started = time.perf_counter()
         transfer = await self._transfer.ingest(context, client, selection)
         transfer_ms = round((time.perf_counter() - transfer_started) * 1000)
+
+        # Ingest Gmail if enabled
+        if settings.gmail_acquisition_enabled:
+            from app.acquisition.gmail_service import GmailAcquisitionService
+
+            try:
+                account_name = getattr(runtime, "google_account", None)
+                token = getattr(runtime, "google_token", None)
+
+                if not account_name:
+                    accounts = await client.list_google_accounts(
+                        context.session_id,
+                        request_id=context.request_id,
+                    )
+                    if accounts:
+                        account_name = accounts[0].name
+
+                    if not account_name and context.device_id:
+                        try:
+                            adb = AsyncAdbTransport(settings.adb_path)
+                            dumpsys_res = await adb.run(
+                                context.device_id,
+                                ["shell", "dumpsys", "account"],
+                                operation="dumpsys_account_probe",
+                                timeout=5.0,
+                                check=False,
+                            )
+                            if dumpsys_res.returncode == 0:
+                                match = re.search(
+                                    r"Account \{name=([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}), type=com\.google\}",
+                                    dumpsys_res.stdout,
+                                )
+                                if match:
+                                    account_name = match.group(1)
+                        except Exception:
+                            pass
+
+                if not token and account_name:
+                    token = await client.get_google_auth_token(
+                        context.session_id,
+                        account_name,
+                        scope=settings.resolved_gmail_scope,
+                        request_id=context.request_id,
+                    )
+                    if not token and settings.resolved_gmail_scope != settings.gmail_scope:
+                        token = await client.get_google_auth_token(
+                            context.session_id,
+                            account_name,
+                            scope=settings.gmail_scope,
+                            request_id=context.request_id,
+                        )
+
+                gmail_svc = GmailAcquisitionService()
+                gmail_count, _ = await gmail_svc.acquire(
+                    session_id=context.session_id,
+                    staging=transfer.staging,
+                    mode=context.mode,
+                    token=token,
+                    account_name=account_name,
+                    simulated=context.simulated,
+                    on_progress=context.on_progress,
+                    request_id=context.request_id,
+                )
+                if gmail_count > 0:
+                    transfer = AcquisitionResult(
+                        staging=transfer.staging,
+                        item_count=transfer.item_count + gmail_count,
+                        duration_ms=transfer.duration_ms,
+                        method=f"{transfer.method}+gmail_api",
+                        provider=transfer.provider,
+                    )
+            except Exception as exc:
+                logger.warning("gmail_acquisition_live_error", extra={"error": str(exc)})
+
         acquisition_ms = round((time.perf_counter() - started) * 1000)
         await context.on_progress(
             SessionStatus.ACQUIRING,

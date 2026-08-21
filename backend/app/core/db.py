@@ -486,6 +486,25 @@ async def _migration_social_snapshot_enrichment(conn: aiosqlite.Connection) -> N
     )
 
 
+async def _migration_media_tickets(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS media_tickets (
+            ticket_hash TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_media_tickets_expiry ON media_tickets(expires_at)"
+    )
+
+
 MIGRATIONS: tuple[tuple[int, str, MigrationHandler], ...] = (
     (1, "finding_media_dates", _migration_finding_media_dates),
     (2, "agent_runtimes", _migration_agent_runtimes),
@@ -494,6 +513,7 @@ MIGRATIONS: tuple[tuple[int, str, MigrationHandler], ...] = (
     (5, "direct_crawl_ingestion", _migration_direct_crawl_ingestion),
     (6, "direct_crawl_composite_identity", _migration_direct_crawl_composite_identity),
     (7, "social_snapshot_enrichment", _migration_social_snapshot_enrichment),
+    (8, "media_tickets", _migration_media_tickets),
 )
 
 

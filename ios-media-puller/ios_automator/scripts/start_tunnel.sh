@@ -15,8 +15,14 @@ export PATH="${HOME}/.local/bin:${PATH}"
 [[ -f "$ROOT/.env" ]] && set -a && source "$ROOT/.env" && set +a
 
 tunnel_works() {
-  # apps --list bisa sukses via USB lockdown; runwda butuh tunnel userspace aktif.
-  curl -sf --max-time 2 "http://127.0.0.1:${TUNNEL_INFO_PORT}/tunnels" >/dev/null 2>&1 || return 1
+  # apps --list bisa sukses via USB lockdown; runwda butuh tunnel userspace
+  # untuk UDID ini. Jangan reuse tunnel iPhone lama saat ganti HP.
+  local body=""
+  body="$(curl -sf --max-time 2 "http://127.0.0.1:${TUNNEL_INFO_PORT}/tunnels" 2>/dev/null || true)"
+  [[ -n "$body" ]] || return 1
+  if [[ -n "$UDID" ]] && ! grep -q "$UDID" <<<"$body"; then
+    return 1
+  fi
   ios apps --list \
     --tunnel-info-port="$TUNNEL_INFO_PORT" \
     ${UDID:+--udid "$UDID"} >/dev/null 2>&1

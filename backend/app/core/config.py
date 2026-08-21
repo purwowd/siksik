@@ -37,9 +37,9 @@ class Settings(BaseSettings):
     # Performance knobs — gallery-first
     image_cap_quick: int = 0
     image_cap_full: int = 0  # 0 = tanpa batas (dalam window 3/6 bulan)
-    video_cap_quick: int = 80
+    video_cap_quick: int = 0
     video_cap_full: int = 0  # 0 = tanpa batas (FULL)
-    max_file_size_mb: int = 50
+    max_file_size_mb: int = 4096
     cv_batch_size: int = 16
     worker_concurrency: int = 4
     # Resize sebelum OCR — 0 = tanpa downscale; 2200 lebih baik untuk poster/meme
@@ -59,8 +59,8 @@ class Settings(BaseSettings):
     video_whisper_transcribe_first_s: int = 120
     hash_chunk_bytes: int = 1024 * 1024
     adb_pull_timeout_s: int = 120
-    adb_max_files_quick: int = 800
-    adb_max_files_full: int = 5000
+    adb_max_files_quick: int = 0
+    adb_max_files_full: int = 0
 
     # Android provider boundaries. Agent remains opt-in until its phase gates pass.
     adb_path: str = "adb"
@@ -111,16 +111,14 @@ class Settings(BaseSettings):
     )
     android_agent_automation_package: str = "com.siksik.agent.automation"
     android_agent_automation_runner: str = (
-        "com.siksik.agent.automation/androidx.test.runner.AndroidJUnitRunner"
+        "com.siksik.agent.automation/com.siksik.agent.automation.SiksikAndroidJUnitRunner"
     )
     android_agent_automation_test_class: str = (
         "com.siksik.agent.automation.SocialCrawlInstrumentation"
     )
     android_agent_automation_install_timeout_s: float = 180.0
-    android_agent_automation_target_timeout_s: float = 250.0
+    android_agent_automation_target_timeout_s: float = 1800.0
 
-    # Non-root Android trash/recycle recovery. Both modes inspect cache residue;
-    # QUICK stays bounded by its lower item/byte/time budgets.
     android_recovery_enabled: bool = True
     android_recovery_quick_max_items: int = Field(default=25, ge=1, le=500)
     android_recovery_full_max_items: int = Field(default=500, ge=1, le=10_000)
@@ -158,26 +156,33 @@ class Settings(BaseSettings):
         "com.twitter.android",
         "com.facebook.katana",
     ]
-    android_agent_social_quick_scrolls: int = 18
-    android_agent_social_full_scrolls: int = 40
+    android_agent_social_quick_scrolls: int = 200
+    android_agent_social_full_scrolls: int = 400
     android_agent_social_quick_screenshots: int = 24
     android_agent_social_full_screenshots: int = 46
     android_social_host_ocr_enabled: bool = True
     android_social_ocr_max_edge_px: int = 1280
     android_social_ocr_mag_ratio: float = 1.25
     android_social_debug_snapshots: bool = True
-    # Debug social screenshots stay inside the siksik tree (not Product1 parent).
     android_social_debug_dir: Path = ROOT.parent / "temp_crawl"
 
-    # iOS acquisition: AFC media/docs + selective SMS/contacts + WDA social (IG/X).
-    # Full idevicebackup2 remains opt-in (OOM-prone on lab Macs).
-    # QUICK = capped counts; FULL with 0 = uncapped (take all available).
+    gmail_acquisition_enabled: bool = True
+    gmail_client_id: str = ""
+    gmail_quick_max_messages: int = Field(default=0, ge=0, le=100_000)
+    gmail_full_max_messages: int = Field(default=0, ge=0, le=100_000)
+    gmail_request_timeout_s: float = Field(default=30.0, ge=5.0, le=120.0)
+    gmail_scope: str = "oauth2:https://www.googleapis.com/auth/gmail.readonly"
+
+    @property
+    def resolved_gmail_scope(self) -> str:
+        return self.gmail_scope
+
     ios_social_ui_enabled: bool = True
     ios_afc_media_enabled: bool = True
     ios_afc_docs_enabled: bool = True
-    ios_afc_quick_media_count: int = 40
+    ios_afc_quick_media_count: int = 0
     ios_afc_full_media_count: int = 0
-    ios_afc_quick_docs_count: int = 30
+    ios_afc_quick_docs_count: int = 0
     ios_afc_full_docs_count: int = 0
     ios_afc_timeout_s: float = 300.0
     ios_photo_library_recovery_enabled: bool = True
@@ -216,23 +221,25 @@ class Settings(BaseSettings):
     ios_library_timeout_s: float = Field(default=900.0, ge=30.0, le=7200.0)
     # Selective backup2 --only sms/contacts (not full device backup).
     ios_sms_contacts_enabled: bool = True
-    ios_sms_quick_messages: int = 200
+    ios_sms_quick_messages: int = 0
     ios_sms_full_messages: int = 0
-    ios_contacts_quick: int = 200
+    ios_contacts_quick: int = 0
     ios_contacts_full: int = 0
     ios_backup_comms_timeout_s: float = 600.0
     ios_libimobiledevice_backup_enabled: bool = False
     ios_media_puller_path: Path = ROOT.parent / "ios-media-puller"
     ios_social_wda_url: str = "http://127.0.0.1:8100"
-    ios_social_wda_boot_timeout_s: float = 120.0
-    ios_social_flow_timeout_s: float = 300.0
-    ios_social_quick_archive_shots: int = 2
+    # Pair + DDI download (iPhone baru/reboot) + tunnel restart + WDA install/boot.
+    ios_social_wda_boot_timeout_s: float = 300.0
+    ios_social_flow_timeout_s: float = 420.0
+    ios_social_quick_archive_shots: int = 3
     ios_social_full_archive_shots: int = 0
     ios_social_quick_x_shots: int = 2
     ios_social_full_x_shots: int = 0
     ios_social_targets: list[str] = [
         "com.instagram.android",
         "com.twitter.android",
+        "com.facebook.katana",
     ]
 
     # Upload ZIP hasil ADB (analisa tanpa akuisisi live)
@@ -246,7 +253,9 @@ class Settings(BaseSettings):
         "/sdcard/Pictures",
         "/sdcard/Pictures/Screenshots",
         "/sdcard/Download",
+        "/sdcard/Documents",
         "/sdcard/Movies",
+        "/sdcard/Music",
         # Media chat sebagai foto/video (bukan DB)
         "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images",
         "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video",
@@ -259,7 +268,9 @@ class Settings(BaseSettings):
         "/sdcard/DCIM",
         "/sdcard/Pictures",
         "/sdcard/Download",
+        "/sdcard/Documents",
         "/sdcard/Movies",
+        "/sdcard/Music",
         "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images",
         "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video",
         "/sdcard/WhatsApp/Media/WhatsApp Images",
@@ -279,6 +290,21 @@ class Settings(BaseSettings):
         ".mp4",
         ".mov",
         ".3gp",
+        ".mkv",
+        ".webm",
+        ".mp3",
+        ".m4a",
+        ".aac",
+        ".wav",
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".txt",
+        ".csv",
     ]
 
     # OCR (enable di server GPU)

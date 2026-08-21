@@ -179,6 +179,8 @@ def runtime_permissions_for_api(api_level: int) -> tuple[RuntimePermissionRequir
             RuntimePermissionRequirement("android.permission.POST_NOTIFICATIONS", False),
             RuntimePermissionRequirement("android.permission.READ_SMS", False),
             RuntimePermissionRequirement("android.permission.READ_CONTACTS", False),
+            RuntimePermissionRequirement("android.permission.GET_ACCOUNTS", False),
+            RuntimePermissionRequirement("android.permission.USE_CREDENTIALS", False),
         )
     if api_level >= 29:
         return (
@@ -186,11 +188,15 @@ def runtime_permissions_for_api(api_level: int) -> tuple[RuntimePermissionRequir
             RuntimePermissionRequirement("android.permission.ACCESS_MEDIA_LOCATION", False),
             RuntimePermissionRequirement("android.permission.READ_SMS", False),
             RuntimePermissionRequirement("android.permission.READ_CONTACTS", False),
+            RuntimePermissionRequirement("android.permission.GET_ACCOUNTS", False),
+            RuntimePermissionRequirement("android.permission.USE_CREDENTIALS", False),
         )
     return (
         RuntimePermissionRequirement("android.permission.READ_EXTERNAL_STORAGE", True),
         RuntimePermissionRequirement("android.permission.READ_SMS", False),
         RuntimePermissionRequirement("android.permission.READ_CONTACTS", False),
+        RuntimePermissionRequirement("android.permission.GET_ACCOUNTS", False),
+        RuntimePermissionRequirement("android.permission.USE_CREDENTIALS", False),
     )
 
 

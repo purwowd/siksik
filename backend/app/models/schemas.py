@@ -138,6 +138,15 @@ class AuthorizeRequest(RequestModel):
     note: str | None = Field(default=None, max_length=4000)
 
 
+class MediaTicketRequest(RequestModel):
+    path: str = Field(min_length=1, max_length=1024)
+
+
+class MediaTicketOut(ResponseModel):
+    ticket: str = Field(min_length=32, max_length=256)
+    expires_at: str
+
+
 class DeviceInfo(ResponseModel):
     device_id: str
     device_type: DeviceType
@@ -378,6 +387,7 @@ class GalleryItemOut(ResponseModel):
     label: str
     mime: str | None = None
     preview_path: str | None = Field(default=None, max_length=1024)
+    preview_text: str | None = Field(default=None, max_length=2000)
     captured_at: str | None = None
     favorite: bool = False
 

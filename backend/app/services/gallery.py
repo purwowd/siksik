@@ -1,9 +1,3 @@
-"""Gallery albums for transferred session media.
-
-Lists files already indexed in the session. Does not pull extra device
-content. The external android-media-puller script is reference-only.
-"""
-
 from __future__ import annotations
 
 import json
@@ -35,7 +29,8 @@ ACCESS_LABELS = {
     ACCESS_FAVORITE: "Favorit",
 }
 
-EXCLUDE_SOURCES = {
+EXCLUDE_ROLES = {"screenshot"}
+STRUCTURED_SOURCES = {
     "sms",
     "contacts",
     "contact",
@@ -44,7 +39,7 @@ EXCLUDE_SOURCES = {
     "notification",
     "notification_listener",
 }
-EXCLUDE_ROLES = {"screenshot"}
+FILE_SOURCES = {"media_image", "media_video", "media_audio", "document"}
 GENERIC_LEAVES = {
     "0",
     "emulated",
@@ -72,12 +67,27 @@ ALBUM_ALIASES = {
     "documents": "Documents",
     "document": "Documents",
     "dokumen": "Documents",
+    "audio": "Audio",
+    "music": "Audio",
+    "musik": "Audio",
+    "messages": "Pesan",
+    "message": "Pesan",
+    "sms": "Pesan",
+    "contacts": "Kontak",
+    "contact": "Kontak",
+    "notifications": "Notifikasi",
+    "notification": "Notifikasi",
+    "social": "Media Sosial",
     "whatsapp images": "WhatsApp",
     "whatsapp video": "WhatsApp",
     "telegram images": "Telegram",
     "telegram video": "Telegram",
     "preview": "Previews",
     "previews": "Previews",
+    "email": "Email",
+    "emails": "Email",
+    "gmail": "Email",
+    "mail": "Email",
 }
 FAVORITE_TOKENS = (
     "favorite",
@@ -89,6 +99,66 @@ FAVORITE_TOKENS = (
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".3gp", ".avi", ".m4v"}
+AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".wav", ".ogg", ".opus", ".flac", ".amr"}
+DOCUMENT_EXTS = {
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".csv",
+    ".txt",
+    ".rtf",
+    ".ppt",
+    ".pptx",
+    ".odt",
+    ".ods",
+    ".pages",
+    ".numbers",
+    ".key",
+    ".html",
+    ".htm",
+    ".eml",
+    ".msg",
+    ".json",
+    ".xml",
+    ".log",
+    ".vcf",
+    ".vcard",
+}
+SEMANTIC_ALBUMS = {
+    "whatsapp": "WhatsApp",
+    "telegram": "Telegram",
+    "screenshots": "Screenshots",
+    "screenshot": "Screenshots",
+    "download": "Download",
+    "downloads": "Download",
+    "unduhan": "Download",
+    "dcim": "Camera",
+    "camera": "Camera",
+    "pictures": "Pictures",
+    "movies": "Movies",
+    "videos": "Movies",
+    "video": "Movies",
+    "documents": "Documents",
+    "document": "Documents",
+    "audio": "Audio",
+    "music": "Audio",
+    "email": "Email",
+    "gmail": "Email",
+}
+SOURCE_ALBUMS = {
+    "sms": "Pesan",
+    "contacts": "Kontak",
+    "contact": "Kontak",
+    "visible_ui": "Media Sosial",
+    "accessibility_visible_ui": "Media Sosial",
+    "notification": "Notifikasi",
+    "notification_listener": "Notifikasi",
+    "media_audio": "Audio",
+    "email": "Email",
+    "gmail": "Email",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +177,7 @@ class GalleryRecord:
     added_ts: float
     taken_ts: float
     preview_path: str
+    preview_text: str | None
 
 
 def album_label(raw: str) -> str:
@@ -124,7 +195,22 @@ def album_key(label: str) -> str:
     return (slug or "lainnya")[:64]
 
 
+def _semantic_album(directory_hint: str | None, path: str) -> str | None:
+    combined = "/".join(part for part in (directory_hint, path) if part)
+    parts = [part.strip().casefold() for part in combined.replace("\\", "/").split("/")]
+    for needle in ("whatsapp", "telegram"):
+        if any(needle in part for part in parts):
+            return SEMANTIC_ALBUMS[needle]
+    for needle, label in SEMANTIC_ALBUMS.items():
+        if needle in parts:
+            return label
+    return None
+
+
 def album_leaf(directory_hint: str | None, path: str, source: str) -> str:
+    semantic = _semantic_album(directory_hint, path)
+    if semantic:
+        return semantic
     hint = (directory_hint or "").replace("\\", "/").strip().strip("/")
     if hint:
         leaf = hint.split("/")[-1].strip()
@@ -137,7 +223,9 @@ def album_leaf(directory_hint: str | None, path: str, source: str) -> str:
         if part.casefold() in {"gallery", "video", "documents", "media_image", "media_video"}:
             continue
         return album_label(part)
-    return album_label(str(source or "lainnya").replace("_", " "))
+    return SOURCE_ALBUMS.get(source.casefold()) or album_label(
+        str(source or "lainnya").replace("_", " ")
+    )
 
 
 def looks_favorite(*parts: str | None) -> bool:
@@ -146,17 +234,32 @@ def looks_favorite(*parts: str | None) -> bool:
 
 
 def is_gallery_media(*, source: str, mime: str, path: str, role: str | None) -> bool:
-    if (source or "").lower() in EXCLUDE_SOURCES:
+    source_l = (source or "").casefold()
+    role_l = (role or "").casefold()
+    if role_l in EXCLUDE_ROLES:
         return False
-    if (role or "").lower() in EXCLUDE_ROLES:
-        return False
-    mime_l = (mime or "").lower()
+    if role_l == "canonical_record":
+        return source_l in STRUCTURED_SOURCES
     ext = Path(path).suffix.lower()
+    if source_l in {"email", "gmail"}:
+        return role_l in {"email_body", "email_attachment"} or ext in {".html", ".htm", ".eml"}
+    if source_l in STRUCTURED_SOURCES:
+        return True
+    mime_l = (mime or "").lower()
     if mime_l.startswith("image/") or ext in IMAGE_EXTS:
         return True
     if mime_l.startswith("video/") or ext in VIDEO_EXTS:
         return True
-    return False
+    if mime_l.startswith("audio/") or ext in AUDIO_EXTS:
+        return True
+    if mime_l.startswith("text/") or ext in DOCUMENT_EXTS:
+        return True
+    return source_l in FILE_SOURCES
+
+
+def _display_path(album: str, display_name: str) -> str:
+    safe_name = Path(display_name.replace("\\", "/")).name.strip() or "data"
+    return f"{album}/{safe_name}"
 
 
 def _parse_epoch(value: Any) -> float:
@@ -240,8 +343,14 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         if isinstance(meta.get("display_name"), str) and meta.get("display_name")
         else Path(path).name
     )
-    label = album_leaf(directory_hint, path, source)
-    if isinstance(meta.get("album"), str) and meta["album"].strip():
+    source_label = SOURCE_ALBUMS.get(source.casefold())
+    label = source_label or album_leaf(directory_hint, path, source)
+    if (
+        source_label is None
+        and _semantic_album(directory_hint, path) is None
+        and isinstance(meta.get("album"), str)
+        and meta["album"].strip()
+    ):
         label = album_label(meta["album"])
     added = _parse_epoch(meta.get("date_added"))
     modified = _parse_epoch(meta.get("date_modified"))
@@ -252,7 +361,7 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
     favorite = bool(meta.get("is_favorite")) or looks_favorite(directory_hint, display_name, path, label)
     return GalleryRecord(
         file_id=str(row["id"]),
-        path=path,
+        path=_display_path(label, str(display_name)),
         source=source,
         mime=mime,
         sha256=sha256,
@@ -265,6 +374,11 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         added_ts=added or captured,
         taken_ts=taken or captured,
         preview_path=path,
+        preview_text=(
+            " ".join(str(row["preview_text"]).replace("\x00", " ").split())[:2000]
+            if row["preview_text"]
+            else None
+        ),
     )
 
 
@@ -329,15 +443,33 @@ def _to_item(session_id: str, record: GalleryRecord) -> GalleryItemOut:
             else None
         ),
         favorite=record.is_favorite,
+        preview_text=record.preview_text,
     )
 
 
 async def _load_records(session_id: str, mode: AcquisitionMode) -> list[GalleryRecord]:
     rows = await db.fetchall(
         """
-        SELECT id, source, path, mime, sha256, meta_json
-        FROM files
-        WHERE session_id = ? AND pull_status = 'pulled'
+        SELECT
+            f.id,
+            f.source,
+            f.path,
+            f.mime,
+            f.sha256,
+            f.meta_json,
+            (
+                SELECT cr.normalized_text
+                FROM crawl_records cr
+                WHERE cr.session_id = f.session_id
+                  AND cr.record_id = CASE
+                      WHEN json_valid(f.meta_json)
+                      THEN json_extract(f.meta_json, '$.crawl_record_id')
+                      ELSE NULL
+                  END
+                LIMIT 1
+            ) AS preview_text
+        FROM files f
+        WHERE f.session_id = ? AND f.pull_status = 'pulled'
         """,
         (session_id,),
     )

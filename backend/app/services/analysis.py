@@ -202,7 +202,27 @@ def analyze_content_result(
     ext = path.suffix.lower()
     if mime == CANONICAL_CRAWL_RECORD_MIME:
         findings = analyze_text_l1_l2(text, keywords) if text.strip() else []
-        return ContentAnalysisResult(tuple(findings), True)
+        if precomputed_ocr_text and precomputed_ocr_text.strip():
+            from app.services import ocr as ocr_mod
+
+            findings.extend(
+                ocr_mod.ocr_findings_from_text(
+                    precomputed_ocr_text,
+                    backend=precomputed_ocr_backend or "host_ocr",
+                )
+            )
+            if precomputed_ocr_text.strip() not in (text or ""):
+                findings.extend(
+                    analyze_text_l1_l2(precomputed_ocr_text, keywords)
+                )
+        seen: set[str] = set()
+        uniq: list[dict] = []
+        for f in findings:
+            key = f"{f['label']}|{f['evidence'][:80]}"
+            if key not in seen:
+                seen.add(key)
+                uniq.append(f)
+        return ContentAnalysisResult(tuple(uniq), True)
     findings: list[dict] = []
     cacheable = True
     findings.extend(analyze_path_signals(str(path), keywords))
@@ -499,12 +519,43 @@ async def _analyze_session_body(
             except (TypeError, json.JSONDecodeError):
                 meta = {}
             precomputed = None
+            record_id_for_ocr = None
             if meta.get("crawl_artifact_role") == "screenshot":
-                precomputed = social_ocr.get(str(meta.get("crawl_record_id") or ""))
+                record_id_for_ocr = str(meta.get("crawl_record_id") or "")
+                precomputed = social_ocr.get(record_id_for_ocr) if record_id_for_ocr else None
+            elif row["source"] in {"visible_ui", "accessibility_visible_ui"}:
+                record_id_for_ocr = str(
+                    meta.get("crawl_record_id")
+                    or meta.get("record_id")
+                    or Path(str(row["path"])).stem.split("__")[0]
+                    or ""
+                )
+                if record_id_for_ocr.startswith("record_"):
+                    precomputed = social_ocr.get(record_id_for_ocr)
+                else:
+                    path_name = Path(str(row["path"])).name
+                    for rid, payload in social_ocr.items():
+                        if rid and rid in path_name:
+                            record_id_for_ocr = rid
+                            precomputed = payload
+                            break
             if cached is not None:
                 results = cached
             else:
                 text = await read_preview(path, row["mime"] or "")
+                if (
+                    precomputed
+                    and precomputed[0].strip()
+                    and row["source"] in {"visible_ui", "accessibility_visible_ui"}
+                ):
+                    source_text = text.strip() if isinstance(text, str) else ""
+                    ocr_text = precomputed[0].strip()
+                    if ocr_text and ocr_text not in source_text:
+                        text = "\n".join(
+                            value
+                            for value in (source_text, ocr_text)
+                            if value
+                        )[:200_000]
                 ext = Path(row["path"]).suffix.lower()
                 origin_hint = " ".join(
                     str(meta.get(key) or "")
@@ -535,6 +586,8 @@ async def _analyze_session_body(
                         row["source"],
                         text,
                         keywords,
+                        precomputed_ocr_text=precomputed[0] if precomputed else None,
+                        precomputed_ocr_backend=precomputed[1] if precomputed else None,
                         origin_hint=origin_hint,
                     )
                 results = list(outcome.findings)

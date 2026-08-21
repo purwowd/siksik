@@ -8,7 +8,7 @@ from app.models.schemas import AcquisitionMode
 from app.selection.contracts import KeywordPolicyV1, SelectionPolicyV1
 from app.services.lexicon import category_for_keyword, keyword_match_terms, normalize_text
 
-POLICY_VERSION = "siksik-selection-v4"
+POLICY_VERSION = "siksik-selection-v5"
 
 
 def _keyword_corpus() -> list[str]:

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from app.core.config import settings
@@ -21,6 +22,8 @@ from app.models.schemas import (
     HealthOut,
     LoginRequest,
     LoginResponse,
+    MediaTicketOut,
+    MediaTicketRequest,
     MeResponse,
     NamedCount,
     PaginatedFindings,
@@ -45,6 +48,7 @@ from app.services.auth import (
     login,
     logout,
     require_perm,
+    user_from_token,
 )
 from app.services.reports import build_session_report, report_to_html
 from app.services.sessions import sessions
@@ -62,6 +66,72 @@ from app.selection.service import selection_review_service
 
 router = APIRouter()
 MAX_FINDING_PREVIEW_CHARS = 320
+MEDIA_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".heic",
+    ".heif",
+    ".mp4",
+    ".mov",
+    ".webm",
+    ".mkv",
+    ".3gp",
+    ".avi",
+    ".m4v",
+    ".mp3",
+    ".m4a",
+    ".aac",
+    ".wav",
+    ".ogg",
+    ".opus",
+    ".flac",
+    ".amr",
+    ".html",
+    ".htm",
+    ".json",
+    ".eml",
+    ".msg",
+    ".txt",
+    ".csv",
+    ".xml",
+    ".log",
+    ".vcf",
+    ".vcard",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ods",
+    ".ppt",
+    ".pptx",
+    ".odt",
+    ".rtf",
+    ".pages",
+    ".numbers",
+    ".key",
+}
+MEDIA_APPLICATION_MIMES = {
+    "application/json",
+    "application/pdf",
+    "application/rtf",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.oasis.opendocument.text",
+    "application/vnd.oasis.opendocument.spreadsheet",
+    "application/vnd.apple.pages",
+    "application/vnd.apple.numbers",
+    "application/vnd.apple.keynote",
+    "application/vnd.siksik.crawl-record+json",
+}
 
 
 def _pages(total: int, page_size: int) -> int:
@@ -546,17 +616,10 @@ async def session_gallery(
     return await gallery_mod.list_items(session_id, mode, album, page, page_size)
 
 
-@router.get("/sessions/{session_id}/media")
-async def session_media(
-    session_id: str,
-    _: Annotated[AuthUser, Depends(require_perm("findings:read"))],
-    path: str = Query(..., min_length=1, max_length=1024, description="Relative path dalam staging"),
-):
-    """Serve image/video preview dari staging sesi (path traversal aman)."""
+async def _resolve_session_media(session_id: str, path: str) -> tuple[str, Path, str | None]:
     row = await db.fetchone("SELECT id FROM sessions WHERE id = ?", (session_id,))
     if not row:
         raise HTTPException(status_code=404, detail="Session not found")
-    # Normalisasi relative path
     rel = path.replace("\\", "/").lstrip("/")
     if ".." in Path(rel).parts:
         raise HTTPException(status_code=400, detail="Invalid path")
@@ -568,24 +631,50 @@ async def session_media(
         raise HTTPException(status_code=400, detail="Path di luar staging") from exc
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File tidak ditemukan")
-    # Batasi jenis media untuk UI preview
-    ext = target.suffix.lower()
-    if ext not in {
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".gif",
-        ".webp",
-        ".bmp",
-        ".mp4",
-        ".mov",
-        ".webm",
-        ".mkv",
-        ".3gp",
-        ".avi",
-    }:
+    file_row = await db.fetchone(
+        "SELECT mime FROM files WHERE session_id = ? AND path = ? AND pull_status = 'pulled' LIMIT 1",
+        (session_id, rel),
+    )
+    indexed_mime = str(file_row["mime"] or "").casefold() if file_row else ""
+    mime_allowed = indexed_mime.startswith(("image/", "video/", "audio/", "text/")) or (
+        indexed_mime in MEDIA_APPLICATION_MIMES
+    )
+    if target.suffix.lower() not in MEDIA_EXTENSIONS and not mime_allowed:
         raise HTTPException(status_code=415, detail="Tipe media tidak didukung preview")
-    return FileResponse(target, filename=target.name)
+    return rel, target, indexed_mime or None
+
+
+@router.post("/sessions/{session_id}/media-ticket", response_model=MediaTicketOut)
+async def session_media_ticket(
+    session_id: str,
+    body: MediaTicketRequest,
+    user: Annotated[AuthUser, Depends(require_perm("findings:read"))],
+) -> MediaTicketOut:
+    from app.services.media_access import issue_media_ticket
+
+    rel, _, _ = await _resolve_session_media(session_id, body.path)
+    ticket, expires_at = await issue_media_ticket(session_id, user.id, rel)
+    return MediaTicketOut(ticket=ticket, expires_at=expires_at)
+
+
+@router.get("/sessions/{session_id}/media")
+async def session_media(
+    session_id: str,
+    path: str = Query(..., min_length=1, max_length=1024),
+    ticket: str | None = Query(default=None, min_length=32, max_length=256),
+    authorization: Annotated[str | None, Header()] = None,
+):
+    from app.services.media_access import validate_media_ticket
+
+    rel, target, indexed_mime = await _resolve_session_media(session_id, path)
+    authorized = bool(ticket) and await validate_media_ticket(ticket or "", session_id, rel)
+    if not authorized:
+        user = await user_from_token(authorization)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Autentikasi diperlukan")
+        user.require("findings:read")
+    media_type = indexed_mime or mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return FileResponse(target, media_type=media_type)
 
 
 @router.get("/sessions/{session_id}/report")

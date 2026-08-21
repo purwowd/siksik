@@ -222,6 +222,7 @@ export interface GalleryItem {
   label: string;
   mime?: string | null;
   preview_path?: string | null;
+  preview_text?: string | null;
   captured_at?: string | null;
   favorite: boolean;
 }
@@ -502,12 +503,12 @@ export const api = {
   },
 };
 
-export function mediaUrl(sessionId: string, path: string) {
+export function mediaUrl(sessionId: string, path: string, ticket?: string) {
   const q = new URLSearchParams({ path });
+  if (ticket) q.set("ticket", ticket);
   return `${BASE}/sessions/${sessionId}/media?${q}`;
 }
 
-/** Fetch staging media with Bearer token → blob object URL (revoke saat unmount). */
 export async function fetchMediaBlobUrl(sessionId: string, path: string): Promise<string> {
   const headers: Record<string, string> = {};
   if (authToken) headers.Authorization = `Bearer ${authToken}`;
@@ -517,6 +518,28 @@ export async function fetchMediaBlobUrl(sessionId: string, path: string): Promis
   }
   const blob = await res.blob();
   return URL.createObjectURL(blob);
+}
+
+export async function fetchMediaText(sessionId: string, path: string): Promise<string> {
+  const headers: Record<string, string> = {};
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+  const res = await fetch(mediaUrl(sessionId, path), { headers });
+  if (!res.ok) throw new Error(`Media ${res.status}`);
+  return res.text();
+}
+
+export async function issueMediaTicket(
+  sessionId: string,
+  path: string,
+): Promise<{ ticket: string; expires_at: string }> {
+  return req(`/sessions/${sessionId}/media-ticket`, {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
+}
+
+export function ticketedMediaUrl(sessionId: string, path: string, ticket: string): string {
+  return mediaUrl(sessionId, path, ticket);
 }
 
 export function ms(v: number) {

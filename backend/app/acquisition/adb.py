@@ -1295,32 +1295,53 @@ class AsyncAdbTransport:
                     components.append(preserved)
         if expected not in components:
             components.append(expected)
-        updated = await self.run(
+        enabled_value = ":".join(components)
+        updated = await self._put_secure_setting(
             serial,
-            [
-                *settings_prefix,
-                "put",
-                "secure",
-                "enabled_accessibility_services",
-                ":".join(components),
-            ],
+            settings_prefix,
+            "enabled_accessibility_services",
+            enabled_value,
             operation="accessibility_access_restore",
-            check=False,
         )
+        if updated.returncode != 0 and self._secure_settings_denied(updated):
+            if await self._grant_write_secure_settings(
+                serial,
+                package_name,
+                active_user_id,
+            ):
+                updated = await self._put_secure_setting(
+                    serial,
+                    settings_prefix,
+                    "enabled_accessibility_services",
+                    enabled_value,
+                    operation="accessibility_access_restore_retry",
+                )
         if updated.returncode != 0:
-            text = f"{updated.stdout}\n{updated.stderr}".casefold()
-            if "security exception" in text or "permission denial" in text:
+            if self._secure_settings_denied(updated):
                 return SpecialAccessState.DENIED
             return self._unavailable_or_raise(updated, "accessibility_access_restore")
-        master = await self.run(
+        master = await self._put_secure_setting(
             serial,
-            [*settings_prefix, "put", "secure", "accessibility_enabled", "1"],
+            settings_prefix,
+            "accessibility_enabled",
+            "1",
             operation="accessibility_master_restore",
-            check=False,
         )
+        if master.returncode != 0 and self._secure_settings_denied(master):
+            if await self._grant_write_secure_settings(
+                serial,
+                package_name,
+                active_user_id,
+            ):
+                master = await self._put_secure_setting(
+                    serial,
+                    settings_prefix,
+                    "accessibility_enabled",
+                    "1",
+                    operation="accessibility_master_restore_retry",
+                )
         if master.returncode != 0:
-            text = f"{master.stdout}\n{master.stderr}".casefold()
-            if "security exception" in text or "permission denial" in text:
+            if self._secure_settings_denied(master):
                 return SpecialAccessState.DENIED
             return self._unavailable_or_raise(master, "accessibility_master_restore")
         return await self.special_access_state(
@@ -1396,6 +1417,7 @@ class AsyncAdbTransport:
         access: SpecialAccessKind,
         *,
         user_id: int | None = None,
+        component: str | None = None,
     ) -> None:
         validate_package_name(package_name)
         if user_id is not None and not 0 <= user_id <= 100_000:
@@ -1405,16 +1427,35 @@ class AsyncAdbTransport:
                 ErrorCategory.VALIDATION_ERROR,
                 "Notification Listener hanya boleh diaktifkan melalui ADB terverifikasi.",
             )
+        if component is not None:
+            validate_component_name(component, package_name)
         actions = {
             SpecialAccessKind.ACCESSIBILITY: "android.settings.ACCESSIBILITY_SETTINGS",
             SpecialAccessKind.MANAGE_ALL_FILES: (
                 "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION"
             ),
         }
-        args = ["shell", "am", "start"]
+        launch = ["shell", "am", "start"]
         if user_id is not None:
-            args.extend(["--user", str(user_id)])
-        args.extend(["-W", "-a", actions[access]])
+            launch.extend(["--user", str(user_id)])
+        launch.append("-W")
+        if access == SpecialAccessKind.ACCESSIBILITY and component is not None:
+            details = await self.run(
+                serial,
+                [
+                    *launch,
+                    "-a",
+                    "android.settings.ACCESSIBILITY_DETAILS_SETTINGS",
+                    "--ecn",
+                    "android.intent.extra.COMPONENT_NAME",
+                    component,
+                ],
+                operation="special_access_settings_open",
+                check=False,
+            )
+            if self._activity_started(details):
+                return
+        args = [*launch, "-a", actions[access]]
         if access == SpecialAccessKind.MANAGE_ALL_FILES:
             args.extend(["-d", f"package:{package_name}"])
         result = await self.run(
@@ -1516,6 +1557,49 @@ class AsyncAdbTransport:
         if statuses and statuses[-1] != "ok":
             return False
         return True
+
+    async def _put_secure_setting(
+        self,
+        serial: str,
+        settings_prefix: list[str],
+        key: str,
+        value: str,
+        *,
+        operation: str,
+    ) -> ProcessResult:
+        return await self.run(
+            serial,
+            [*settings_prefix, "put", "secure", key, value],
+            operation=operation,
+            check=False,
+        )
+
+    @staticmethod
+    def _secure_settings_denied(result: ProcessResult) -> bool:
+        text = f"{result.stdout}\n{result.stderr}".casefold()
+        return "security exception" in text or "permission denial" in text
+
+    async def _grant_write_secure_settings(
+        self,
+        serial: str,
+        package_name: str,
+        user_id: int,
+    ) -> bool:
+        result = await self.run(
+            serial,
+            [
+                "shell",
+                "pm",
+                "grant",
+                "--user",
+                str(user_id),
+                package_name,
+                "android.permission.WRITE_SECURE_SETTINGS",
+            ],
+            operation="write_secure_settings_grant",
+            check=False,
+        )
+        return result.returncode == 0
 
     def _unavailable_or_raise(
         self,

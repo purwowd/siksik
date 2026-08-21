@@ -72,6 +72,7 @@ class AgentServer(
         TransferRoutes(authenticator, transfer),
         MediaRoutes(authenticator, mediaCatalog),
         StageRoutes(authenticator, staging),
+        AccountRoutes(context.applicationContext, authenticator),
     )
 
     init {

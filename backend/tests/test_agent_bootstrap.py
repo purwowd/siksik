@@ -97,6 +97,7 @@ class FakeAdb:
         self.runtime_permission_settings_opened = 0
         self.special_sequences: dict[SpecialAccessKind, list[SpecialAccessState]] = {}
         self.opened_access: list[SpecialAccessKind] = []
+        self.restore_accessibility_state: SpecialAccessState | None = None
         self.failure_at: str | None = None
         self.cancel_at: str | None = None
 
@@ -282,6 +283,23 @@ class FakeAdb:
             return sequence.pop(0)
         return sequence[0]
 
+    async def restore_accessibility_service(
+        self,
+        serial: str,
+        package_name: str,
+        component: str,
+        *,
+        user_id: int | None = None,
+    ) -> SpecialAccessState:
+        assert serial == SERIAL
+        assert package_name == "com.siksik.agent"
+        assert component
+        assert user_id == 0
+        self._step("restore:accessibility")
+        if self.restore_accessibility_state is not None:
+            return self.restore_accessibility_state
+        return SpecialAccessState.NOT_GRANTED
+
     async def open_special_access_settings(
         self,
         serial: str,
@@ -289,6 +307,7 @@ class FakeAdb:
         access: SpecialAccessKind,
         *,
         user_id: int | None = None,
+        component: str | None = None,
     ) -> None:
         assert serial == SERIAL
         assert package_name == "com.siksik.agent"
@@ -763,6 +782,56 @@ async def test_special_access_waits_and_continues_after_approval(tmp_path: Path)
         tmp_path,
         special_access=(access,),
     )
+    adb.special_sequences[access] = [
+        SpecialAccessState.NOT_GRANTED,
+        SpecialAccessState.GRANTED,
+    ]
+
+    record, progress = await run_bootstrap(service)
+
+    assert record.state == AgentRuntimeState.READY
+    assert adb.opened_access == [access]
+    assert "awaiting_access" in [item[3]["bootstrap_state"] for item in progress]
+    assert record.details["special_access"]["accessibility"] == "granted"
+    await service.teardown(SESSION_ID)
+    await database.close()
+
+
+@pytest.mark.unit
+async def test_adb_accessibility_restore_denial_opens_settings_instead_of_failing(
+    tmp_path: Path,
+) -> None:
+    access = SpecialAccessKind.ACCESSIBILITY
+    service, adb, database, _artifacts, _behavior = await make_service(
+        tmp_path,
+        special_access=(access,),
+    )
+    adb.restore_accessibility_state = SpecialAccessState.DENIED
+    adb.special_sequences[access] = [
+        SpecialAccessState.NOT_GRANTED,
+        SpecialAccessState.GRANTED,
+    ]
+
+    record, progress = await run_bootstrap(service)
+
+    assert record.state == AgentRuntimeState.READY
+    assert adb.opened_access == [access]
+    assert "awaiting_access" in [item[3]["bootstrap_state"] for item in progress]
+    assert record.details["special_access"]["accessibility"] == "granted"
+    await service.teardown(SESSION_ID)
+    await database.close()
+
+
+@pytest.mark.unit
+async def test_adb_accessibility_restore_denial_opens_settings_instead_of_failing(
+    tmp_path: Path,
+) -> None:
+    access = SpecialAccessKind.ACCESSIBILITY
+    service, adb, database, _artifacts, _behavior = await make_service(
+        tmp_path,
+        special_access=(access,),
+    )
+    adb.restore_accessibility_state = SpecialAccessState.DENIED
     adb.special_sequences[access] = [
         SpecialAccessState.NOT_GRANTED,
         SpecialAccessState.GRANTED,

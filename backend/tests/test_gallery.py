@@ -99,18 +99,26 @@ async def _insert_file(
     date_taken: str | None = None,
     date_added: str | None = None,
     date_modified: str | None = None,
+    directory_hint: str | None = None,
+    display_name: str | None = None,
+    role: str | None = None,
+    crawl_record_id: str | None = None,
 ) -> None:
     stamp = captured_at or datetime.now(timezone.utc).isoformat()
     meta = {
         "album": album,
-        "directory_hint": f"Pictures/{album}",
-        "display_name": path.rsplit("/", 1)[-1],
+        "directory_hint": directory_hint or f"Pictures/{album}",
+        "display_name": display_name or path.rsplit("/", 1)[-1],
         "is_favorite": favorite,
         "captured_at": stamp,
         "date_added": date_added or stamp,
         "date_modified": date_modified or stamp,
         "date_taken": date_taken or stamp,
     }
+    if role:
+        meta["crawl_artifact_role"] = role
+    if crawl_record_id:
+        meta["crawl_record_id"] = crawl_record_id
     await db.execute(
         """
         INSERT INTO files (
@@ -376,3 +384,141 @@ async def test_rescan_does_not_copy_previous_review(client) -> None:
     assert first_body["items"][0]["review_status"] == "confirmed"
     assert second_body["items"][0]["review_status"] == "pending"
     assert first_body["items"][0]["id"] != second_body["items"][0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_gallery_includes_documents_audio_and_structured_text(client) -> None:
+    session_id = "session-gallery-all-types"
+    created = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc).isoformat()
+    await _insert_session(session_id, created_at=created)
+    await _insert_file(
+        file_id="file-document",
+        session_id=session_id,
+        path="document/record_document.bin",
+        sha256="3" * 64,
+        source="document",
+        mime="application/pdf",
+        album="Subfolder",
+        directory_hint="/storage/emulated/0/Download/Subfolder",
+        display_name="laporan.pdf",
+        role="source_binary",
+    )
+    await _insert_file(
+        file_id="file-audio",
+        session_id=session_id,
+        path="media_audio/rekaman.mp3",
+        sha256="4" * 64,
+        source="media_audio",
+        mime="audio/mpeg",
+        album="Audio",
+        directory_hint="Music/Voice",
+        display_name="rekaman.mp3",
+        role="source_binary",
+    )
+    record_id = "record_sms_gallery"
+    await db.execute(
+        """
+        INSERT INTO crawl_records (
+            record_id, crawl_id, session_id, source_kind, source_app,
+            social_scope, normalized_text, content_sha256, selection_revision,
+            selection_fingerprint, canonical_json, canonical_path, ingested_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record_id,
+            "crawl_sms_gallery",
+            session_id,
+            "sms",
+            "com.android.providers.telephony",
+            None,
+            "Pesan singkat yang mudah dibaca di preview",
+            "5" * 64,
+            1,
+            "selection-gallery",
+            "{}",
+            "sms/record.json",
+            created,
+        ),
+    )
+    await _insert_file(
+        file_id="file-sms",
+        session_id=session_id,
+        path="sms/record.siksik-record.json",
+        sha256="5" * 64,
+        source="sms",
+        mime="application/vnd.siksik.crawl-record+json",
+        album="Pesan",
+        display_name="Percakapan SMS",
+        role="canonical_record",
+        crawl_record_id=record_id,
+    )
+    await _insert_file(
+        file_id="file-image-canonical",
+        session_id=session_id,
+        path="media_image/record.siksik-record.json",
+        sha256="6" * 64,
+        source="media_image",
+        mime="application/vnd.siksik.crawl-record+json",
+        role="canonical_record",
+    )
+    await _insert_file(
+        file_id="file-email-json",
+        session_id=session_id,
+        path="email/email_metadata.json",
+        sha256="7" * 64,
+        source="email",
+        mime="application/json",
+        album="Email",
+    )
+
+    items = await list_items(session_id, AcquisitionMode.QUICK, ACCESS_ALL, 1, 20)
+    assert {item.file_id for item in items.items} == {
+        "file-document",
+        "file-audio",
+        "file-sms",
+    }
+    document = next(item for item in items.items if item.file_id == "file-document")
+    assert document.album == "Download"
+    assert document.path == "Download/laporan.pdf"
+    assert document.preview_path == "document/record_document.bin"
+    sms = next(item for item in items.items if item.file_id == "file-sms")
+    assert sms.preview_text == "Pesan singkat yang mudah dibaca di preview"
+
+
+@pytest.mark.asyncio
+async def test_gallery_uses_exact_three_and_six_calendar_month_windows(client) -> None:
+    reference = datetime(2026, 8, 31, 9, 30, tzinfo=timezone.utc).isoformat()
+    quick_id = "session-gallery-calendar-quick"
+    full_id = "session-gallery-calendar-full"
+    await _insert_session(quick_id, mode="quick", created_at=reference)
+    await _insert_session(full_id, mode="full", created_at=reference)
+    values = [
+        ("quick-edge", datetime(2026, 5, 31, 9, 30, tzinfo=timezone.utc), "document", "text/plain"),
+        ("quick-old", datetime(2026, 5, 30, 9, 30, tzinfo=timezone.utc), "media_audio", "audio/mpeg"),
+        ("full-edge", datetime(2026, 2, 28, 9, 30, tzinfo=timezone.utc), "document", "application/pdf"),
+        ("full-old", datetime(2026, 2, 27, 9, 30, tzinfo=timezone.utc), "media_video", "video/mp4"),
+    ]
+    for session_id in (quick_id, full_id):
+        for index, (name, stamp, source, mime) in enumerate(values):
+            await _insert_file(
+                file_id=f"{session_id}-{name}",
+                session_id=session_id,
+                path=f"documents/{name}.txt",
+                sha256=f"{index + 8:x}" * 64,
+                source=source,
+                mime=mime,
+                album="Documents",
+                captured_at=stamp.isoformat(),
+                date_taken=stamp.isoformat(),
+                date_added=stamp.isoformat(),
+                date_modified=stamp.isoformat(),
+            )
+
+    quick = await list_items(quick_id, AcquisitionMode.QUICK, ACCESS_ALL, 1, 20)
+    full = await list_items(full_id, AcquisitionMode.FULL, ACCESS_ALL, 1, 20)
+    assert {item.label for item in quick.items} == {"quick-edge.txt"}
+    assert {item.label for item in full.items} == {
+        "quick-edge.txt",
+        "quick-old.txt",
+        "full-edge.txt",
+    }

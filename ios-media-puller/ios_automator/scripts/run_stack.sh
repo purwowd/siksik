@@ -28,21 +28,104 @@ extract_wda_bundle() {
   grep -oE 'com\.facebook\.WebDriverAgentRunner[^[:space:]]+' <<<"$raw" | tail -1
 }
 
-prepare_ios_for_wda() {
-  # Mount DDI bisa lambat; skip default. Set IOS_MOUNT_DEV_IMAGE=1 kalau WDA gagal start.
-  if [[ "${IOS_MOUNT_DEV_IMAGE:-0}" != "1" ]]; then
+puller_python() {
+  if [[ -x "$ROOT/.venv/bin/python" ]]; then
+    echo "$ROOT/.venv/bin/python"
+  else
+    command -v python3
+  fi
+}
+
+STACK_STATE_DIR="${IOS_STACK_STATE_DIR:-/tmp/ios-media-puller-stack}"
+STACK_UDID_FILE="${STACK_STATE_DIR}/udid"
+
+dev_image_mounted() {
+  ios image list ${UDID:+--udid "$UDID"} \
+    --tunnel-info-port="$TUNNEL_INFO_PORT" 2>&1 \
+    | grep -q 'image signature'
+}
+
+ensure_usb_pair() {
+  if ! command -v idevicepair >/dev/null 2>&1; then
+    echo "[stack] idevicepair tidak ada — skip cek Trust"
     return 0
   fi
-  log_stack_event "mount developer disk image…"
-  if command -v pymobiledevice3 >/dev/null 2>&1; then
-    pymobiledevice3 mounter auto-mount 2>/dev/null \
-      || pymobiledevice3 mounter auto-mount 2>/dev/null \
-      || true
+  if idevicepair -u "$UDID" validate >/dev/null 2>&1; then
+    echo "[stack] USB pairing OK"
+    return 0
   fi
-  ios image auto ${UDID:+--udid "$UDID"} \
-    --tunnel-info-port="$TUNNEL_INFO_PORT" 2>/dev/null \
-    || ios image auto ${UDID:+--udid "$UDID"} 2>/dev/null \
+  echo "[stack] USB belum di-Trust — kirim permintaan pairing (ketuk Trust di iPhone)…"
+  log_stack_event "USB pair / Trust"
+  idevicepair -u "$UDID" pair >/dev/null 2>&1 || true
+  local i
+  for i in $(seq 1 45); do
+    if idevicepair -u "$UDID" validate >/dev/null 2>&1; then
+      echo "[stack] USB pairing OK"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "[stack] iPhone belum Trust komputer ini. Unlock HP, ketuk Trust This Computer, lalu jalankan akuisisi lagi." >&2
+  return 1
+}
+
+reset_stale_stack() {
+  mkdir -p "$STACK_STATE_DIR"
+  local prev=""
+  if [[ -f "$STACK_UDID_FILE" ]]; then
+    prev="$(tr -d '[:space:]' <"$STACK_UDID_FILE" || true)"
+  fi
+  if [[ "$prev" == "$UDID" ]]; then
+    return 0
+  fi
+  if [[ -n "$prev" ]]; then
+    echo "[stack] device berganti ($prev → $UDID) — reset tunnel & WDA"
+    log_stack_event "device changed ${prev} → ${UDID}"
+  else
+    echo "[stack] belum ada state UDID — reset sisa tunnel/WDA lama"
+  fi
+  bash "$ROOT/ios_automator/scripts/stop_stack.sh" all || true
+}
+
+record_stack_udid() {
+  mkdir -p "$STACK_STATE_DIR"
+  printf '%s\n' "$UDID" >"$STACK_UDID_FILE"
+}
+
+ensure_dev_image() {
+  # iOS 17+: tanpa Developer Disk Image ter-mount, dtservicehub/testmanagerd tidak
+  # terdaftar di RSD, jadi runwda minta "device port 0" → connection refused →
+  # DTX broken pipe dan WDA tidak pernah listen di :8100. Mount hilang setiap
+  # iPhone reboot / ganti HP, jadi cek tiap akuisisi dan mount otomatis (butuh internet).
+  if [[ "${IOS_ENSURE_DEV_IMAGE:-1}" != "1" && "${IOS_MOUNT_DEV_IMAGE:-0}" != "1" ]]; then
+    return 0
+  fi
+  if dev_image_mounted; then
+    echo "[stack] developer image sudah mounted"
+    return 0
+  fi
+  echo "[stack] developer image belum mounted — auto-mount (bisa 30–90s, butuh internet)…"
+  log_stack_event "mount developer disk image…"
+  local mount_log="${IOS_MOUNT_LOG:-/tmp/ios-media-puller-mounter.log}"
+  local py
+  py="$(puller_python)"
+  "$py" -m pymobiledevice3 mounter auto-mount >>"$mount_log" 2>&1 \
+    || ios image auto ${UDID:+--udid "$UDID"} \
+      --tunnel-info-port="$TUNNEL_INFO_PORT" >>"$mount_log" 2>&1 \
     || true
+  # Daftar layanan RSD dibaca saat handshake tunnel; restart supaya layanan
+  # developer yang baru muncul terlihat oleh runwda.
+  bash "$ROOT/ios_automator/scripts/start_tunnel.sh" stop || true
+  sleep 2
+  bash "$ROOT/ios_automator/scripts/start_tunnel.sh" ensure
+  if dev_image_mounted; then
+    echo "[stack] developer image mounted"
+    log_stack_event "developer image mounted"
+    return 0
+  fi
+  echo "[stack] developer image gagal mount — cek $mount_log (butuh internet, iPhone unlock)." >&2
+  log_stack_event "developer image gagal mount"
+  return 1
 }
 
 wda_http_alive() {
@@ -51,7 +134,7 @@ wda_http_alive() {
 
 start_wda() {
   local boot_wait="${IOS_WDA_BOOT_WAIT_SEC:-12}"
-  if wda_http_alive; then
+  if [[ "${IOS_FORCE_WDA_RESTART:-0}" != "1" ]] && wda_http_alive; then
     echo "[stack] WDA HTTP sudah OK"
     return 0
   fi
@@ -59,23 +142,23 @@ start_wda() {
   pkill -f "ios forward.*${WDA_PORT}" 2>/dev/null || true
   sleep "${IOS_WDA_STOP_SLEEP_SEC:-0.5}"
 
-  prepare_ios_for_wda
-
   echo "[stack] starting runwda…"
   : >"${IOS_WDA_LOG:-/tmp/ios-media-puller-wda.log}"
-  ios runwda \
+  nohup ios runwda \
     --bundleid "$WDA_BUNDLE" \
     --testrunnerbundleid "$WDA_BUNDLE" \
     --xctestconfig WebDriverAgentRunner.xctest \
     --tunnel-info-port="$TUNNEL_INFO_PORT" \
     ${UDID:+--udid "$UDID"} >>"${IOS_WDA_LOG:-/tmp/ios-media-puller-wda.log}" 2>&1 &
+  disown $! 2>/dev/null || true
 
   sleep 2
   echo "[stack] forwarding ${WDA_PORT}…"
-  ios forward \
+  nohup ios forward \
     --tunnel-info-port="$TUNNEL_INFO_PORT" \
     ${UDID:+--udid "$UDID"} \
     "$WDA_PORT" "$WDA_PORT" >>"${IOS_WDA_LOG:-/tmp/ios-media-puller-wda.log}" 2>&1 &
+  disown $! 2>/dev/null || true
 
   local i
   for i in $(seq 1 "$((boot_wait * 2))"); do
@@ -100,6 +183,13 @@ wait_wda_http() {
   done
   echo "[stack] WDA tidak merespons di :${WDA_PORT}" >&2
   if [[ -f "${IOS_WDA_LOG:-/tmp/ios-media-puller-wda.log}" ]] \
+    && grep -q 'cannot initiate a IDE session' \
+      "${IOS_WDA_LOG:-/tmp/ios-media-puller-wda.log}" 2>/dev/null; then
+    echo "[stack] Layanan XCTest tidak terjangkau — Developer Image kemungkinan belum mounted:" >&2
+    echo "  ios image list --udid \$UDID --tunnel-info-port=${TUNNEL_INFO_PORT}" >&2
+    echo "  .venv/bin/python -m pymobiledevice3 mounter auto-mount" >&2
+  fi
+  if [[ -f "${IOS_WDA_LOG:-/tmp/ios-media-puller-wda.log}" ]] \
     && grep -qE 'deviceprocesscontrolservice|could not get pid|Untrusted|not verified' \
       "${IOS_WDA_LOG:-/tmp/ios-media-puller-wda.log}" 2>/dev/null; then
     echo "[stack] Kemungkinan WDA belum di-Trust di iPhone:" >&2
@@ -119,11 +209,16 @@ if [[ -z "$UDID" ]]; then
   exit 2
 fi
 
+reset_stale_stack
+ensure_usb_pair
+
 bash "$ROOT/ios_automator/scripts/start_tunnel.sh" ensure
 log_stack_event "tunnel ready (:${TUNNEL_INFO_PORT})"
 
 bash "$ROOT/ios_automator/scripts/ensure_developer_mode.sh" ensure
 log_stack_event "developer mode OK"
+
+ensure_dev_image
 
 # Capture bundle ke stdout; log ensure-wda tetap ke stderr (terlihat di terminal)
 WDA_BUNDLE="${WDA_BUNDLE:-$(bash "$ROOT/ios_automator/scripts/ensure_wda.sh")}"
@@ -134,8 +229,17 @@ echo "[stack] WDA_BUNDLE=$WDA_BUNDLE"
 echo "[stack] UDID=$UDID"
 log_stack_event "WDA bundle=${WDA_BUNDLE}"
 
-bash "$ROOT/ios_automator/scripts/keep_screen_on.sh" start || true
+bash "$ROOT/ios_automator/scripts/keep_screen_on.sh" restart || \
+  bash "$ROOT/ios_automator/scripts/keep_screen_on.sh" start || true
 start_wda
-wait_wda_http
+if ! wait_wda_http; then
+  echo "[stack] WDA HTTP gagal — restart runwda sekali…" >&2
+  pkill -f "ios runwda" 2>/dev/null || true
+  pkill -f "ios forward.*${WDA_PORT}" 2>/dev/null || true
+  sleep 1
+  start_wda
+  wait_wda_http
+fi
+record_stack_udid
 log_stack_event "WDA HTTP ready on :${WDA_PORT}"
 echo "[stack] ready"

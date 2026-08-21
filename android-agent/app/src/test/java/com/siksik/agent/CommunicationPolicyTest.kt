@@ -9,6 +9,14 @@ import org.junit.Test
 
 class CommunicationPolicyTest {
     @Test
+    fun textOnlyCrawlCoverIsFacebookAndXNeverInstagram() {
+        assertTrue(CommunicationPolicy.usesTextOnlyCrawlCover("com.twitter.android"))
+        assertTrue(CommunicationPolicy.usesTextOnlyCrawlCover("com.facebook.katana"))
+        assertFalse(CommunicationPolicy.usesTextOnlyCrawlCover("com.instagram.android"))
+        assertFalse(CommunicationPolicy.usesTextOnlyCrawlCover("com.whatsapp"))
+    }
+
+    @Test
     fun socialTargetAllowlistIsExactAndRejectsArbitraryPackages() {
         assertEquals(
             setOf("com.twitter.android", "com.facebook.katana", "com.instagram.android"),

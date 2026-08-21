@@ -1216,6 +1216,124 @@ body::after {
   height: 72px;
 }
 
+.media-preview-action {
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  padding: 7px;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.media-preview-action:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.media-preview-kind {
+  color: var(--signal);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.media-preview-summary {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.65rem;
+  line-height: 1.25;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.media-preview-error {
+  display: block;
+  max-width: 120px;
+  margin-top: 4px;
+  color: var(--danger);
+  font-size: 0.62rem;
+}
+
+.media-modal-backdrop {
+  position: fixed;
+  z-index: 9999;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, 0.78);
+}
+
+.media-modal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(920px, 94vw);
+  height: min(760px, 88vh);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+}
+
+.media-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.media-modal-header strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.media-modal-body {
+  min-height: 0;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.media-modal-body video,
+.media-modal-body iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.media-modal-body audio {
+  display: block;
+  width: min(680px, calc(100% - 40px));
+  margin: 40px auto;
+}
+
+.media-text-preview {
+  min-height: 100%;
+  margin: 0;
+  padding: 20px;
+  color: var(--text);
+  font: 0.86rem/1.55 var(--font-body);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.media-file-open {
+  display: grid;
+  place-items: center;
+  gap: 16px;
+  min-height: 100%;
+  padding: 30px;
+  text-align: center;
+}
+
 .authorize-box {
   margin-top: 14px;
   display: grid;

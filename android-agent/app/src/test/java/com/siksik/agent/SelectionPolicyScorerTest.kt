@@ -37,7 +37,8 @@ class SelectionPolicyScorerTest {
         val below = scorer.evaluate(input("noscobom", "sms"))
         val equal = scorer.evaluate(input("BOM!", "sms"))
 
-        assertFalse(below.autoSelected)
+        assertTrue(below.autoSelected)
+        assertTrue("in_scope_data" in below.reasons)
         assertTrue(equal.autoSelected)
         assertEquals(5_500, equal.scoreBasisPoints)
         assertEquals(listOf("bom"), equal.matchedKeywords)
@@ -45,15 +46,25 @@ class SelectionPolicyScorerTest {
     }
 
     @Test
-    fun inWindowMediaIsAutoSelectedWithoutKeywordScore() {
+    fun everyInScopeSourceIsAutoSelectedWithoutKeywordScore() {
         val scorer = SelectionScorer(SelectionPolicyCodec.parse(policyJson())) { 1L }
-        val image = scorer.evaluate(input("", "media_image"))
-        val sms = scorer.evaluate(input("noscobom", "sms"))
+        val sources = listOf(
+            "media_image",
+            "media_video",
+            "media_audio",
+            "document",
+            "sms",
+            "contact",
+            "visible_ui",
+            "notification",
+        )
 
-        assertTrue(image.autoSelected)
-        assertTrue(image.eligibleForAutomaticSelection)
-        assertTrue("in_window_media" in image.reasons)
-        assertFalse(sms.autoSelected)
+        sources.forEach { source ->
+            val evaluated = scorer.evaluate(input("", source))
+            assertTrue(evaluated.autoSelected)
+            assertTrue(evaluated.eligibleForAutomaticSelection)
+            assertTrue("in_scope_data" in evaluated.reasons)
+        }
     }
 
     @Test

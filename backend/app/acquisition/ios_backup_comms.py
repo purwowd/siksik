@@ -101,12 +101,8 @@ def _puller_python() -> Path:
 
 
 def _limit_for_mode(mode: AcquisitionMode, quick: int, full: int) -> int | None:
-    """Return row cap; None means unlimited (FULL with full=0)."""
-    if mode == AcquisitionMode.QUICK:
-        return max(1, quick)
-    if full <= 0:
-        return None
-    return full
+    selected = quick if mode == AcquisitionMode.QUICK else full
+    return selected if selected > 0 else None
 
 
 def _resolve_manifest_file(backup_root: Path, relative_like: str) -> Path | None:

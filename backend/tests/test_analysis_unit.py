@@ -114,3 +114,37 @@ def test_quick_android_camera_roll_skips_easyocr(tmp_path, monkeypatch):
         )
     finally:
         reset_analysis_mode(token)
+
+@pytest.mark.unit
+def test_crawl_record_merges_precomputed_social_ocr_into_findings(tmp_path):
+    from app.services.analysis import CANONICAL_CRAWL_RECORD_MIME, analyze_content_result
+
+    path = tmp_path / "record_ui_comments_test.siksik-record.json"
+    path.write_text("{}", encoding="utf-8")
+    outcome = analyze_content_result(
+        path,
+        CANONICAL_CRAWL_RECORD_MIME,
+        "visible_ui",
+        "Select\nComments",
+        ["makar", "pistol"],
+        precomputed_ocr_text="jisonghemdal\nPistol\n2h",
+        precomputed_ocr_backend="host_ocr",
+    )
+    labels = " ".join(item["label"].lower() for item in outcome.findings)
+    evidence = " ".join(str(item.get("evidence") or "").lower() for item in outcome.findings)
+    assert "pistol" in labels or "pistol" in evidence
+
+
+@pytest.mark.unit
+def test_comments_body_ocr_strips_chrome():
+    from app.acquisition.social_ocr import _comments_body_from_ocr
+
+    cleaned = _comments_body_from_ocr(
+        "Komentar\nPilih\nPistol\nTerbaru ke terlama\nMakar"
+    )
+    assert cleaned is not None
+    assert "Pistol" in cleaned
+    assert "Makar" in cleaned
+    assert "Komentar" not in cleaned
+    assert "Pilih" not in cleaned
+

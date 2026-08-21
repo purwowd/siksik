@@ -294,7 +294,7 @@ async def test_ios_provider_afc_media_docs_and_social(monkeypatch, tmp_path: Pat
         context(device_id="00008101-0008384601D8001E", device_type=DeviceType.IOS)
     )
     assert result.item_count == 15
-    assert result.method == "ios_afc_media+ios_afc_docs+ios_wda_social"
+    assert result.method == "ios_wda_social+ios_afc_media+ios_afc_docs"
 
 
 @pytest.mark.unit
@@ -429,7 +429,7 @@ async def test_ios_provider_includes_backup_comms(monkeypatch, tmp_path: Path) -
     )
     assert result.item_count == 11
     assert result.method == (
-        "ios_afc_media+ios_afc_docs+ios_backup_comms+ios_wda_social"
+        "ios_wda_social+ios_afc_media+ios_afc_docs+ios_backup_comms"
     )
 
 

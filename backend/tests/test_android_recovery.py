@@ -185,6 +185,12 @@ class FakeGateway:
         self.thumbnail_calls += 1
         return (), (), False
 
+    async def discover_disk_cache_jpegs(self, _serial: str, _roots, *, timeout: float):
+        return DiscoveryResult((), False, False)
+
+    async def file_sha256(self, _serial: str, _path: str, _roots):
+        return None
+
 
 @pytest.mark.unit
 def test_mediastore_parser_and_trash_path_policy():
@@ -201,8 +207,190 @@ def test_mediastore_parser_and_trash_path_policy():
     assert rows[0].is_trashed is True
     assert is_trash_path(rows[0].path)
     assert is_trash_path("/sdcard/Android/data/vendor/.Trash/photo.png")
+    assert is_trash_path(
+        "/sdcard/MIUI/Gallery/cloud/.trashBin/{-trash-}abc.jpg"
+    )
     assert is_control_file("/sdcard/Android/data/vendor/.Trash/trash_bin.db")
     assert not is_trash_path("/sdcard/DCIM/current.jpg")
+
+
+@pytest.mark.unit
+async def test_disk_cache_jpeg_recovers_when_not_a_live_photo(tmp_path: Path):
+    preview = png_bytes()
+
+    class DiskCacheGateway(FakeGateway):
+        def __init__(self) -> None:
+            super().__init__(payload=b"trash-bytes")
+            self.preview = preview
+
+        async def media_store_rows(self, serial: str, *, trashed_only: bool, timeout: float):
+            if not trashed_only:
+                return (
+                    [
+                        MediaStoreRow(
+                            media_id="99",
+                            path="/sdcard/DCIM/Camera/live.jpg",
+                            display_name="live.jpg",
+                            mime_type="image/jpeg",
+                            size_bytes=12,
+                            expires_epoch_s=None,
+                            is_trashed=False,
+                        )
+                    ],
+                    False,
+                    False,
+                )
+            return await super().media_store_rows(
+                serial, trashed_only=trashed_only, timeout=timeout
+            )
+
+        async def discover_disk_cache_jpegs(self, _serial: str, _roots, *, timeout: float):
+            return DiscoveryResult(
+                (
+                    "/sdcard/Android/data/com.miui.gallery/files/gallery_disk_cache/small_size/abc.0",
+                ),
+                False,
+                False,
+            )
+
+        async def file_sha256(self, _serial: str, path: str, _roots):
+            if path.endswith("live.jpg"):
+                return "ab" * 32
+            return None
+
+        async def transfer(
+            self,
+            serial: str,
+            *,
+            remote_path: str | None,
+            content_uri: str | None,
+            roots,
+            destination: Path,
+            max_bytes: int,
+            timeout: float,
+        ):
+            if remote_path and "gallery_disk_cache" in remote_path:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(self.preview)
+                self.transfer_calls += 1
+                return TransferResult(True, "adb_pull", len(self.preview))
+            return await super().transfer(
+                serial,
+                remote_path=remote_path,
+                content_uri=content_uri,
+                roots=roots,
+                destination=destination,
+                max_bytes=max_bytes,
+                timeout=timeout,
+            )
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    async def on_progress(*_args, **_kwargs):
+        return None
+
+    result = await AndroidRecoveryService(DiskCacheGateway()).recover(  # type: ignore[arg-type]
+        session_id="session-disk-cache",
+        serial="device-1",
+        mode=AcquisitionMode.QUICK,
+        staging=staging,
+        on_progress=on_progress,
+        request_id=None,
+    )
+    assert any(
+        item.classification == "orphan_disk_cache" for item in result.manifest.artifacts
+    )
+
+
+@pytest.mark.unit
+async def test_invalid_live_mediastore_path_does_not_abort_xiaomi_trash(tmp_path: Path):
+    trash_path = "/sdcard/MIUI/Gallery/cloud/.trashBin/{-trash-}abc.jpg"
+    payload = b"xiaomi-gallery-trash"
+
+    class XiaomiGateway(FakeGateway):
+        def __init__(self) -> None:
+            super().__init__(payload=payload)
+
+        async def media_store_rows(self, serial: str, *, trashed_only: bool, timeout: float):
+            if not trashed_only:
+                return (
+                    [
+                        MediaStoreRow(
+                            media_id="0",
+                            path="/storage/emulated",
+                            display_name="emulated",
+                            mime_type="inode/directory",
+                            size_bytes=0,
+                            expires_epoch_s=None,
+                            is_trashed=False,
+                        )
+                    ],
+                    False,
+                    False,
+                )
+            return [], False, False
+
+        async def is_directory(self, _serial: str, path: str, _roots):
+            return path.endswith("/MIUI")
+
+        async def discover_trash(self, _serial: str, _roots, *, timeout: float):
+            return DiscoveryResult((trash_path,), False, False)
+
+        async def discover_disk_cache_jpegs(self, _serial: str, _roots, *, timeout: float):
+            return DiscoveryResult(
+                (
+                    "/sdcard/Android/data/com.miui.gallery/files/gallery_disk_cache/small_size/a.0",
+                ),
+                False,
+                False,
+            )
+
+        async def file_sha256(self, _serial: str, path: str, _roots):
+            if path == "/storage/emulated":
+                raise acquisition_error(
+                    ErrorCategory.VALIDATION_ERROR,
+                    "Path recovery berada di luar shared storage.",
+                )
+            return None
+
+        async def transfer(
+            self,
+            serial: str,
+            *,
+            remote_path: str | None,
+            content_uri: str | None,
+            roots,
+            destination: Path,
+            max_bytes: int,
+            timeout: float,
+        ):
+            if remote_path == trash_path:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(self.payload)
+                self.transfer_calls += 1
+                return TransferResult(True, "adb_pull", len(self.payload))
+            return TransferResult(False, "adb_pull", 0, "adb_pull_failed")
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    async def on_progress(*_args, **_kwargs):
+        return None
+
+    result = await AndroidRecoveryService(XiaomiGateway()).recover(  # type: ignore[arg-type]
+        session_id="session-xiaomi-trash",
+        serial="device-1",
+        mode=AcquisitionMode.QUICK,
+        staging=staging,
+        on_progress=on_progress,
+        request_id=None,
+    )
+    assert result.item_count >= 1
+    assert result.manifest.stats.candidates_discovered >= 1
+    assert any(
+        item.classification == "trash_resident" for item in result.manifest.artifacts
+    )
 
 
 @pytest.mark.unit

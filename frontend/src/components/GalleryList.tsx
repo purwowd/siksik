@@ -36,7 +36,8 @@ export function GalleryList({ sessionId, data, onPage }: Props) {
                   <MediaPreview
                     sessionId={sessionId}
                     path={item.preview_path || item.path}
-                    text={item.label}
+                    text={item.preview_text || item.label}
+                    mime={item.mime}
                   />
                 </td>
                 <td>
@@ -64,7 +65,8 @@ export function GalleryList({ sessionId, data, onPage }: Props) {
               <MediaPreview
                 sessionId={sessionId}
                 path={item.preview_path || item.path}
-                text={item.label}
+                text={item.preview_text || item.label}
+                mime={item.mime}
               />
             </div>
             <div className="finding-card-body">

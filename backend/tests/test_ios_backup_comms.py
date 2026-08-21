@@ -65,6 +65,7 @@ def _make_contacts_db(path: Path) -> None:
 @pytest.mark.unit
 def test_limit_for_mode_full_zero_is_unlimited() -> None:
     assert _limit_for_mode(AcquisitionMode.QUICK, 50, 0) == 50
+    assert _limit_for_mode(AcquisitionMode.QUICK, 0, 50) is None
     assert _limit_for_mode(AcquisitionMode.FULL, 50, 0) is None
     assert _limit_for_mode(AcquisitionMode.FULL, 50, 100) == 100
 

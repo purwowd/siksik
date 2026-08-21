@@ -1,24 +1,25 @@
-"""iOS IG/X visible-UI social crawl via in-repo ios-media-puller (WDA).
+"""iOS IG/X/FB visible-UI social crawl via in-repo WDA flows.
 
 Isolated from Android agent/UiAutomator paths. Maps iOS bundle outputs onto the
-existing report package IDs (com.instagram.android / com.twitter.android) so
-reports.SOCIAL_PACKAGES / SOCIAL_SCOPES stay unchanged.
+existing report package IDs so reports.SOCIAL_PACKAGES / SOCIAL_SCOPES stay
+unchanged. Flows are invoked with a JSON job file (no operator -- flags).
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.parse import urlparse
 
 from app.acquisition.agent_client import InventoryRecordV1
 from app.acquisition.contracts import ProgressCallback
@@ -36,12 +37,15 @@ AGENT_VERSION = "ios-media-puller-wda"
 # Report / contract package IDs (Android-shaped; reports already keyed on these).
 PACKAGE_INSTAGRAM = "com.instagram.android"
 PACKAGE_X = "com.twitter.android"
+PACKAGE_FACEBOOK = "com.facebook.katana"
 
 FLOW_BY_PACKAGE = {
     PACKAGE_INSTAGRAM: "ig-profile",
     PACKAGE_X: "x-profile",
+    PACKAGE_FACEBOOK: "fb-profile",
 }
 
+_INVOKE_SCRIPT = Path(__file__).resolve().parent / "ios_wda" / "invoke.py"
 
 def _ios_device_ref(udid: str) -> str:
     digest = hashlib.sha256(f"siksik-ios-device:{udid}".encode("utf-8")).hexdigest()
@@ -92,6 +96,9 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
+_STACK_STATE_DIR = Path(os.environ.get("IOS_STACK_STATE_DIR", "/tmp/ios-media-puller-stack"))
+
+
 def _puller_paths() -> tuple[Path, Path, Path]:
     root = settings.ios_media_puller_path.resolve()
     python_bin = root / ".venv" / "bin" / "python"
@@ -99,37 +106,104 @@ def _puller_paths() -> tuple[Path, Path, Path]:
     return root, python_bin, automator
 
 
+def stack_udid_matches(udid: str, *, state_dir: Path | None = None) -> bool:
+    """True if the last successful WDA stack was bound to this iPhone."""
+    path = (state_dir or _STACK_STATE_DIR) / "udid"
+    try:
+        bound = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return bool(bound) and bound == udid
+
+
 def ios_social_toolchain_ready() -> dict[str, bool]:
-    root, python_bin, automator = _puller_paths()
+    root, python_bin, _automator = _puller_paths()
     stack = root / "ios_automator" / "scripts" / "run_stack.sh"
+    flows = root / "ios_automator" / "flows"
     return {
         "puller_root": root.is_dir(),
         "venv_python": python_bin.is_file(),
-        "automator": automator.is_file(),
+        "invoke_script": _INVOKE_SCRIPT.is_file(),
         "run_stack": stack.is_file(),
+        "ig_flow": (flows / "ig_profile.py").is_file(),
+        "x_flow": (flows / "x_profile.py").is_file(),
+        "fb_flow": (flows / "fb_profile.py").is_file(),
     }
 
 
 async def _wda_ready(url: str, timeout_s: float = 3.0) -> bool:
-    status_url = url.rstrip("/") + "/status"
+    """Probe WDA /status the same way run_stack.sh does (curl).
+
+    Python urllib and http.client often get IncompleteRead / RemoteDisconnected
+    from go-ios forward even while `curl -sf /status` returns 200. That made the
+    host skip social after the stack had already logged WDA ready.
+    """
+    parsed = urlparse(url.rstrip("/") + "/status")
+    host = parsed.hostname or "127.0.0.1"
+    port = int(parsed.port or 8100)
+    path = parsed.path or "/status"
+    status_url = f"http://{host}:{port}{path}"
 
     def _check() -> bool:
-        try:
-            with urlopen(status_url, timeout=timeout_s) as response:  # noqa: S310
-                return 200 <= int(response.status) < 300
-        except (URLError, TimeoutError, OSError, ValueError):
-            return False
+        import subprocess
 
-    import asyncio
+        try:
+            curl = subprocess.run(
+                [
+                    "curl",
+                    "-sf",
+                    "--max-time",
+                    str(max(1, int(timeout_s))),
+                    "--connect-timeout",
+                    "2",
+                    status_url,
+                ],
+                capture_output=True,
+                timeout=timeout_s + 2,
+                check=False,
+            )
+            if curl.returncode == 0:
+                return True
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+        import http.client
+
+        conn: http.client.HTTPConnection | None = None
+        try:
+            conn = http.client.HTTPConnection(host, port, timeout=timeout_s)
+            conn.request("GET", path, headers={"Accept": "*/*", "Host": f"{host}:{port}"})
+            response = conn.getresponse()
+            status = int(response.status)
+            try:
+                response.read()
+            except http.client.IncompleteRead:
+                pass
+            return 200 <= status < 300
+        except (OSError, ValueError, TimeoutError, http.client.HTTPException):
+            return False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
 
     return await asyncio.to_thread(_check)
 
 
-async def ensure_ios_wda_stack(*, udid: str) -> str:
-    """Ensure WDA HTTP is reachable; start run_stack.sh if needed. Returns base URL."""
+async def ensure_ios_wda_stack(*, udid: str, restart: bool = False) -> str:
+    """Ensure WDA HTTP is reachable for this UDID; start run_stack.sh if needed.
+
+    Fast-path only when :8100 is up AND the last stack was recorded for the same
+    iPhone. `restart=True` kills and relaunches WDA (needed between apps: launching
+    IG often drops the WDA HTTP listener, so X/FB then write only job.json).
+    """
     base = settings.ios_social_wda_url.rstrip("/")
-    if await _wda_ready(base):
-        return base
+    if not restart:
+        already = await _wda_ready(base)
+        if already and stack_udid_matches(udid):
+            return base
 
     root, _python_bin, _automator = _puller_paths()
     stack = root / "ios_automator" / "scripts" / "run_stack.sh"
@@ -143,7 +217,10 @@ async def ensure_ios_wda_stack(*, udid: str) -> str:
         **os.environ,
         "PATH": f"{Path.home() / '.local' / 'bin'}:{os.environ.get('PATH', '')}",
         "UDID": udid,
-        "IOS_SKIP_WDA_INSTALL": "1",
+        "IOS_ENSURE_DEV_IMAGE": "1",
+        "IOS_SKIP_WDA_INSTALL": "0",
+        "IOS_STACK_STATE_DIR": str(_STACK_STATE_DIR),
+        "IOS_FORCE_WDA_RESTART": "1" if restart else "0",
         "WDA_PORT": base.rsplit(":", 1)[-1] if ":" in base else "8100",
     }
     logger.info(
@@ -154,7 +231,7 @@ async def ensure_ios_wda_stack(*, udid: str) -> str:
             "timeout_ms": int(settings.ios_social_wda_boot_timeout_s * 1000),
         },
     )
-    await run_process(
+    stack_result = await run_process(
         ["bash", str(stack)],
         timeout=settings.ios_social_wda_boot_timeout_s,
         cwd=root,
@@ -166,13 +243,50 @@ async def ensure_ios_wda_stack(*, udid: str) -> str:
         timeout_category=ErrorCategory.ADB_TIMEOUT,
         failure_category=ErrorCategory.DEPENDENCY_NOT_FOUND,
     )
-    if not await _wda_ready(base, timeout_s=5.0):
+    # Stack's curl may succeed a few seconds before the host probe; poll.
+    ready = False
+    for _ in range(15):
+        ready = await _wda_ready(base, timeout_s=2.0)
+        if ready:
+            break
+        await asyncio.sleep(1)
+    if not ready:
+        logger.warning(
+            "ios_wda_stack_not_ready",
+            extra={
+                "device_ref": _ios_device_ref(udid),
+                "dependency_exit_code": stack_result.returncode,
+            },
+        )
         raise acquisition_error(
             ErrorCategory.AGENT_UNREACHABLE,
-            "WebDriverAgent iOS tidak siap di port lokal.",
+            "WebDriverAgent iOS tidak siap. Cek USB Trust, Developer Mode, internet (Developer Image), dan Trust profil WDA.",
             retryable=True,
         )
     return base
+
+
+def build_wda_flow_job(
+    *,
+    flow: str,
+    output_dir: Path,
+    wda_url: str,
+    udid: str,
+    archive_shots: int,
+    x_shots: int,
+) -> dict[str, Any]:
+    root, _python_bin, _automator = _puller_paths()
+    return {
+        "automator_root": str(root / "ios_automator"),
+        "flow": flow,
+        "wda_url": wda_url,
+        "output_dir": str(output_dir),
+        "udid": udid,
+        "timeout_s": 90.0,
+        "stop_after": "all",
+        "archive_shots": archive_shots,
+        "x_shots": x_shots,
+    }
 
 
 async def _run_flow(
@@ -180,32 +294,35 @@ async def _run_flow(
     flow: str,
     output_dir: Path,
     wda_url: str,
-    env_extra: dict[str, str],
+    udid: str,
+    archive_shots: int,
+    x_shots: int,
 ) -> int:
-    root, python_bin, automator = _puller_paths()
-    if not python_bin.is_file() or not automator.is_file():
+    root, python_bin, _automator = _puller_paths()
+    if not python_bin.is_file() or not _INVOKE_SCRIPT.is_file():
         raise acquisition_error(
             ErrorCategory.DEPENDENCY_NOT_FOUND,
-            "ios-media-puller venv/automator tidak siap.",
+            "ios-media-puller venv / invoke script tidak siap.",
         )
     output_dir.mkdir(parents=True, exist_ok=True)
+    job = build_wda_flow_job(
+        flow=flow,
+        output_dir=output_dir,
+        wda_url=wda_url,
+        udid=udid,
+        archive_shots=archive_shots,
+        x_shots=x_shots,
+    )
+    job_path = output_dir / "job.json"
+    job_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
     env = {
         **os.environ,
         "PATH": f"{Path.home() / '.local' / 'bin'}:{os.environ.get('PATH', '')}",
         "IOS_SKIP_WDA_INSTALL": "1",
-        **env_extra,
+        "IOS_TEMP_CRAWL_SESSION": str(os.environ.get("IOS_TEMP_CRAWL_SESSION") or ""),
     }
     result = await run_process(
-        [
-            str(python_bin),
-            str(automator),
-            "--skip-wda-install",
-            flow,
-            "--http",
-            wda_url,
-            "-o",
-            str(output_dir),
-        ],
+        [str(python_bin), str(_INVOKE_SCRIPT), str(job_path)],
         timeout=settings.ios_social_flow_timeout_s,
         cwd=root,
         env=env,
@@ -216,6 +333,14 @@ async def _run_flow(
         timeout_category=ErrorCategory.ADB_TIMEOUT,
         failure_category=ErrorCategory.AGENT_UNREACHABLE,
     )
+    log_path = output_dir / "invoke.log"
+    try:
+        log_path.write_text(
+            (result.stdout or "") + "\n--- stderr ---\n" + (result.stderr or ""),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
     return result.returncode
 
 
@@ -244,6 +369,7 @@ def _profile_normalized_text(profile: dict[str, Any]) -> str:
     for key, label in (
         ("posts", "posts"),
         ("followers", "followers"),
+        ("friends", "friends"),
         ("following", "following"),
     ):
         number = _as_int(profile.get(key))
@@ -335,6 +461,56 @@ def _build_visible_record(
     return record, staged_shot
 
 
+def _load_jsonl_first(*paths: Path) -> list[dict[str, Any]]:
+    for path in paths:
+        if path.is_file():
+            return _load_jsonl(path)
+    return []
+
+
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows
+
+
+def _copy_flow_debug(out_dir: Path, flow: str, session_id: str) -> Path | None:
+    """Keep flow artifacts under siksik/temp_crawl/ios_wda/<session>/<flow>."""
+    dest = settings.android_social_debug_dir / "ios_wda" / session_id / flow
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            shutil.rmtree(dest)
+        if out_dir.is_dir():
+            shutil.copytree(out_dir, dest)
+        return dest
+    except OSError:
+        return None
+
+
+def _sidecar_text(out_dir: Path, screenshot: Path | None, stem: str) -> str | None:
+    candidates: list[Path] = [out_dir / f"{stem}.txt"]
+    if screenshot is not None:
+        candidates.insert(0, screenshot.with_suffix(".txt"))
+    for path in candidates:
+        if path.is_file():
+            text = path.read_text(encoding="utf-8").strip()
+            if text:
+                return text[:65536]
+    return None
+
+
 def records_from_ig_output(
     *,
     session_id: str,
@@ -369,7 +545,45 @@ def records_from_ig_output(
                 package_name=PACKAGE_INSTAGRAM,
                 social_scope="own_story_archive",
                 screen_sequence=index,
-                normalized_text=None,
+                normalized_text=_sidecar_text(out_dir, shot, shot.stem),
+                screenshot_path=shot,
+                artifacts_dir=artifacts_dir,
+            )
+        )
+    for row in _load_jsonl_first(out_dir / "posts.jsonl", out_dir / "posts.jsonl"):
+        shot_name = str(row.get("screenshot") or "")
+        shot = out_dir / shot_name if shot_name else None
+        if shot is not None and not shot.is_file():
+            shot = None
+        text = str(row.get("text") or "").strip() or _sidecar_text(
+            out_dir, shot, f"post_{int(row.get('index') or 0):02d}"
+        )
+        built.append(
+            _build_visible_record(
+                session_id=session_id,
+                crawl_id=crawl_id,
+                package_name=PACKAGE_INSTAGRAM,
+                social_scope="own_posts",
+                screen_sequence=int(row.get("index") or 1),
+                normalized_text=text or None,
+                screenshot_path=shot,
+                artifacts_dir=artifacts_dir,
+            )
+        )
+    for row in _load_jsonl_first(out_dir / "comments.jsonl", out_dir / "comments.jsonl"):
+        shot_name = str(row.get("screenshot") or "")
+        shot = out_dir / shot_name if shot_name else None
+        if shot is not None and not shot.is_file():
+            shot = None
+        text = str(row.get("text") or "").strip() or None
+        built.append(
+            _build_visible_record(
+                session_id=session_id,
+                crawl_id=crawl_id,
+                package_name=PACKAGE_INSTAGRAM,
+                social_scope="own_comments",
+                screen_sequence=int(row.get("index") or 1),
+                normalized_text=text,
                 screenshot_path=shot,
                 artifacts_dir=artifacts_dir,
             )
@@ -400,17 +614,136 @@ def records_from_x_output(
             profile=profile,
         )
     )
-    posts = sorted(out_dir.glob("post_*.png"))
-    for index, shot in enumerate(posts, start=1):
+    tweet_rows = _load_jsonl_first(
+        out_dir / "tweet_items.jsonl",
+        out_dir / "tweet_items.jsonl",
+        out_dir / "tweet.jsonl",
+    )
+    if tweet_rows:
+        for row in tweet_rows:
+            text = str(row.get("text") or "").strip() or None
+            if not text:
+                continue
+            built.append(
+                _build_visible_record(
+                    session_id=session_id,
+                    crawl_id=crawl_id,
+                    package_name=PACKAGE_X,
+                    social_scope="own_tweets",
+                    screen_sequence=int(row.get("index") or 1),
+                    normalized_text=text,
+                    screenshot_path=None,
+                    artifacts_dir=artifacts_dir,
+                )
+            )
+    else:
+        posts = sorted(out_dir.glob("post_*.png"))
+        for index, shot in enumerate(posts, start=1):
+            built.append(
+                _build_visible_record(
+                    session_id=session_id,
+                    crawl_id=crawl_id,
+                    package_name=PACKAGE_X,
+                    social_scope="own_tweets",
+                    screen_sequence=index,
+                    normalized_text=_sidecar_text(out_dir, shot, shot.stem),
+                    screenshot_path=shot,
+                    artifacts_dir=artifacts_dir,
+                )
+            )
+    for row in _load_jsonl_first(
+        out_dir / "reply_items.jsonl",
+        out_dir / "reply_items.jsonl",
+        out_dir / "reply.jsonl",
+    ):
+        text = str(row.get("text") or "").strip() or None
+        if not text:
+            continue
         built.append(
             _build_visible_record(
                 session_id=session_id,
                 crawl_id=crawl_id,
                 package_name=PACKAGE_X,
-                social_scope="own_tweets",
-                screen_sequence=index,
-                normalized_text=None,
-                screenshot_path=shot,
+                social_scope="own_replies",
+                screen_sequence=int(row.get("index") or 1),
+                normalized_text=text,
+                screenshot_path=None,
+                artifacts_dir=artifacts_dir,
+            )
+        )
+    return built
+
+
+def records_from_fb_output(
+    *,
+    session_id: str,
+    crawl_id: str,
+    out_dir: Path,
+    artifacts_dir: Path,
+) -> list[tuple[InventoryRecordV1, Path | None]]:
+    profile = _load_profile(out_dir)
+    built: list[tuple[InventoryRecordV1, Path | None]] = []
+    profile_png = out_dir / "profile.png"
+    built.append(
+        _build_visible_record(
+            session_id=session_id,
+            crawl_id=crawl_id,
+            package_name=PACKAGE_FACEBOOK,
+            social_scope="own_profile",
+            screen_sequence=1,
+            normalized_text=_profile_normalized_text(profile) or None,
+            screenshot_path=profile_png if profile_png.is_file() else None,
+            artifacts_dir=artifacts_dir,
+            profile=profile,
+        )
+    )
+    for row in _load_jsonl_first(
+        out_dir / "fb_post_items.jsonl",
+        out_dir / "fb_post.jsonl",
+        out_dir / "fb_post.jsonl",
+    ):
+        text = str(row.get("text") or "").strip() or None
+        if not text:
+            continue
+        low = text.lower()
+        if "what's on your mind" in low or "new post" in low or "composer-view" in low:
+            continue
+        built.append(
+            _build_visible_record(
+                session_id=session_id,
+                crawl_id=crawl_id,
+                package_name=PACKAGE_FACEBOOK,
+                social_scope="own_posts",
+                screen_sequence=int(row.get("index") or 1),
+                normalized_text=text,
+                screenshot_path=None,
+                artifacts_dir=artifacts_dir,
+            )
+        )
+    for row in _load_jsonl_first(
+        out_dir / "fb_comment_items.jsonl",
+        out_dir / "fb_comment.jsonl",
+    ):
+        text = str(row.get("text") or "").strip() or None
+        if not text:
+            continue
+        low = text.lower()
+        if (
+            "grouping-section-item" in low
+            or "personal information" in low
+            or "badgeview" in low
+            or low in {"facebook", "activity log", "search"}
+        ):
+            continue
+        built.append(
+            _build_visible_record(
+                session_id=session_id,
+                crawl_id=crawl_id,
+                package_name=PACKAGE_FACEBOOK,
+                social_scope="own_comments",
+                screen_sequence=int(row.get("index") or 1),
+                normalized_text=text,
+                screenshot_path=None,
                 artifacts_dir=artifacts_dir,
             )
         )
@@ -559,7 +892,7 @@ async def acquire_ios_social_ui(
     mode: AcquisitionMode,
     on_progress: ProgressCallback,
 ) -> int:
-    """Run IG + X WDA flows and stage visible_ui records. Failures are categorized.
+    """Run IG + X + FB WDA flows and stage visible_ui records. Failures are categorized.
 
     Returns number of persisted inventory records. Raises AcquisitionError when the
     toolchain is enabled but cannot run; caller may catch to keep backup success.
@@ -586,11 +919,18 @@ async def acquire_ios_social_ui(
     await on_progress(
         SessionStatus.ACQUIRING,
         42,
-        "iOS social UI (IG/X) via WebDriverAgent…",
+        "Menyiapkan iPhone (pairing, Developer Image, WebDriverAgent)…",
         acquisition_method="ios_wda_social",
     )
     wda_url = await ensure_ios_wda_stack(udid=udid)
+    await on_progress(
+        SessionStatus.ACQUIRING,
+        43,
+        "Membuka Instagram, Facebook, dan X…",
+        acquisition_method="ios_wda_social",
+    )
     crawl_id = f"ios_social_{uuid.uuid4().hex[:24]}"
+    os.environ["IOS_TEMP_CRAWL_SESSION"] = session_id
     work_root = staging / "_ios_social_work"
     if work_root.exists():
         shutil.rmtree(work_root)
@@ -616,14 +956,9 @@ async def acquire_ios_social_ui(
     if mode == AcquisitionMode.QUICK:
         archive_shots = max(1, archive_shots)
         x_shots = max(1, x_shots)
-    env_extra = {
-        "UDID": udid,
-        "IOS_ARCHIVE_MAX_SCREENSHOTS": str(archive_shots),
-        "IOS_X_MAX_SCREENSHOTS": str(x_shots),
-    }
-
     collected: list[tuple[InventoryRecordV1, Path | None]] = []
     failures: list[str] = []
+    first_flow = True
 
     for package in targets:
         flow = FLOW_BY_PACKAGE[package]
@@ -645,11 +980,15 @@ async def acquire_ios_social_ui(
             acquisition_method="ios_wda_social",
         )
         try:
+            wda_url = await ensure_ios_wda_stack(udid=udid, restart=not first_flow)
+            first_flow = False
             code = await _run_flow(
                 flow=flow,
                 output_dir=out_dir,
                 wda_url=wda_url,
-                env_extra=env_extra,
+                udid=udid,
+                archive_shots=archive_shots,
+                x_shots=x_shots,
             )
         except AcquisitionError as exc:
             failures.append(exc.category.value if hasattr(exc, "category") else "failed")
@@ -667,6 +1006,7 @@ async def acquire_ios_social_ui(
                     "retryable": exc.retryable,
                 },
             )
+            _copy_flow_debug(out_dir, flow, session_id)
             continue
         if code != 0:
             failures.append(f"{package}:exit_{code}")
@@ -681,6 +1021,7 @@ async def acquire_ios_social_ui(
                 },
             )
             # IG may still have written profile before archive failure — ingest what exists.
+        _copy_flow_debug(out_dir, flow, session_id)
         if package == PACKAGE_INSTAGRAM:
             collected.extend(
                 records_from_ig_output(
@@ -693,6 +1034,15 @@ async def acquire_ios_social_ui(
         elif package == PACKAGE_X:
             collected.extend(
                 records_from_x_output(
+                    session_id=session_id,
+                    crawl_id=crawl_id,
+                    out_dir=out_dir,
+                    artifacts_dir=artifacts_dir,
+                )
+            )
+        elif package == PACKAGE_FACEBOOK:
+            collected.extend(
+                records_from_fb_output(
                     session_id=session_id,
                     crawl_id=crawl_id,
                     out_dir=out_dir,
@@ -730,7 +1080,7 @@ async def acquire_ios_social_ui(
     if count == 0 and failures:
         raise acquisition_error(
             ErrorCategory.AGENT_UNREACHABLE,
-            "iOS social UI tidak menghasilkan record (IG/X).",
+            "iOS social UI tidak menghasilkan record (IG/X/FB).",
             retryable=True,
         )
     await on_progress(

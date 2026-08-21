@@ -130,6 +130,7 @@ def parse_args() -> argparse.Namespace:
         help="Maks file (default 30; 0 = semua)",
     )
     p.add_argument("-o", "--output", type=Path, required=True, help="Folder output lokal")
+    p.add_argument("--not-before-epoch-s", type=float, default=0.0)
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
@@ -150,6 +151,8 @@ async def run(args: argparse.Namespace) -> int:
     async with AfcService(lockdown) as afc:
         for root in ROOTS:
             await _walk(afc, root, 0, found)
+        if args.not_before_epoch_s > 0:
+            found = [item for item in found if item.mtime.timestamp() >= args.not_before_epoch_s]
         found.sort(key=lambda d: d.mtime, reverse=True)
         selected = found if args.count == 0 else found[: args.count]
         logger.info("Kandidat dokumen: %d → ambil %d", len(found), len(selected))

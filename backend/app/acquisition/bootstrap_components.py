@@ -395,9 +395,21 @@ class AgentAccessCoordinator:
                 work.special_access[access.value] = state.value
                 if state == SpecialAccessState.GRANTED:
                     continue
-                # Restore can return UNAVAILABLE when foreign enabled services
-                # fail strict component validation. Fall through to Settings.
-                if state == SpecialAccessState.UNAVAILABLE and component is not None:
+                # Restore can return UNAVAILABLE (foreign a11y entries) or DENIED
+                # (MIUI blocks settings put secure). Neither is operator denial.
+                if (
+                    state in {SpecialAccessState.UNAVAILABLE, SpecialAccessState.DENIED}
+                    and component is not None
+                ):
+                    logger.info(
+                        "agent_accessibility_restore_deferred",
+                        extra={
+                            "request_id": request_id,
+                            "session_id": session_id,
+                            "device_ref": device_ref(serial),
+                            "access_state": state.value,
+                        },
+                    )
                     state = SpecialAccessState.NOT_GRANTED
                     work.special_access[access.value] = state.value
             if access == SpecialAccessKind.NOTIFICATION_LISTENER:
@@ -465,6 +477,7 @@ class AgentAccessCoordinator:
                 self._config.package_name,
                 access,
                 user_id=user_id,
+                component=component,
             )
             await publish_awaiting(
                 message=SPECIAL_ACCESS_WAIT_MESSAGES.get(access),

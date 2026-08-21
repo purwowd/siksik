@@ -209,6 +209,8 @@ def build_social_snapshot_enrichments(
                 confidences.append(float(result.confidence))
 
         combined_ocr = _merge_text(ocr_texts)
+        if metadata.social_scope == "own_comments":
+            combined_ocr = _comments_body_from_ocr(combined_ocr) or combined_ocr
         profile_metadata = _profile_metadata(metadata, combined_ocr, ocr_regions)
         output.append(
             SocialSnapshotEnrichment(
@@ -330,6 +332,53 @@ def _mirror_debug_snapshot(
         return None
 
 
+def _comments_body_from_ocr(ocr_text: str) -> str | None:
+    if not ocr_text or not ocr_text.strip():
+        return None
+    chrome = {
+        "comments",
+        "komentar",
+        "select",
+        "pilih",
+        "back",
+        "kembali",
+        "newest to oldest",
+        "terbaru ke terlama",
+        "all dates",
+        "semua tanggal",
+        "all authors",
+        "semua penulis",
+        "filter by date",
+        "filter berdasarkan tanggal",
+        "select multiple comments to delete",
+        "pilih beberapa komentar untuk dihapus",
+    }
+    fragments = (
+        "newest to oldest",
+        "terbaru ke terlama",
+        "all dates",
+        "semua tanggal",
+        "filter by date",
+        "filter berdasarkan",
+        "select multiple",
+        "pilih beberapa",
+    )
+    kept: list[str] = []
+    for line in ocr_text.splitlines():
+        value = line.strip()
+        if not value:
+            continue
+        low = value.lower()
+        if low in chrome:
+            continue
+        if any(low == frag or low.startswith(f"{frag} ") for frag in fragments):
+            continue
+        kept.append(value)
+    if not kept:
+        return None
+    return _merge_text(kept)
+
+
 def _profile_metadata(
     metadata: VisibleUiMetadataV1,
     ocr_text: str,
@@ -366,7 +415,7 @@ def _profile_metadata(
         metrics["posts"] = 0
 
     links = list(metadata.profile_links)
-    repaired = _repair_ocr_link_text(ocr_text)
+    repaired = repair_ocr_link_text(ocr_text)
     links.extend(match.group(0) for match in PROFILE_LINK.finditer(repaired))
     # Also join adjacent OCR region scraps that form a path continuation.
     region_blob = " ".join(
@@ -377,7 +426,7 @@ def _profile_metadata(
     if region_blob:
         links.extend(
             match.group(0)
-            for match in PROFILE_LINK.finditer(_repair_ocr_link_text(region_blob))
+            for match in PROFILE_LINK.finditer(repair_ocr_link_text(region_blob))
         )
     profile_links: list[str] = []
     seen: set[str] = set()
@@ -399,9 +448,21 @@ def _profile_metadata(
     }
 
 
-def _repair_ocr_link_text(value: str) -> str:
-    """Repair EasyOCR spacing on profile links (open spotify com/user/31 abcd)."""
+def repair_ocr_link_text(value: str) -> str:
+    """Repair EasyOCR spacing on profile links.
+
+    EasyOCR often emits ``open spotify comluser/31 …`` instead of
+    ``open.spotify.com/user/31…`` (missing ``com/``, ``l`` read as slash).
+    """
     text = value
+    text = re.sub(r"(?i)\bopen\s+spotify\s+com(?=/)", "open.spotify.com", text)
+    text = re.sub(r"(?i)\bopen\s+spotify\s+com(?=[a-z])", "open.spotify.com/", text)
+    text = re.sub(r"(?i)\bopen\.spotify\.com(?=[a-z])", "open.spotify.com/", text)
+    text = re.sub(
+        r"(?i)(open\.spotify\.com)/?l?(user/)",
+        r"\1/\2",
+        text,
+    )
     text = re.sub(r"(?i)\bopen\s+spotify\s+com/", "open.spotify.com/", text)
     text = re.sub(r"(?i)\bwww\s+([a-z0-9-]+)\s+com/", r"www.\1.com/", text)
     text = re.sub(r"(?i)\b([a-z0-9-]+)\s+com/(user|in|p)/", r"\1.com/\2/", text)
@@ -436,6 +497,9 @@ def _repair_ocr_link_text(value: str) -> str:
             break
         text = updated
     return text
+
+
+_repair_ocr_link_text = repair_ocr_link_text
 
 
 def _username_from_nodes(nodes: list[dict[str, object]]) -> str | None:

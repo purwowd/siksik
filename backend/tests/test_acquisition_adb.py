@@ -304,6 +304,60 @@ async def test_accessibility_restore_preserves_foreign_parental_service(
 
 
 @pytest.mark.unit
+async def test_accessibility_restore_retries_after_write_secure_settings_grant(
+    tmp_path: Path,
+) -> None:
+    adb = executable(tmp_path)
+    puts = {"enabled": 0}
+
+    async def runner(argv, **_kwargs):
+        command = tuple(argv)
+        if "get" in command and "enabled_accessibility_services" in command:
+            if puts["enabled"] == 0:
+                return ProcessResult(command, 0, "\n", "")
+            return ProcessResult(
+                command,
+                0,
+                "com.siksik.agent/com.siksik.agent.accessibility.CaptureAccessibilityService\n",
+                "",
+            )
+        if "put" in command and "enabled_accessibility_services" in command:
+            puts["enabled"] += 1
+            if puts["enabled"] == 1:
+                return ProcessResult(
+                    command,
+                    1,
+                    "",
+                    "java.lang.SecurityException: Permission denial: writing to settings requires:android.permission.WRITE_SECURE_SETTINGS\n",
+                )
+            return ProcessResult(command, 0, "", "")
+        if command[-2:] == (
+            "com.siksik.agent",
+            "android.permission.WRITE_SECURE_SETTINGS",
+        ) or (
+            "pm" in command
+            and "grant" in command
+            and "WRITE_SECURE_SETTINGS" in command[-1]
+        ):
+            return ProcessResult(command, 0, "", "")
+        if "put" in command and "accessibility_enabled" in command:
+            return ProcessResult(command, 0, "", "")
+        if "getprop" in command:
+            return ProcessResult(command, 0, "11\n", "")
+        return ProcessResult(command, 0, "", "")
+
+    transport = AsyncAdbTransport(str(adb), runner=runner)
+    state = await transport.restore_accessibility_service(
+        "serial-1",
+        "com.siksik.agent",
+        "com.siksik.agent/com.siksik.agent.accessibility.CaptureAccessibilityService",
+        user_id=0,
+    )
+    assert state == SpecialAccessState.GRANTED
+    assert puts["enabled"] == 2
+
+
+@pytest.mark.unit
 async def test_special_access_probe_and_settings_open_do_not_modify_secure_settings(
     tmp_path: Path,
 ) -> None:
@@ -355,7 +409,7 @@ async def test_instrumentation_is_serial_pinned_and_argv_only(tmp_path: Path) ->
     await transport.run_instrumentation(
         "serial-1",
         runner_component=(
-            "com.siksik.agent.automation/androidx.test.runner.AndroidJUnitRunner"
+            "com.siksik.agent.automation/com.siksik.agent.automation.SiksikAndroidJUnitRunner"
         ),
         test_class="com.siksik.agent.automation.SocialCrawlInstrumentation",
         arguments={

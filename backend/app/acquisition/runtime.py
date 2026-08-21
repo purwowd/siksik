@@ -61,6 +61,8 @@ class AgentRuntimeSecrets:
     token: str
     forward_host_port: int
     token_expires_at: str
+    google_token: str | None = None
+    google_account: str | None = None
 
 
 def device_ref(serial: str) -> str:
