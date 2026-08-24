@@ -234,7 +234,7 @@ async def test_indexing_accepts_only_manifested_ios_library_artifacts(
             self.rows.extend(rows)
 
     database = FakeDatabase()
-    monkeypatch.setattr(acquisition, "db", database)
+    monkeypatch.setattr("app.acquisition.indexing.db", database)
 
     async def progress(*_args, **_kwargs):
         return None
@@ -314,6 +314,14 @@ async def test_ios_media_flow_adds_library_recovery_without_replacing_dcim(
     monkeypatch.setattr(ios_afc, "run_process", fake_process)
     monkeypatch.setattr(config.settings, "ios_afc_media_enabled", True)
     monkeypatch.setattr(config.settings, "ios_photo_library_recovery_enabled", True)
+    fake_py = tmp_path / "python"
+    fake_py.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake_script = tmp_path / "pull_recent_media.py"
+    fake_script.write_text("# stub\n", encoding="utf-8")
+    fake_library = tmp_path / "pull_library_artifacts.py"
+    fake_library.write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(ios_afc, "_venv_python", lambda: fake_py)
+    monkeypatch.setattr(ios_afc, "_puller_root", lambda: tmp_path)
 
     staging = tmp_path / "staging"
     moved = await ios_afc.acquire_ios_afc_media(

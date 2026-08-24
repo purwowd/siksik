@@ -31,6 +31,11 @@ from app.acquisition.social_ocr import (
     build_social_snapshot_enrichments,
     enrichment_row,
 )
+from app.core.branding import (
+    LEGACY_CRAWL_RECORD_MIME,
+    is_crawl_record_mime,
+    session_id_field,
+)
 from app.core.config import settings
 from app.core.db import db, utcnow
 from app.models.schemas import SessionStatus
@@ -40,15 +45,17 @@ logger = logging.getLogger("siksik.acquisition.direct_transfer")
 SAFE_MIME = re.compile(r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
 SAFE_SUFFIX = re.compile(r"^\.[A-Za-z0-9]{1,12}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
-CANONICAL_RECORD_MIME = "application/vnd.siksik.crawl-record+json"
+# Agent still emits legacy MIME/suffix; host dual-accepts satria + siksik.
+CANONICAL_RECORD_MIME = LEGACY_CRAWL_RECORD_MIME
 CANONICAL_RECORD_SUFFIX = ".siksik-record.json"
+CANONICAL_RECORD_SUFFIXES = (".siksik-record.json", ".satria-record.json")
 REMOTE_TRANSFER_ROOT = PurePosixPath(
     "/sdcard/Android/data/com.siksik.agent/files/siksik_transfer"
 )
 
 
 class StrictTransferModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
 
 class ManifestArtifactV1(StrictTransferModel):
@@ -78,7 +85,7 @@ class CrawlManifestV1(StrictTransferModel):
     schema_version: Literal[1]
     bundle_format: Literal["direct_manifest_files_v1"]
     stage_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
-    siksik_session_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+    siksik_session_id: str = session_id_field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
     crawl_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
     selection_revision: int = Field(ge=1)
     selection_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -526,9 +533,9 @@ class DirectCrawlTransferService:
                     "Source artifact Android tidak konsisten.",
                 )
             if item.role == "canonical_record" and (
-                item.mime_type != CANONICAL_RECORD_MIME
+                not is_crawl_record_mime(item.mime_type)
                 or item.attachment_id is not None
-                or not item.relative_path.endswith(CANONICAL_RECORD_SUFFIX)
+                or not item.relative_path.endswith(CANONICAL_RECORD_SUFFIXES)
             ):
                 raise acquisition_error(
                     ErrorCategory.AGENT_INVALID_RESPONSE,

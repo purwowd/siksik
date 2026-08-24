@@ -795,7 +795,7 @@ async def test_indexing_accepts_only_verified_recovery_manifest_artifacts(
             self.rows.extend(rows)
 
     database = FakeDatabase()
-    monkeypatch.setattr(acquisition, "db", database)
+    monkeypatch.setattr("app.acquisition.indexing.db", database)
 
     async def on_progress(*_args, **_kwargs):
         return None
@@ -928,4 +928,8 @@ def test_recovery_uses_existing_human_readable_report_layout():
     assert "Sampah / media terhapus" in html
     assert "Ketelanjangan / konten eksplisit" in html
     assert "Recovery sampah Android (Penuh)" in html
-    assert "Recovery sampah Android: 1 item · 1024 bytes · selesai" in html
+    assert "Recovery sampah Android" in html
+    assert "1 item · 1024 bytes · selesai" in html
+    assert "Ringkasan eksekutif" in html
+    assert "Penuh" in html
+    assert "Pengesahan pimpinan" in html

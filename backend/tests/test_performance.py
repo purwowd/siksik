@@ -33,6 +33,10 @@ async def test_pipeline_under_sla(client: AsyncClient, file_count: int, mode: st
             "mode": mode,
             "scenario": "tidak_lulus",
             "file_count": file_count,
+            "participant": {
+                "full_name": "Peserta Tes",
+                "registration_no": f"PERF-{file_count}-{mode}",
+            },
             "label": f"Perf {file_count} {mode}",
         },
     )
@@ -59,6 +63,7 @@ async def test_hash_cache_rerun_faster(client: AsyncClient):
         "mode": "quick",
         "scenario": "tidak_lulus",
         "file_count": 600,
+        "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-CACHE-001"},
         "label": "Cache warm",
     }
     r1 = await client.post("/api/v1/sessions", json=payload)
@@ -66,6 +71,10 @@ async def test_hash_cache_rerun_faster(client: AsyncClient):
     assert s1["status"] == "completed"
 
     payload["label"] = "Cache hit"
+    payload["participant"] = {
+        "full_name": "Peserta Tes",
+        "registration_no": "TEST-CACHE-002",
+    }
     r2 = await client.post("/api/v1/sessions", json=payload)
     s2 = await wait_session(client, r2.json()["id"])
     assert s2["status"] == "completed"
@@ -88,6 +97,10 @@ async def test_serial_android_then_ios(client: AsyncClient):
                 "mode": "quick",
                 "scenario": "lulus",
                 "file_count": 300,
+                "participant": {
+                    "full_name": "Peserta Tes",
+                    "registration_no": f"TEST-SERIAL-{dtype.upper()}",
+                },
                 "label": f"Serial {dtype}",
             },
         )

@@ -314,7 +314,7 @@ class RecordPreprocessor(
 
     private fun skippedOcrResult(reason: String) = TextOcrResult(
         ExecutionInfo(
-            EngineIdentity("SIKSIK host selective OCR", "1"),
+            EngineIdentity("SATRIA host selective OCR", "1"),
             ExecutionStatus.SKIPPED,
             0,
             listOf(reason),

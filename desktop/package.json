@@ -1,0 +1,14 @@
+{
+  "name": "satria-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SATRIA workstation desktop — all-in-one UI + backend sidecar",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icons": "tauri icon ../frontend/public/favicon.svg 2>/dev/null || tauri icon src-tauri/icons/128x128.png"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.4.0"
+  }
+}

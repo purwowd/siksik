@@ -24,7 +24,7 @@ def _make_zip() -> bytes:
 @pytest.mark.acceptance
 async def test_session_from_zip(client: AsyncClient):
     files = {"file": ("adb_dump.zip", _make_zip(), "application/zip")}
-    data = {"mode": "quick", "label": "ZIP test"}
+    data = {"mode": "quick", "label": "ZIP test", "participant_full_name": "Peserta ZIP", "participant_registration_no": "TEST-ZIP-001"}
     res = await client.post("/api/v1/sessions/from-zip", files=files, data=data)
     assert res.status_code == 200, res.text
     sid = res.json()["id"]
@@ -44,5 +44,5 @@ async def test_session_from_zip(client: AsyncClient):
 @pytest.mark.api
 async def test_zip_rejects_non_zip(client: AsyncClient):
     files = {"file": ("notes.txt", b"hello", "text/plain")}
-    res = await client.post("/api/v1/sessions/from-zip", files=files, data={"mode": "quick"})
+    res = await client.post("/api/v1/sessions/from-zip", files=files, data={"mode": "quick", "participant_full_name": "Peserta ZIP", "participant_registration_no": "TEST-ZIP-002"})
     assert res.status_code == 400

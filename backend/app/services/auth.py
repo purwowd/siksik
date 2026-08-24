@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import secrets
 import time
@@ -22,6 +23,7 @@ BCRYPT_MARKER = "bcrypt"
 _LOGIN_WINDOW_S = 60.0
 _LOGIN_MAX_ATTEMPTS = 8
 _login_hits: dict[str, list[float]] = defaultdict(list)
+auth_logger = logging.getLogger("siksik.auth")
 
 
 class Role(str, Enum):
@@ -39,14 +41,14 @@ PERMISSIONS: dict[Role, set[str]] = {
         "sessions:start",
         "sessions:read",
         "sessions:cancel",
+        "sessions:update_participant",
         "candidates:review",
-        "findings:read",
-        "report:read",
     },
     Role.ANALIS: {
         "health",
         "devices",
         "sessions:read",
+        "sessions:update_participant",
         "findings:read",
         "findings:review",
         "dashboard",
@@ -55,6 +57,7 @@ PERMISSIONS: dict[Role, set[str]] = {
     Role.PIMPINAN: {
         "health",
         "sessions:read",
+        "sessions:update_participant",
         "findings:read",
         "dashboard",
         "report:read",
@@ -66,6 +69,7 @@ PERMISSIONS: dict[Role, set[str]] = {
         "sessions:start",
         "sessions:read",
         "sessions:cancel",
+        "sessions:update_participant",
         "candidates:review",
         "findings:read",
         "findings:review",
@@ -141,6 +145,12 @@ def _check_login_rate(request: Request | None, username: str) -> None:
     window.append(now)
     _login_hits[key] = window
     if len(window) > _LOGIN_MAX_ATTEMPTS:
+        auth_logger.warning(
+            "login_rate_limited ip=%s username=%s attempts=%s",
+            ip,
+            username.strip().lower(),
+            len(window),
+        )
         raise HTTPException(
             status_code=429,
             detail="Terlalu banyak percobaan login. Coba lagi sebentar.",
@@ -235,6 +245,11 @@ async def login(
     )
     if not row or not verify_password(password, row["password_hash"], row["salt"]):
         _check_login_rate(request, username)
+        auth_logger.warning(
+            "login_failed username=%s ip=%s",
+            username.strip().lower(),
+            request.client.host if request and request.client else "unknown",
+        )
         raise HTTPException(status_code=401, detail="Username atau password salah")
 
     await _upgrade_hash_if_legacy(row["id"], password, row["salt"])
@@ -244,6 +259,12 @@ async def login(
     await db.execute(
         "INSERT INTO auth_tokens (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
         (token, row["id"], expires, utcnow()),
+    )
+    auth_logger.info(
+        "login_success username=%s role=%s ip=%s",
+        row["username"],
+        row["role"],
+        request.client.host if request and request.client else "unknown",
     )
     return AuthUser(
         id=row["id"],

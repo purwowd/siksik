@@ -10,10 +10,22 @@ from app.core.config import settings
 from app.core.request_context import current_request_id
 from app.core.db import db, row_to_session, utcnow
 from app.acquisition.errors import AcquisitionError
-from app.models.schemas import AcquisitionMode, DeviceType, Scenario, SessionStatus, StartSessionRequest
+from app.models.schemas import (
+    AcquisitionMode,
+    DeviceType,
+    ParticipantInput,
+    Scenario,
+    SessionStatus,
+    StartSessionRequest,
+)
 from app.services import acquisition as acq
 from app.services import analysis as ai
 from app.services import reports as rpt
+from app.services.participant import (
+    find_registration_conflict,
+    participant_dict,
+    participant_display_label,
+)
 
 if TYPE_CHECKING:
     from app.acquisition.runtime import AgentRuntimeRecord
@@ -24,6 +36,36 @@ _PROGRESS_TIMING_KEYS = {
     "android_selection_ms": "t_selection_ms",
     "android_transfer_ms": "t_transfer_ms",
 }
+
+
+def _label_for_session(
+    *,
+    label: str | None,
+    participant: ParticipantInput,
+    fallback: str,
+) -> str:
+    """Prefer explicit label (e.g. Dummy seed); else participant name; else fallback."""
+    if label and label.strip():
+        return label.strip()
+    return participant_display_label(participant) or fallback
+
+
+async def _ensure_unique_registration(
+    participant: ParticipantInput,
+    *,
+    exclude_session_id: str | None = None,
+) -> dict[str, Any]:
+    payload = participant_dict(participant)
+    conflict = await find_registration_conflict(
+        payload["registration_no"],
+        exclude_session_id=exclude_session_id,
+    )
+    if conflict:
+        raise RuntimeError(
+            f"No. peserta {payload['registration_no']} sudah dipakai sesi lain hari ini "
+            f"({conflict['id'][:8]}… · {conflict['label']})."
+        )
+    return payload
 
 
 class SessionManager:
@@ -58,7 +100,12 @@ class SessionManager:
             device_id = req.device_id or (
                 "sim-android-01" if req.device_type != DeviceType.IOS else "sim-iphone-01"
             )
-            label = req.label or f"Sesi {device_id}"
+            label = _label_for_session(
+                label=req.label,
+                participant=req.participant,
+                fallback=f"Sesi {device_id}",
+            )
+            participant = await _ensure_unique_registration(req.participant)
             now = utcnow()
             progress = acq.empty_progress(SessionStatus.PENDING)
             timing = acq.empty_timing()
@@ -68,8 +115,8 @@ class SessionManager:
                 INSERT INTO sessions (
                     id, device_id, device_type, label, mode, scenario, status,
                     progress_json, timing_json, recommendation, error, created_by,
-                    review_candidates, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    review_candidates, participant_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -85,6 +132,7 @@ class SessionManager:
                     None,
                     operator_id,
                     int(req.review_candidates),
+                    json.dumps(participant, ensure_ascii=False),
                     now,
                     now,
                 ),
@@ -101,6 +149,7 @@ class SessionManager:
         original_name: str,
         mode: AcquisitionMode = AcquisitionMode.QUICK,
         label: str | None = None,
+        participant: ParticipantInput,
         operator_id: str | None = None,
     ) -> dict[str, Any]:
         async with self._lock:
@@ -121,7 +170,12 @@ class SessionManager:
 
             session_id = str(uuid.uuid4())
             device_id = f"zip:{original_name[:40]}"
-            session_label = label or f"ZIP · {original_name}"
+            session_label = _label_for_session(
+                label=label,
+                participant=participant,
+                fallback=f"ZIP · {original_name}",
+            )
+            participant_payload = await _ensure_unique_registration(participant)
             now = utcnow()
             progress = acq.empty_progress(SessionStatus.PENDING)
             timing = acq.empty_timing()
@@ -131,8 +185,8 @@ class SessionManager:
                 INSERT INTO sessions (
                     id, device_id, device_type, label, mode, scenario, status,
                     progress_json, timing_json, recommendation, error, created_by,
-                    review_candidates, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    review_candidates, participant_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -148,6 +202,7 @@ class SessionManager:
                     None,
                     operator_id,
                     0,
+                    json.dumps(participant_payload, ensure_ascii=False),
                     now,
                     now,
                 ),
@@ -164,6 +219,32 @@ class SessionManager:
         if not row:
             raise KeyError("Session not found")
         return row_to_session(row)
+
+    async def update_participant(
+        self,
+        session_id: str,
+        participant: ParticipantInput,
+    ) -> dict[str, Any]:
+        row = await db.fetchone("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        if not row:
+            raise KeyError("Session not found")
+        payload = await _ensure_unique_registration(
+            participant,
+            exclude_session_id=session_id,
+        )
+        label = row["label"]
+        if not str(label).startswith("Dummy"):
+            label = participant_display_label(payload)
+        now = utcnow()
+        await db.execute(
+            """
+            UPDATE sessions
+            SET participant_json = ?, label = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (json.dumps(payload, ensure_ascii=False), label, now, session_id),
+        )
+        return await self.get(session_id)
 
     async def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = await db.fetchall(

@@ -32,6 +32,12 @@ async def count_pending(session_id: str) -> int:
 
 
 def recommendation_from_counts(*, confirmed: int, pending: int) -> str:
+    """Kebijakan rekomendasi sesi setelah analisa/review.
+
+    - confirmed > 0 → TIDAK LULUS (ada bukti yang divalidasi analis)
+    - pending > 0 → MENUNGGU REVIEW
+    - semua rejected / tidak ada temuan → LULUS (temuan ditolak = bukan bukti)
+    """
     if confirmed > 0:
         return REC_TIDAK_LULUS
     if pending > 0:

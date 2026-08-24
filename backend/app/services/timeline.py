@@ -33,6 +33,9 @@ def build_risk_timeline(
     unknown = 0
 
     for r in rows:
+        review = r.get("review_status")
+        if review is not None and str(review) != "confirmed":
+            continue
         y = r.get("media_year")
         if y is None:
             unknown += 1
@@ -55,6 +58,9 @@ def build_risk_timeline(
     # recount older than window
     older = 0
     for r in rows:
+        review = r.get("review_status")
+        if review is not None and str(review) != "confirmed":
+            continue
         y = r.get("media_year")
         try:
             yi = int(y) if y is not None else None

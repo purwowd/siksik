@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.branding import session_id_field
 from app.models.schemas import RequestModel, ResponseModel
 
 SourceKind = Literal[
@@ -29,7 +30,7 @@ HumanOverride = Literal["none", "include", "exclude"]
 
 
 class StrictSelectionModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
 
 class KeywordPolicyV1(StrictSelectionModel):
@@ -115,7 +116,7 @@ class SelectionTotalsV1(StrictSelectionModel):
 class SelectionRunV1(StrictSelectionModel):
     schema_version: Literal[1]
     crawl_id: str = Field(min_length=8, max_length=128)
-    siksik_session_id: str = Field(min_length=8, max_length=128)
+    siksik_session_id: str = session_id_field(min_length=8, max_length=128)
     state: SelectionState
     policy_version: str = Field(min_length=1, max_length=64)
     policy_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -180,7 +181,7 @@ class SelectionCandidateV1(StrictSelectionModel):
 class SelectionCandidatePageV1(StrictSelectionModel):
     schema_version: Literal[1]
     crawl_id: str = Field(min_length=8, max_length=128)
-    siksik_session_id: str = Field(min_length=8, max_length=128)
+    siksik_session_id: str = session_id_field(min_length=8, max_length=128)
     revision: int = Field(ge=1)
     selection_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     records: list[SelectionCandidateV1] = Field(max_length=100)

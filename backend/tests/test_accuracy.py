@@ -27,6 +27,7 @@ async def test_sensitivity_planted_findings(client: AsyncClient):
             "mode": "quick",
             "scenario": "tidak_lulus",
             "file_count": 500,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-0028"},
             "label": "Sensitivity",
         },
     )
@@ -67,6 +68,7 @@ async def test_specificity_lulus_false_positive(client: AsyncClient):
             "mode": "quick",
             "scenario": "lulus",
             "file_count": file_count,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-SPEC-001"},
             "label": "Specificity",
         },
     )

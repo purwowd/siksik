@@ -65,12 +65,31 @@ def test_report_html_escapes_xss():
     assert "&lt;script&gt;" in html
     assert "<img src=x" not in html
     assert "&lt;img" in html
+    assert "Ringkasan eksekutif" in html
+    assert "Identitas peserta seleksi" in html
+    assert "Cepat" in html
+
+    printed = report_to_html(report, print_mode=True)
+    assert "print-doc" in printed
+    assert "window.print" in printed
+    assert "Cetak / Simpan PDF" in printed
+    assert "Pengesahan pimpinan" in printed
+    assert "Data akun" not in printed  # section kosong disembunyikan
 
 
 @pytest.mark.api
 async def test_health_requires_auth(anon_client: AsyncClient):
     res = await anon_client.get("/api/v1/health")
     assert res.status_code == 401
+
+
+@pytest.mark.api
+async def test_ready_public(anon_client: AsyncClient):
+    res = await anon_client.get("/api/v1/ready")
+    assert res.status_code == 200
+    body = res.json()
+    assert body.get("status") == "ok"
+    assert "app" in body
 
 
 @pytest.mark.api

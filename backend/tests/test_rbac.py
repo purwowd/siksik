@@ -34,10 +34,27 @@ async def test_operator_cannot_dashboard(anon_client: AsyncClient):
     )
     assert login.status_code == 200
     token = login.json()["token"]
-    res = await anon_client.get(
-        "/api/v1/dashboard",
-        headers={"Authorization": f"Bearer {token}"},
+    headers = {"Authorization": f"Bearer {token}"}
+    res = await anon_client.get("/api/v1/dashboard", headers=headers)
+    assert res.status_code == 403
+
+
+@pytest.mark.api
+async def test_operator_cannot_read_findings(anon_client: AsyncClient):
+    login = await anon_client.post(
+        "/api/v1/auth/login",
+        json={"username": "operator", "password": "Ops@2026"},
     )
+    assert login.status_code == 200
+    token = login.json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    sessions = await anon_client.get("/api/v1/sessions?page=1&page_size=1", headers=headers)
+    assert sessions.status_code == 200
+    items = sessions.json().get("items") or []
+    if not items:
+        pytest.skip("no sessions in lab db")
+    sid = items[0]["id"]
+    res = await anon_client.get(f"/api/v1/sessions/{sid}/findings", headers=headers)
     assert res.status_code == 403
 
 
@@ -58,6 +75,7 @@ async def test_analis_can_review_not_start(anon_client: AsyncClient):
             "mode": "quick",
             "scenario": "lulus",
             "file_count": 50,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-0076"},
             "force_simulated": True,
         },
     )

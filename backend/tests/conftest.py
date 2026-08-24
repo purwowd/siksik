@@ -115,3 +115,31 @@ async def wait_session(
             return last
         await asyncio.sleep(poll_s)
     raise TimeoutError(f"Session {session_id} did not finish: {last.get('status')}")
+
+
+def participant_payload(**overrides: object) -> dict:
+    """Identitas peserta minimal untuk start session di tes."""
+    import uuid
+
+    body: dict = {
+        "full_name": "Peserta Tes",
+        "registration_no": f"TEST-{uuid.uuid4().hex[:10].upper()}",
+    }
+    body.update(overrides)
+    return body
+
+
+def session_start_json(**overrides: object) -> dict:
+    """Payload POST /sessions dengan participant wajib."""
+    body: dict = {
+        "device_id": "sim-android-01",
+        "device_type": "android",
+        "mode": "quick",
+        "scenario": "lulus",
+        "file_count": 100,
+        "participant": participant_payload(),
+    }
+    body.update(overrides)
+    if "participant" in overrides and isinstance(overrides["participant"], dict):
+        body["participant"] = participant_payload(**overrides["participant"])  # type: ignore[arg-type]
+    return body

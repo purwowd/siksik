@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     error TEXT,
     created_by TEXT,
     review_candidates INTEGER NOT NULL DEFAULT 0,
+    participant_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -486,6 +487,15 @@ async def _migration_social_snapshot_enrichment(conn: aiosqlite.Connection) -> N
     )
 
 
+async def _migration_session_participant(conn: aiosqlite.Connection) -> None:
+    cursor = await conn.execute("PRAGMA table_info(sessions)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "participant_json" not in columns:
+        await conn.execute(
+            "ALTER TABLE sessions ADD COLUMN participant_json TEXT NOT NULL DEFAULT '{}'"
+        )
+
+
 async def _migration_media_tickets(conn: aiosqlite.Connection) -> None:
     await conn.execute(
         """
@@ -505,6 +515,15 @@ async def _migration_media_tickets(conn: aiosqlite.Connection) -> None:
     )
 
 
+async def _migration_finding_review_audit(conn: aiosqlite.Connection) -> None:
+    cursor = await conn.execute("PRAGMA table_info(findings)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "reviewed_by" not in columns:
+        await conn.execute("ALTER TABLE findings ADD COLUMN reviewed_by TEXT")
+    if "reviewed_at" not in columns:
+        await conn.execute("ALTER TABLE findings ADD COLUMN reviewed_at TEXT")
+
+
 MIGRATIONS: tuple[tuple[int, str, MigrationHandler], ...] = (
     (1, "finding_media_dates", _migration_finding_media_dates),
     (2, "agent_runtimes", _migration_agent_runtimes),
@@ -514,6 +533,8 @@ MIGRATIONS: tuple[tuple[int, str, MigrationHandler], ...] = (
     (6, "direct_crawl_composite_identity", _migration_direct_crawl_composite_identity),
     (7, "social_snapshot_enrichment", _migration_social_snapshot_enrichment),
     (8, "media_tickets", _migration_media_tickets),
+    (9, "session_participant", _migration_session_participant),
+    (10, "finding_review_audit", _migration_finding_review_audit),
 )
 
 
@@ -612,6 +633,33 @@ class Database:
                 await cur.close()
 
 
+def _participant_from_row(row: aiosqlite.Row) -> dict[str, Any] | None:
+    keys = set(row.keys())
+    if "participant_json" not in keys:
+        return None
+    raw = row["participant_json"]
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    full_name = str(data.get("full_name") or "").strip()
+    registration_no = str(data.get("registration_no") or "").strip()
+    if not full_name and not registration_no:
+        return None
+    nik = str(data.get("nik") or "").strip() or None
+    organization = str(data.get("organization") or "").strip() or None
+    return {
+        "full_name": full_name,
+        "registration_no": registration_no,
+        "nik": nik,
+        "organization": organization,
+    }
+
+
 def row_to_session(row: aiosqlite.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
@@ -623,6 +671,7 @@ def row_to_session(row: aiosqlite.Row) -> dict[str, Any]:
         "status": row["status"],
         "progress": json.loads(row["progress_json"]),
         "timing": json.loads(row["timing_json"]),
+        "participant": _participant_from_row(row),
         "recommendation": row["recommendation"],
         "review_candidates": bool(row["review_candidates"]),
         "error": row["error"],

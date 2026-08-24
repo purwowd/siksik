@@ -22,6 +22,12 @@ def test_recommendation_three_states():
 
 
 @pytest.mark.unit
+def test_all_rejected_is_lulus():
+    """Temuan ditolak analis bukan bukti — rekomendasi LULUS bila tidak ada confirmed/pending."""
+    assert recommendation_from_counts(confirmed=0, pending=0) == REC_LULUS
+
+
+@pytest.mark.unit
 def test_recommendation_from_confirmed_compat():
     assert recommendation_from_confirmed(0) == REC_LULUS
     assert recommendation_from_confirmed(0, pending=1) == REC_MENUNGGU_REVIEW

@@ -36,8 +36,33 @@ async def test_reject_simulated_session_when_lab_off(client: AsyncClient, monkey
             "mode": "quick",
             "scenario": "lulus",
             "file_count": 50,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-0037"},
             "force_simulated": True,
         },
     )
     assert res.status_code == 403
     assert "lab" in res.json()["detail"].lower() or "simulator" in res.json()["detail"].lower()
+
+
+@pytest.mark.api
+async def test_e2e_simulation_allows_force_simulated(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(config.settings, "lab_demo_mode", False)
+    monkeypatch.setattr(config.settings, "e2e_simulation", True)
+    res = await client.post(
+        "/api/v1/sessions",
+        json={
+            "device_id": "sim-android-01",
+            "device_type": "android",
+            "mode": "quick",
+            "scenario": "lulus",
+            "file_count": 30,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-0056"},
+            "force_simulated": True,
+        },
+    )
+    assert res.status_code == 200
+    sid = res.json()["id"]
+    from tests.conftest import wait_session
+
+    final = await wait_session(client, sid)
+    assert final["status"] == "completed"

@@ -29,7 +29,7 @@ class BoundedDocumentTextPreprocessor(
     private val maxInputBytes: Long = BuildConfig.MAX_DOCUMENT_INPUT_BYTES,
     private val maxTextCharacters: Int = BuildConfig.MAX_DOCUMENT_TEXT_CHARS,
 ) : DocumentTextPreprocessor {
-    private val identity = EngineIdentity("SIKSIK bounded document text", "1.0.0")
+    private val identity = EngineIdentity("SATRIA bounded document text", "1.0.0")
 
     override fun capability(): EngineCapability = try {
         HSSFWorkbook::class.java.name

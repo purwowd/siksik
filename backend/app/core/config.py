@@ -1,7 +1,10 @@
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from app.core.branding import PRODUCT_FULL_NAME, promote_satria_env
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
@@ -9,18 +12,35 @@ STAGING_DIR = DATA_DIR / "staging"
 DB_PATH = DATA_DIR / "poc.db"
 SYNTHETIC_DIR = DATA_DIR / "synthetic"
 
+# SATRIA_* wins over SADT_*; legacy SADT_* alone still works.
+promote_satria_env(root=ROOT.parent)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SADT_", env_file=".env", extra="ignore")
 
-    app_name: str = "Sistem Analisis Digital Terpadu — PoC"
+    app_name: str = f"{PRODUCT_FULL_NAME} — SATRIA"
     api_prefix: str = "/api/v1"
-    cors_origins: list[str] = [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:4173",
-        "http://127.0.0.1:4173",
+    cors_origins: Annotated[
+        list[str],
+        NoDecode,
+        Field(
+            default_factory=lambda: [
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                "http://localhost:4173",
+                "http://127.0.0.1:4173",
+            ]
+        ),
     ]
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: object) -> object:
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(",") if part.strip()]
+            return parts or value
+        return value
 
     data_dir: Path = DATA_DIR
     staging_dir: Path = STAGING_DIR
@@ -33,6 +53,13 @@ class Settings(BaseSettings):
     # Lab demo / simulator sintesis — default OFF (ops live saja)
     # Aktifkan: SADT_LAB_DEMO_MODE=1
     lab_demo_mode: bool = False
+
+    # Izinkan force_simulated untuk E2E otomatis (jangan aktifkan di produksi)
+    e2e_simulation: bool = False
+
+    # Desktop all-in-one (Tauri): layani build Vite dari FastAPI (satu port)
+    desktop_ui_enabled: bool = False
+    desktop_ui_dist: Path = ROOT.parent / "frontend" / "dist"
 
     # Performance knobs — gallery-first
     image_cap_quick: int = 0
@@ -245,6 +272,8 @@ class Settings(BaseSettings):
     # Upload ZIP hasil ADB (analisa tanpa akuisisi live)
     zip_max_mb: int = 512
     zip_enabled: bool = True
+    # host | docker — surfaced in /health for UI runtime banner
+    runtime_env: str = "host"
 
     # Android paths — GALERI dulu (tanpa Databases/msgstore)
     android_paths_quick: list[str] = [

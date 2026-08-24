@@ -1,0 +1,27 @@
+[package]
+name = "satria-desktop"
+version = "0.1.0"
+description = "SATRIA all-in-one desktop workstation"
+authors = ["Fortunet"]
+edition = "2021"
+
+[lib]
+name = "satria_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+tauri-plugin-dialog = "2.7.2"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+strip = true

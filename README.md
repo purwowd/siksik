@@ -1,6 +1,62 @@
-# SADT PoC — Sistem Analisis Digital Terpadu
+# SATRIA — Sistem Analisis Terpadu Resiko & Integritas Aparatur
 
-Proof of Concept: akuisisi selektif + analisis bertingkat (gallery-first) di **satu workstation/server NVIDIA GPU**, satu sesi aktif per waktu.
+Platform Analisis & Seleksi Calon ASN.
+
+**Motto:** Deteksi Dini — Analisis Mendalam — Keputusan Akurat  
+**Nilai:** Integritas — Kompetensi — Loyalitas
+
+Proof of Concept (runtime legacy: SADT/SIKSIK): akuisisi selektif + analisis bertingkat (gallery-first) di **satu workstation/server NVIDIA GPU**, satu sesi aktif per waktu.
+
+---
+
+## Dokumentasi — mulai di sini
+
+| Panduan | Isi |
+|---------|-----|
+| **[`docs/SETUP.md`](docs/SETUP.md)** | **Setup lengkap:** instalasi, env, akun user, web, desktop, dummy data |
+| **[`docs/PROGRESS_REPORT.md`](docs/PROGRESS_REPORT.md)** | **Laporan progress:** status uji, skor modul, agenda optimasi reasoning |
+| **[`docs/PROGRESS_BRIEF.md`](docs/PROGRESS_BRIEF.md)** | **Ringkasan singkat** untuk pimpinan / pengguna |
+| [`docs/RUNNING.md`](docs/RUNNING.md) | Docker vs host lab, port, E2E |
+| [`docs/DESKTOP.md`](docs/DESKTOP.md) | Tauri shell, export PDF, troubleshooting desktop |
+| [`docs/LAB_HOST.md`](docs/LAB_HOST.md) | ADB/USB, iOS, GPU |
+| [`docs/PAGES.md`](docs/PAGES.md) | Cek UI per tab & role |
+| [`docs/HARDENING.md`](docs/HARDENING.md) | TLS, backup, produksi |
+
+### Quick start (web dev)
+
+```bash
+# Terminal 1
+cd backend && python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt && cp ../.env.example .env
+python run.py --reload
+
+# Terminal 2
+cd frontend && npm install && npm run dev
+# → http://127.0.0.1:5173  ·  login: admin / Admin@2026
+```
+
+### Quick start (desktop dev)
+
+```bash
+cd backend && source .venv/bin/activate && pip install -r requirements.txt
+cd ../desktop && npm install && ./dev.sh
+# → window SATRIA  ·  backend :8000  ·  UI :5175
+```
+
+### Akun lab & password
+
+| Role | User | Password default* |
+|------|------|-------------------|
+| Admin | `admin` | `Admin@2026` |
+| Operator | `operator` | `Ops@2026` |
+| Analis | `analis` | `Analis@2026` |
+| Pimpinan | `pimpinan` | `Pimpinan@2026` |
+
+\*Hanya saat DB kosong. Produksi: `cd backend && python scripts/setup_lab_panitia.py` → kredensial di `backend/data/lab-panitia-credentials.txt`.
+
+---
+
+Catatan kompatibilitas rebrand: [`docs/SATRIA_REBRAND.md`](docs/SATRIA_REBRAND.md).
 
 **Target setup GPU:** Linux (Ubuntu/Debian) **atau** Windows 10/11 + NVIDIA. Apple Silicon/Mac = lab CPU (EasyOCR), bukan host CUDA penuh.
 
@@ -10,10 +66,13 @@ Proof of Concept: akuisisi selektif + analisis bertingkat (gallery-first) di **s
 |-------|-----------|
 | Backend | Python FastAPI, aiosqlite (WAL), pipeline async |
 | Frontend | React 19 + Vite + TypeScript (Node 20+) |
+| Desktop | Tauri 2 (opsional) — [`docs/DESKTOP.md`](docs/DESKTOP.md) |
 | Akuisisi | ADB / libimobiledevice **atau** upload ZIP (opsional) |
 | GPU stack | SafeWatch · ICM-Assistant · Qwen2.5-VL · Whisper · PaddleOCR |
 
 **PoC “cukup jalan” di GPU:** OCR (PaddleOCR) + Whisper + Pillow/lexicon. SafeWatch/ICM/Qwen = **opsional** (butuh weight/plugin terpisah).
+
+Env memakai prefix **`SATRIA_*`** (preferensi) dengan fallback **`SADT_*`**.
 
 ---
 
@@ -386,13 +445,33 @@ SADT_GPU_QWEN_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
 
 Password default lab di `.env.example` — override `SADT_SEED_*_PASSWORD`. Hash: **bcrypt**. API default **127.0.0.1**.
 
-## Docker (opsional)
+## Menjalankan aplikasi
+
+**Panduan lengkap setup, web, desktop, user admin:** [`docs/SETUP.md`](docs/SETUP.md)  
+Docker vs host lab: [`docs/RUNNING.md`](docs/RUNNING.md)  
+Desktop Tauri: [`docs/DESKTOP.md`](docs/DESKTOP.md)  
+Cek UI per halaman: [`docs/PAGES.md`](docs/PAGES.md)  
+Audit fungsional: [`docs/AUDIT_PLAN.md`](docs/AUDIT_PLAN.md)  
+**Hardening PoC → produksi:** [`docs/HARDENING.md`](docs/HARDENING.md)
+
+### Docker (smoke / demo UI)
 
 ```bash
 docker compose up --build
+# UI http://127.0.0.1:5173 · API http://127.0.0.1:8000
 ```
 
 Prefer bare-metal GPU untuk Whisper/OCR/MLLM; Compose cocok smoke API/UI.
+
+### Host lab (non-Docker)
+
+```bash
+# Terminal 1
+cd backend && source .venv/bin/activate && python run.py --reload
+
+# Terminal 2
+cd frontend && npm run dev
+```
 
 ## Fokus PoC: GALERI
 

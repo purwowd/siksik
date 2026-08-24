@@ -41,6 +41,7 @@ async def test_session_tidak_lulus_has_findings(client: AsyncClient):
             "mode": "quick",
             "scenario": "tidak_lulus",
             "file_count": 200,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-0042"},
             "label": "API TIDAK LULUS",
         },
     )
@@ -74,6 +75,7 @@ async def test_session_lulus_zero_findings(client: AsyncClient):
             "mode": "quick",
             "scenario": "lulus",
             "file_count": 200,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-0075"},
             "label": "API LULUS",
         },
     )
@@ -108,6 +110,7 @@ async def test_reject_concurrent_sessions(client: AsyncClient, monkeypatch: pyte
             "mode": "quick",
             "scenario": "lulus",
             "file_count": 80,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-0109"},
             "label": "Longish",
         },
     )
@@ -120,6 +123,7 @@ async def test_reject_concurrent_sessions(client: AsyncClient, monkeypatch: pyte
             "mode": "quick",
             "scenario": "lulus",
             "file_count": 80,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-0121"},
             "label": "Should conflict",
         },
     )
@@ -138,6 +142,7 @@ async def test_review_finding(client: AsyncClient):
             "mode": "quick",
             "scenario": "tidak_lulus",
             "file_count": 120,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-0139"},
             "label": "Review flow",
         },
     )
@@ -172,6 +177,7 @@ async def test_dashboard_aggregates(client: AsyncClient):
             "mode": "quick",
             "scenario": "lulus",
             "file_count": 80,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-0173"},
             "label": "Dash",
             "force_simulated": True,
         },
@@ -196,6 +202,7 @@ async def test_session_report(client: AsyncClient):
             "mode": "quick",
             "scenario": "tidak_lulus",
             "file_count": 100,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-0197"},
             "label": "Report",
             "force_simulated": True,
         },
@@ -209,7 +216,7 @@ async def test_session_report(client: AsyncClient):
     assert "findings" in body
     html = await client.get(f"/api/v1/sessions/{sid}/report?format=html")
     assert html.status_code == 200
-    assert "SADT" in html.text
+    assert "SATRIA" in html.text
 
 
 @pytest.mark.api
@@ -225,6 +232,7 @@ async def test_recompute_recommendations_migrates_pending(client: AsyncClient):
             "mode": "quick",
             "scenario": "tidak_lulus",
             "file_count": 120,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-0226"},
             "label": "Recompute migrate",
             "force_simulated": True,
         },
@@ -242,3 +250,53 @@ async def test_recompute_recommendations_migrates_pending(client: AsyncClient):
     assert any(c["session_id"] == sid and c["to"] == "MENUNGGU REVIEW" for c in out["changes"])
     after = (await client.get(f"/api/v1/sessions/{sid}")).json()
     assert after["recommendation"] == "MENUNGGU REVIEW"
+
+
+@pytest.mark.api
+async def test_authorize_blocked_until_review_complete(client: AsyncClient, anon_client: AsyncClient):
+    res = await client.post(
+        "/api/v1/sessions",
+        json={
+            "device_id": "sim-android-01",
+            "device_type": "android",
+            "mode": "quick",
+            "scenario": "tidak_lulus",
+            "file_count": 100,
+            "participant": {"full_name": "Peserta Tes", "registration_no": "TEST-0255"},
+            "label": "Authorize gate",
+            "force_simulated": True,
+        },
+    )
+    sid = res.json()["id"]
+    await wait_session(client, sid)
+
+    login = await anon_client.post(
+        "/api/v1/auth/login",
+        json={"username": "pimpinan", "password": "Pimpinan@2026"},
+    )
+    assert login.status_code == 200
+    headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+    blocked = await anon_client.post(
+        f"/api/v1/sessions/{sid}/authorize",
+        headers=headers,
+        json={"note": "should fail"},
+    )
+    assert blocked.status_code == 403
+
+    findings = (await client.get(f"/api/v1/sessions/{sid}/findings?page_size=500")).json()
+    for item in findings["items"]:
+        await client.patch(
+            f"/api/v1/findings/{item['id']}",
+            json={"review_status": "confirmed"},
+        )
+
+    ok = await anon_client.post(
+        f"/api/v1/sessions/{sid}/authorize",
+        headers=headers,
+        json={"note": "Disahkan setelah review"},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["authorized_by"] == "pimpinan"
+    session = (await client.get(f"/api/v1/sessions/{sid}")).json()
+    assert session["progress"]["authorized_by"] == "pimpinan"

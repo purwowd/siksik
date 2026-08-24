@@ -1,6 +1,8 @@
-# Progress Implementasi Flow SIKSIK
+# Progress Implementasi Flow SIKSIK → SATRIA
 
-Terakhir diperbarui: 19 Juli 2026.
+> **Rebrand:** Nama produk user-facing adalah **SATRIA**. Dokumen phase historis masih memakai nama SIKSIK/SADT untuk jejak acceptance. Lihat [`SATRIA_REBRAND.md`](SATRIA_REBRAND.md).
+
+Terakhir diperbarui: 19 Juli 2026 (tracker); rebrand UI 22 Agustus 2026.
 
 Dokumen ini adalah tracker implementasi `Flow.md` di repository SIKSIK. Status dinilai dari acceptance gate, bukan hanya keberadaan source atau keberhasilan compile.
 

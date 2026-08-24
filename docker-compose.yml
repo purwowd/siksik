@@ -4,6 +4,7 @@ services:
     build: ./backend
     environment:
       SADT_API_HOST: "0.0.0.0"
+      SADT_RUNTIME_ENV: docker
       # Override seed passwords for non-empty first boot:
       # SADT_SEED_ADMIN_PASSWORD: "change-me"
     volumes:

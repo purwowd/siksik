@@ -14,8 +14,13 @@ from app.core.db import db, utcnow
 from app.models.schemas import AcquisitionMode, Layer, ReviewStatus, SessionStatus
 from app.services.acquisition import IMG_EXT, TEXT_EXT, VID_EXT
 from app.services import vision as vis
+from app.core.branding import (
+    CANONICAL_CRAWL_RECORD_MIME,
+    is_crawl_record_mime,
+)
 
-CANONICAL_CRAWL_RECORD_MIME = "application/vnd.siksik.crawl-record+json"
+# Re-export for tests/callers that import from analysis.
+__all_crawl_mime__ = CANONICAL_CRAWL_RECORD_MIME
 
 
 @dataclass(frozen=True)
@@ -141,7 +146,7 @@ def _is_probably_text(path: Path, mime: str) -> bool:
 async def read_preview(path: Path, mime: str, max_bytes: int = 200_000) -> str:
     """Baca cuplikan teks. Binary media (gambar/video/pdf) → kosong (hindari FP keyword di noise byte)."""
     ext = path.suffix.lower()
-    if mime == CANONICAL_CRAWL_RECORD_MIME:
+    if is_crawl_record_mime(mime):
 
         def _read_crawl_record() -> str:
             from app.acquisition.agent_client import InventoryRecordV1
@@ -200,7 +205,7 @@ def analyze_content_result(
     origin_hint: str | None = None,
 ) -> ContentAnalysisResult:
     ext = path.suffix.lower()
-    if mime == CANONICAL_CRAWL_RECORD_MIME:
+    if is_crawl_record_mime(mime):
         findings = analyze_text_l1_l2(text, keywords) if text.strip() else []
         if precomputed_ocr_text and precomputed_ocr_text.strip():
             from app.services import ocr as ocr_mod
@@ -388,8 +393,9 @@ async def _analyze_session_body(
         mime = str(row["mime"] or "")
         ext = path.suffix.lower()
         if (
-            mime == CANONICAL_CRAWL_RECORD_MIME
+            is_crawl_record_mime(mime)
             or path.name.endswith(".siksik-record.json")
+            or path.name.endswith(".satria-record.json")
             or (ext == ".json" and source in {"sms", "contacts", "contact", "visible_ui"})
             or source in {"sms", "contacts", "contact"}
         ):
