@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Start SADT PoC (API + UI)
+# Start SATRIA PoC (API FastAPI + UI Vite). Mesin akuisisi = SIKSIK/main.
 #
-# Mac lab (tanpa perangkat AI): image-to-text = SADT_OCR_ENABLED=1
-# Stack AI (Qwen/ICM/SafeWatch/Whisper/CLIP) default OFF di sini.
-# Server GPU: set SADT_GPU_STACK_ENABLED=1 (+ plugin flags) sebelum start.
+# Mac: bash scripts/maconly.sh  (env di repo-root .env)
+# Lab tanpa GPU: SADT_OCR_ENABLED=1 EasyOCR CPU; stack Qwen/ICM/SafeWatch/Whisper/CLIP OFF.
+# Server GPU: SADT_GPU_STACK_ENABLED=1 (+ plugin flags) sebelum start.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -14,7 +14,11 @@ if [[ -d /usr/lib/wsl/lib ]]; then
 fi
 # Prefer ~/bin adb wrapper (USB via Windows ADB server) + local Android SDK tools
 export PATH="${HOME}/bin:${HOME}/Android/Sdk/platform-tools:${HOME}/Android/Sdk/cmdline-tools/latest/bin:${PATH:-}"
-WSL_ADB_GATEWAY="$(ip route show default 2>/dev/null | awk '{print $3}')"
+# `ip` hanya ada di Linux/WSL. Di Mac perintah itu 127 + pipefail = skrip diam-diam exit.
+WSL_ADB_GATEWAY=""
+if command -v ip >/dev/null 2>&1; then
+  WSL_ADB_GATEWAY="$(ip route show default 2>/dev/null | awk '{print $3}' || true)"
+fi
 if [[ -n "${WSL_ADB_GATEWAY:-}" ]]; then
   export ADB_SERVER_SOCKET="tcp:${WSL_ADB_GATEWAY}:5037"
   export SADT_AGENT_FORWARD_HOST="${SADT_AGENT_FORWARD_HOST:-$WSL_ADB_GATEWAY}"
@@ -49,13 +53,25 @@ load_env_file "$ROOT/backend/.env"
 
 API_PORT="${SADT_API_PORT:-8000}"
 UI_PORT="${SADT_UI_PORT:-5173}"
-# Bind all interfaces so Windows host / LAN can reach the API (after WSL portproxy).
-API_HOST="${SADT_API_HOST:-0.0.0.0}"
+# WSL: bind all interfaces for Windows portproxy. Mac lab: loopback (lihat .env).
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  API_HOST="${SADT_API_HOST:-127.0.0.1}"
+  UI_BIND="${SADT_UI_BIND:-127.0.0.1}"
+else
+  API_HOST="${SADT_API_HOST:-0.0.0.0}"
+  UI_BIND="${SADT_UI_BIND:-0.0.0.0}"
+fi
 export SADT_API_HOST="$API_HOST"
 export SADT_API_PORT="$API_PORT"
 export SADT_UI_PORT="$UI_PORT"
+# Vite SATRIA membaca SATRIA_API_PORT / SATRIA_UI_PORT
+export SATRIA_API_PORT="${SATRIA_API_PORT:-$API_PORT}"
+export SATRIA_UI_PORT="${SATRIA_UI_PORT:-$UI_PORT}"
 
 # ---- Lab-safe defaults (hanya jika belum di-set caller / .env) ----
+: "${SADT_OCR_ENABLED:=1}"
+: "${SADT_OCR_BACKEND:=easyocr}"
+: "${SADT_OCR_GPU:=0}"
 : "${SADT_GPU_STACK_ENABLED:=0}"
 : "${SADT_GPU_WHISPER_ENABLED:=0}"
 : "${SADT_GPU_SAFEWATCH_ENABLED:=0}"
@@ -67,7 +83,8 @@ export SADT_UI_PORT="$UI_PORT"
 : "${SADT_MEDIA_TEXT_ENABLED:=0}"
 : "${SADT_NUDITY_DETECTION_ENABLED:=1}"
 
-export SADT_GPU_STACK_ENABLED SADT_GPU_WHISPER_ENABLED \
+export SADT_OCR_ENABLED SADT_OCR_BACKEND SADT_OCR_GPU \
+  SADT_GPU_STACK_ENABLED SADT_GPU_WHISPER_ENABLED \
   SADT_GPU_SAFEWATCH_ENABLED SADT_GPU_ICM_ENABLED SADT_GPU_QWEN_ENABLED \
   SADT_CLIP_TOKOH_ENABLED SADT_MEDIA_TEXT_ENABLED SADT_NUDITY_DETECTION_ENABLED
 
@@ -102,7 +119,11 @@ if [[ ! -d .venv ]]; then
 fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
-pip install -q -r requirements.txt
+# pip -r requirements.txt di Mac = torch/easyocr, menit. Skip jika venv sudah jalan.
+if [[ "${SADT_PIP_INSTALL:-0}" == "1" ]] || ! python -c "import uvicorn, fastapi" >/dev/null 2>&1; then
+  echo "Installing Python deps (set SADT_PIP_INSTALL=1 to force)…"
+  pip install -q -r requirements.txt
+fi
 
 echo "Starting API on $API_HOST:$API_PORT (auto-restart on crash)"
 echo "  OCR (image→text): ${SADT_OCR_ENABLED:-0}  backend=${SADT_OCR_BACKEND:-default}  gpu=${SADT_OCR_GPU:-0}"
@@ -137,7 +158,7 @@ if ! command -v npx >/dev/null 2>&1; then
     source "${NVM_DIR:-$HOME/.nvm}/nvm.sh"
   fi
 fi
-npx vite --host 0.0.0.0 --port "$UI_PORT" &
+npx vite --host "$UI_BIND" --port "$UI_PORT" &
 UI_PID=$!
 
 cleanup() {
@@ -156,19 +177,26 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-WSL_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo ""
-echo "SADT // OPS"
-echo "  bind API $API_HOST:$API_PORT   UI 0.0.0.0:$UI_PORT"
-echo "  WSL   UI   http://127.0.0.1:$UI_PORT"
-echo "  WSL   API  http://127.0.0.1:$API_PORT/docs"
-if [[ -n "${WSL_IP:-}" ]]; then
-  echo "  WSL   direct http://$WSL_IP:$UI_PORT"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  echo "SATRIA // OPS (Mac)"
+  echo "  API  http://127.0.0.1:$API_PORT/docs"
+  echo "  UI   http://127.0.0.1:$UI_PORT"
+  echo "  Ctrl+C to stop"
+else
+  WSL_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  echo "SATRIA // OPS"
+  echo "  bind API $API_HOST:$API_PORT   UI $UI_BIND:$UI_PORT"
+  echo "  WSL   UI   http://127.0.0.1:$UI_PORT"
+  echo "  WSL   API  http://127.0.0.1:$API_PORT/docs"
+  if [[ -n "${WSL_IP:-}" ]]; then
+    echo "  WSL   direct http://$WSL_IP:$UI_PORT"
+  fi
+  echo ""
+  echo "  Windows browser: http://127.0.0.1:$UI_PORT"
+  echo "  (NAT localhostForwarding — jangan pakai portproxy/expose_lan lama)"
+  echo "  Jika 127.0.0.1 gagal (Admin):"
+  echo "    powershell -ExecutionPolicy Bypass -File C:\\siksik\\scripts\\expose_lan.ps1"
+  echo "  Ctrl+C to stop"
 fi
-echo ""
-echo "  Windows browser: http://127.0.0.1:$UI_PORT"
-echo "  (NAT localhostForwarding — jangan pakai portproxy/expose_lan lama)"
-echo "  Jika 127.0.0.1 gagal (Admin):"
-echo "    powershell -ExecutionPolicy Bypass -File C:\\siksik\\scripts\\expose_lan.ps1"
-echo "  Ctrl+C to stop"
 wait

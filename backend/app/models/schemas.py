@@ -108,6 +108,21 @@ class MeResponse(ResponseModel):
     permissions: list[str] = Field(default_factory=list)
 
 
+class ParticipantInput(RequestModel):
+    full_name: str = Field(default="", max_length=256)
+    registration_no: str = Field(default="", max_length=64)
+    nik: str | None = Field(default=None, max_length=16)
+    organization: str | None = Field(default=None, max_length=256)
+
+
+class UpdateParticipantRequest(RequestModel):
+    participant: ParticipantInput
+
+
+class BulkReviewRequest(RequestModel):
+    review_status: ReviewStatus
+
+
 class StartSessionRequest(RequestModel):
     device_id: str | None = Field(default=None, max_length=512)
     device_type: DeviceType = DeviceType.ANDROID
@@ -117,6 +132,7 @@ class StartSessionRequest(RequestModel):
     label: str | None = Field(default=None, max_length=256)
     force_simulated: bool = False
     review_candidates: bool = False
+    participant: ParticipantInput = Field(default_factory=ParticipantInput)
 
     @field_validator("device_id", "label", mode="before")
     @classmethod
@@ -270,6 +286,7 @@ class SessionSummary(ResponseModel):
     created_at: str
     updated_at: str
     error: str | None = None
+    participant: dict[str, Any] | None = None
 
 
 class FindingOut(ResponseModel):
@@ -289,6 +306,8 @@ class FindingOut(ResponseModel):
     media_captured_at: str | None = None
     preview_path: str | None = Field(default=None, max_length=1024)
     preview_text: str | None = Field(default=None, max_length=320)
+    reviewed_by: str | None = None
+    reviewed_at: str | None = None
 
 
 class NamedCount(ResponseModel):

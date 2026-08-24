@@ -207,9 +207,15 @@ async def test_session_report(client: AsyncClient):
     body = js.json()
     assert body["session"]["id"] == sid
     assert "findings" in body
+    assert body.get("product") == "SATRIA"
     html = await client.get(f"/api/v1/sessions/{sid}/report?format=html")
     assert html.status_code == 200
-    assert "SADT" in html.text
+    assert "SATRIA" in html.text
+    assert "Laporan Hasil Analisis" in html.text
+    assert "SADT // OPS" not in html.text
+    printed = await client.get(f"/api/v1/sessions/{sid}/report?format=print")
+    assert printed.status_code == 200
+    assert printed.headers["content-type"].startswith("text/html")
 
 
 @pytest.mark.api

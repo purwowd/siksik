@@ -25,6 +25,22 @@ export interface SocialReportAccount {
 
 export interface SessionReport {
   generated_at: string;
+  product?: string;
+  product_full_name?: string;
+  product_tagline?: string;
+  session?: {
+    id: string;
+    participant?: {
+      full_name?: string | null;
+      registration_no?: string | null;
+      nik?: string | null;
+      organization?: string | null;
+    } | null;
+    authorized_by?: string | null;
+    authorized_at?: string | null;
+    authorize_note?: string | null;
+    recommendation?: string | null;
+  };
   social_accounts: SocialReportAccount[];
   social_data: {
     total_items: number;

@@ -1106,6 +1106,9 @@ async def build_session_report(session_id: str) -> dict:
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "product": PRODUCT_NAME,
+        "product_full_name": PRODUCT_FULL_NAME,
+        "product_tagline": PRODUCT_TAGLINE,
         "session": {
             "id": row["id"],
             "label": row["label"],
@@ -1377,17 +1380,24 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
     if progress.get("recovery_state"):
         state_label = _report_label(progress["recovery_state"], RECOVERY_STATE_LABELS)
         recovery_metric = (
-            "<li><span>Recovery sampah Android</span>"
-            f"<strong>{_esc(progress.get('recovery_captured', 0))} item · "
-            f"{_esc(state_label)}</strong></li>"
+            "<li>Recovery sampah Android: "
+            f"{_esc(progress.get('recovery_captured', 0))} item · "
+            f"{_esc(progress.get('recovery_bytes', 0))} bytes · "
+            f"{_esc(state_label)} · "
+            f"{_esc(progress.get('recovery_warning_count', 0))} peringatan · "
+            f"cache {_esc(progress.get('recovery_cache_captured', 0))} preview/"
+            f"{_esc(progress.get('recovery_cache_sources', 0))} sumber</li>"
         )
 
     ios_library_metric = ""
     if progress.get("ios_library_state"):
         ios_library_metric = (
-            "<li><span>Recovery Photos iOS</span>"
-            f"<strong>Hidden {_esc(progress.get('ios_hidden_captured', 0))} · "
-            f"hapus {_esc(progress.get('ios_recently_deleted_captured', 0))}</strong></li>"
+            "<li>Recovery Photos iOS: "
+            f"Hidden {_esc(progress.get('ios_hidden_captured', 0))} · "
+            f"baru dihapus {_esc(progress.get('ios_recently_deleted_captured', 0))} · "
+            f"cache {_esc(progress.get('ios_cache_captured', 0))} · "
+            f"jejak purge {_esc(progress.get('ios_deleted_metadata_captured', 0))} · "
+            f"{_esc(progress.get('ios_library_warning_count', 0))} peringatan</li>"
         )
 
     rec = recommendation or "—"

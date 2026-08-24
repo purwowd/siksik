@@ -21,8 +21,8 @@ export type AccessFilter = "all" | "frequent" | "recent" | "favorite";
 export const ACCESS_FILTERS: AccessFilter[] = ["all", "frequent", "recent", "favorite"];
 export const ACCESS_FILTER_LABELS: Record<AccessFilter, string> = {
   all: "Semua",
-  frequent: "Paling sering",
-  recent: "Terbaru diakses",
+  frequent: "10 paling sering diakses",
+  recent: "10 terbaru diakses",
   favorite: "Favorit",
 };
 export const DEFAULT_GALLERY_ALBUM: AccessFilter = "all";
@@ -84,14 +84,12 @@ export function buildTabUrl(
   return q ? `${path}?${q}` : path;
 }
 
-/** Cocokkan sesi dari query ?sesi= (full UUID atau 8 char prefix). */
+/** Cocokkan sesi dari query ?sesi= — UUID persis (bukan prefix 8 karakter). */
 export function resolveSessionId(
   querySesi: string | null,
   sessions: { id: string }[],
 ): string | null {
   if (!querySesi) return null;
   const exact = sessions.find((s) => s.id === querySesi);
-  if (exact) return exact.id;
-  const pref = sessions.find((s) => s.id.startsWith(querySesi));
-  return pref?.id ?? null;
+  return exact?.id ?? null;
 }

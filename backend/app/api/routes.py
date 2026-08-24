@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import mimetypes
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from pydantic import ValidationError
 
 from app.core.config import settings
 from app.core.db import db, utcnow
@@ -15,6 +17,7 @@ from app.models.schemas import (
     AgentBootstrapRequest,
     AgentBootstrapStatus,
     AuthorizeRequest,
+    BulkReviewRequest,
     DashboardStats,
     DeviceInfo,
     FindingOut,
@@ -29,11 +32,13 @@ from app.models.schemas import (
     PaginatedFindings,
     PaginatedGallery,
     PaginatedSessions,
+    ParticipantInput,
     ReviewRequest,
     ReviewStatus,
     RiskTimeline,
     SessionSummary,
     StartSessionRequest,
+    UpdateParticipantRequest,
     YearRiskBucket,
 )
 from app.core.request_context import current_request_id
@@ -50,7 +55,7 @@ from app.services.auth import (
     require_perm,
     user_from_token,
 )
-from app.services.reports import build_session_report, report_to_html
+from app.services.reports import build_session_report, report_to_html, save_session_report
 from app.services.sessions import sessions
 from app.services.vision import vision_status
 from app.selection.contracts import (
@@ -277,6 +282,8 @@ async def health(user: Annotated[AuthUser, Depends(require_perm("health"))]) -> 
         "analysis_engine": __import__("app.services.hash_cache", fromlist=["engine_fingerprint"]).engine_fingerprint(),
         "worker_concurrency": settings.worker_concurrency,
         "lab_demo_mode": settings.lab_demo_mode,
+        "runtime_env": settings.runtime_env,
+        "product": "SATRIA",
         "toolchain": tools,
         "vision": vision_status(),
         "rbac": True,
@@ -399,7 +406,7 @@ async def start_session(
     user: Annotated[AuthUser, Depends(require_perm("sessions:start"))],
 ) -> SessionSummary:
     wants_sim = bool(body.force_simulated) or (body.device_id or "").startswith("sim-")
-    if wants_sim and not settings.lab_demo_mode:
+    if wants_sim and not settings.lab_demo_mode and not settings.e2e_simulation:
         raise HTTPException(
             status_code=403,
             detail="Mode lab/simulator dinonaktifkan. Sambungkan perangkat live atau set SADT_LAB_DEMO_MODE=1.",
@@ -417,6 +424,10 @@ async def start_session_from_zip(
     file: UploadFile = File(..., description="ZIP hasil adb pull / dump media"),
     mode: AcquisitionMode = Form(AcquisitionMode.QUICK),
     label: str | None = Form(None),
+    participant_full_name: str = Form(""),
+    participant_registration_no: str = Form(""),
+    participant_nik: str | None = Form(None),
+    participant_organization: str | None = Form(None),
 ) -> SessionSummary:
     """Analisa arsip ZIP tanpa akuisisi USB (opsional)."""
     if not settings.zip_enabled:
@@ -436,11 +447,21 @@ async def start_session_from_zip(
             original_name=name,
             mode=mode,
             label=label,
+            participant=ParticipantInput(
+                full_name=participant_full_name,
+                registration_no=participant_registration_no,
+                nik=participant_nik,
+                organization=participant_organization,
+            ),
             operator_id=user.id,
         )
         return SessionSummary.model_validate(data)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/sessions", response_model=PaginatedSessions)
@@ -470,6 +491,53 @@ async def get_session(
         return SessionSummary.model_validate(await sessions.get(session_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
+
+
+@router.patch("/sessions/{session_id}/participant", response_model=SessionSummary)
+async def update_session_participant(
+    session_id: str,
+    body: UpdateParticipantRequest,
+    _: Annotated[AuthUser, Depends(require_perm("sessions:update_participant"))],
+) -> SessionSummary:
+    try:
+        data = await sessions.update_participant(session_id, body.participant)
+        return SessionSummary.model_validate(data)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/sessions/{session_id}/stream")
+async def session_stream(
+    session_id: str,
+    _: Annotated[AuthUser, Depends(require_perm("sessions:read"))],
+):
+    async def events():
+        terminal = {"completed", "failed", "cancelled"}
+        while True:
+            try:
+                raw = await sessions.get(session_id)
+            except KeyError:
+                yield 'event: error\ndata: {"detail":"Session not found"}\n\n'
+                return
+            summary = SessionSummary.model_validate(raw)
+            yield f"data: {json.dumps(summary.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+            if summary.status in terminal:
+                return
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/sessions/{session_id}/crawl", response_model=SelectionRunV1)
@@ -564,20 +632,30 @@ async def session_findings(
     session_id: str,
     _: Annotated[AuthUser, Depends(require_perm("findings:read"))],
     review_status: ReviewStatus | None = None,
+    module: str | None = Query(None, max_length=32),
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=500),
 ) -> PaginatedFindings:
+    from app.services.finding_modules import MODULE_SOURCE_SQL, VALID_MODULE_IDS
+
+    module_sql = ""
+    module_params: tuple = ()
+    if module:
+        mid = module.strip().lower()
+        if mid not in VALID_MODULE_IDS:
+            raise HTTPException(status_code=400, detail=f"Modul tidak dikenal: {module}")
+        module_sql, module_params = MODULE_SOURCE_SQL[mid]
     if review_status:
         return await _paginate_findings(
-            where_sql="WHERE f.session_id = ? AND f.review_status = ?",
-            params=(session_id, review_status.value),
+            where_sql=f"WHERE f.session_id = ? AND f.review_status = ? {module_sql}",
+            params=(session_id, review_status.value, *module_params),
             order_sql="ORDER BY f.confidence DESC",
             page=page,
             page_size=page_size,
         )
     return await _paginate_findings(
-        where_sql="WHERE f.session_id = ?",
-        params=(session_id,),
+        where_sql=f"WHERE f.session_id = ? {module_sql}",
+        params=(session_id, *module_params),
         order_sql="ORDER BY f.confidence DESC",
         page=page,
         page_size=page_size,
@@ -702,14 +780,14 @@ async def session_media(
 async def session_report(
     session_id: str,
     _: Annotated[AuthUser, Depends(require_perm("report:read"))],
-    format: str = Query("json", pattern="^(json|html)$"),
+    format: str = Query("json", pattern="^(json|html|print)$"),
 ):
     try:
         report = await build_session_report(session_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
-    if format == "html":
-        return HTMLResponse(report_to_html(report))
+    if format in ("html", "print"):
+        return HTMLResponse(report_to_html(report, print_mode=(format == "print")))
     return JSONResponse(report)
 
 
@@ -730,6 +808,10 @@ async def authorize_session(
         "UPDATE sessions SET progress_json = ?, updated_at = ? WHERE id = ?",
         (json.dumps(progress), utcnow(), session_id),
     )
+    try:
+        await save_session_report(session_id)
+    except Exception:
+        pass
     return {
         "status": "authorized",
         "session_id": session_id,
@@ -766,14 +848,19 @@ async def all_findings(
 async def review_finding(
     finding_id: str,
     body: ReviewRequest,
-    _: Annotated[AuthUser, Depends(require_perm("findings:review"))],
+    user: Annotated[AuthUser, Depends(require_perm("findings:review"))],
 ) -> FindingOut:
     row = await db.fetchone("SELECT * FROM findings WHERE id = ?", (finding_id,))
     if not row:
         raise HTTPException(status_code=404, detail="Finding not found")
+    now = utcnow()
     await db.execute(
-        "UPDATE findings SET review_status = ? WHERE id = ?",
-        (body.review_status.value, finding_id),
+        """
+        UPDATE findings
+        SET review_status = ?, reviewed_by = ?, reviewed_at = ?
+        WHERE id = ?
+        """,
+        (body.review_status.value, user.username, now, finding_id),
     )
     from app.services.recommendation import apply_recommendation
 
@@ -788,6 +875,50 @@ async def review_finding(
     if not refreshed.items:
         raise HTTPException(status_code=404, detail="Finding not found")
     return refreshed.items[0]
+
+
+@router.post("/sessions/{session_id}/findings/bulk-review")
+async def bulk_review_findings(
+    session_id: str,
+    body: BulkReviewRequest,
+    user: Annotated[AuthUser, Depends(require_perm("findings:review"))],
+) -> dict:
+    row = await db.fetchone("SELECT id FROM sessions WHERE id = ?", (session_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    now = utcnow()
+    pending_row = await db.fetchone(
+        """
+        SELECT COUNT(*) AS c FROM findings
+        WHERE session_id = ? AND review_status = 'pending'
+        """,
+        (session_id,),
+    )
+    pending_count = int(pending_row["c"]) if pending_row else 0
+    if pending_count == 0:
+        return {
+            "session_id": session_id,
+            "review_status": body.review_status.value,
+            "updated": 0,
+            "reviewed_by": user.username,
+        }
+    await db.execute(
+        """
+        UPDATE findings
+        SET review_status = ?, reviewed_by = ?, reviewed_at = ?
+        WHERE session_id = ? AND review_status = 'pending'
+        """,
+        (body.review_status.value, user.username, now, session_id),
+    )
+    from app.services.recommendation import apply_recommendation
+
+    await apply_recommendation(session_id)
+    return {
+        "session_id": session_id,
+        "review_status": body.review_status.value,
+        "updated": pending_count,
+        "reviewed_by": user.username,
+    }
 
 
 @router.get("/sessions/{session_id}/risk-timeline", response_model=RiskTimeline)

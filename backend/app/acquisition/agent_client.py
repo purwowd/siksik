@@ -20,6 +20,7 @@ from pydantic import (
 
 from app.acquisition.adb import resolve_agent_forward_host
 from app.acquisition.errors import AcquisitionError, ErrorCategory, acquisition_error
+from app.core.branding import session_id_field
 from app.core.config import settings
 from app.selection.contracts import (
     SelectionCandidatePageV1,
@@ -51,7 +52,7 @@ def validate_utc_timestamp(value: str | None) -> str | None:
 
 
 class StrictAgentModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
 
 def _clamp_agent_reason(value: object, *, max_length: int = 128) -> object:
@@ -220,7 +221,7 @@ class InventoryPartialReasonV1(StrictAgentModel):
 class InventoryRunV1(StrictAgentModel):
     schema_version: Literal[1]
     crawl_id: str = Field(min_length=8, max_length=128)
-    siksik_session_id: str = Field(min_length=8, max_length=128)
+    siksik_session_id: str = session_id_field(min_length=8, max_length=128)
     mode: InventoryModeV1
     state: InventoryRunStateV1
     started_at: str = Field(min_length=20, max_length=40)
@@ -589,7 +590,7 @@ class InventoryRecordV1(StrictAgentModel):
     schema_version: Literal[1]
     record_id: str = Field(min_length=8, max_length=128)
     crawl_id: str = Field(min_length=8, max_length=128)
-    siksik_session_id: str = Field(min_length=8, max_length=128)
+    siksik_session_id: str = session_id_field(min_length=8, max_length=128)
     source_kind: InventorySourceKindV1
     source_app: str | None = Field(
         default=None,
@@ -662,7 +663,7 @@ class InventoryRecordV1(StrictAgentModel):
 class InventoryPageV1(StrictAgentModel):
     schema_version: Literal[1]
     crawl_id: str = Field(min_length=8, max_length=128)
-    siksik_session_id: str = Field(min_length=8, max_length=128)
+    siksik_session_id: str = session_id_field(min_length=8, max_length=128)
     source_adapter: InventorySourceAdapterV1
     source_state: InventorySourceStateV1
     source_reason: str | None = Field(default=None, max_length=128)
@@ -698,7 +699,7 @@ class LiveSelectedRecordV1(StrictAgentModel):
 class LiveSelectedRecordPageV1(StrictAgentModel):
     schema_version: Literal[1]
     crawl_id: str = Field(min_length=8, max_length=128)
-    siksik_session_id: str = Field(min_length=8, max_length=128)
+    siksik_session_id: str = session_id_field(min_length=8, max_length=128)
     selection_state: Literal[
         "running",
         "awaiting_review",
@@ -737,7 +738,7 @@ class PreprocessorTotalsV1(StrictAgentModel):
 class PreprocessingRunV1(StrictAgentModel):
     schema_version: Literal[1]
     crawl_id: str = Field(min_length=8, max_length=128)
-    siksik_session_id: str = Field(min_length=8, max_length=128)
+    siksik_session_id: str = session_id_field(min_length=8, max_length=128)
     state: PreprocessingRunStateV1
     started_at: str = Field(min_length=20, max_length=40)
     updated_at: str = Field(min_length=20, max_length=40)
@@ -768,7 +769,7 @@ class PreprocessingRunV1(StrictAgentModel):
 class PreprocessedRecordPageV1(StrictAgentModel):
     schema_version: Literal[1]
     crawl_id: str = Field(min_length=8, max_length=128)
-    siksik_session_id: str = Field(min_length=8, max_length=128)
+    siksik_session_id: str = session_id_field(min_length=8, max_length=128)
     records: list[InventoryRecordV1] = Field(max_length=20)
     next_cursor: str | None = Field(default=None, min_length=8, max_length=128)
 

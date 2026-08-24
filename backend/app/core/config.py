@@ -3,12 +3,17 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.branding import PRODUCT_FULL_NAME, promote_satria_env
+
 ROOT = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = ROOT.parent
 DATA_DIR = ROOT / "data"
 STAGING_DIR = DATA_DIR / "staging"
 DB_PATH = DATA_DIR / "poc.db"
 SYNTHETIC_DIR = DATA_DIR / "synthetic"
+
+# SATRIA_* overlays SADT_* (SATRIA wins). Dual .env from PROJECT_ROOT then backend/.
+promote_satria_env(root=PROJECT_ROOT)
 
 
 class Settings(BaseSettings):
@@ -21,7 +26,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "Sistem Analisis Digital Terpadu — PoC"
+    app_name: str = f"{PRODUCT_FULL_NAME} — SATRIA"
     api_prefix: str = "/api/v1"
     cors_origins: list[str] = [
         "http://localhost:5173",
@@ -48,6 +53,11 @@ class Settings(BaseSettings):
     # Lab demo / simulator sintesis — default OFF (ops live saja)
     # Aktifkan: SADT_LAB_DEMO_MODE=1
     lab_demo_mode: bool = False
+    # Allow force_simulated for automated E2E (keep off in production)
+    e2e_simulation: bool = False
+    # Desktop all-in-one (Tauri): serve Vite dist from FastAPI
+    desktop_ui_enabled: bool = False
+    desktop_ui_dist: Path = ROOT.parent / "frontend" / "dist"
 
     # Performance knobs — gallery-first
     image_cap_quick: int = 0
@@ -263,6 +273,8 @@ class Settings(BaseSettings):
     # Upload ZIP hasil ADB (analisa tanpa akuisisi live)
     zip_max_mb: int = 512
     zip_enabled: bool = True
+    # host | docker — /health banner
+    runtime_env: str = "host"
 
     # Android paths — GALERI dulu (tanpa Databases/msgstore)
     android_paths_quick: list[str] = [

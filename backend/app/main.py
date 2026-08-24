@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.acquisition.errors import AcquisitionError
-from app.api.routes import router
+from app.api.v1.router import router
 from app.core.config import ensure_dirs, settings
 from app.core.db import db
 from app.core.logging import configure_acquisition_logging
