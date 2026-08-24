@@ -28,6 +28,15 @@ def participant_dict(participant: ParticipantInput) -> dict[str, Any]:
     }
 
 
+def require_complete_participant(participant: ParticipantInput) -> dict[str, Any]:
+    payload = participant_dict(participant)
+    if not payload["full_name"]:
+        raise ValueError("Nama lengkap wajib diisi")
+    if not payload["registration_no"]:
+        raise ValueError("Nomor peserta atau registrasi wajib diisi")
+    return payload
+
+
 def participant_display_label(participant: ParticipantInput | dict[str, Any]) -> str:
     if isinstance(participant, ParticipantInput):
         name = participant.full_name.strip()

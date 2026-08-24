@@ -1326,6 +1326,19 @@ body::after {
   opacity: 0.72;
 }
 
+.media-preview.text-only-preview {
+  width: min(260px, 34vw);
+  height: 88px;
+  background: rgba(7, 18, 18, 0.96);
+  border-left: 3px solid var(--signal);
+}
+
+.visual-missing-preview {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
 .media-preview-kind {
   color: var(--signal);
   font-family: var(--font-mono);
@@ -2308,6 +2321,31 @@ a.btn {
 .finding-card-media .media-preview {
   width: 88px;
   height: 88px;
+}
+
+.finding-card.gallery-text-card {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.finding-card.gallery-text-card .finding-card-media .media-preview.text-only-preview {
+  width: 100%;
+  height: 104px;
+}
+
+.gallery-flagged {
+  color: var(--amber);
+}
+
+.gallery-state-normal {
+  color: var(--muted);
+}
+
+.gallery-state-trash {
+  color: var(--amber);
+}
+
+.gallery-state-recovered_deleted {
+  color: var(--signal);
 }
 
 .finding-card-body {
@@ -3358,4 +3396,3 @@ button.dash-action-card:disabled:hover {
     font-size: 1.65rem;
   }
 }
-

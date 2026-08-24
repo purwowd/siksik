@@ -76,6 +76,7 @@ export function useSessionWorkspace(p: Params) {
   const pollEpochRef = useRef(0);
   const liveFindingsCountRef = useRef(0);
   const liveReportRecordsRef = useRef(0);
+  const runningSession = p.sessionList.find((session) => ACTIVE.has(session.status)) ?? null;
 
   const refreshSessionList = useCallback(
     async (opts?: { soft?: boolean }) => {
@@ -186,12 +187,26 @@ export function useSessionWorkspace(p: Params) {
     const { sesi } = parseTabSearch(p.location.search);
     if (!sesi) return;
     const resolved = resolveSessionId(sesi, p.sessionList);
+    if (runningSession && resolved !== runningSession.id) return;
     if (resolved && resolved !== p.session?.id) {
       void selectSessionById(resolved).catch(() => {
         p.setError("Sesi dari URL tidak ditemukan");
       });
     }
-  }, [p.auth, p.location.search, p.sessionList, p.session?.id, selectSessionById, p.setError]);
+  }, [
+    p.auth,
+    p.location.search,
+    p.sessionList,
+    p.session?.id,
+    runningSession?.id,
+    selectSessionById,
+    p.setError,
+  ]);
+
+  useEffect(() => {
+    if (!runningSession || p.session?.id === runningSession.id) return;
+    void selectSessionById(runningSession.id).catch(() => undefined);
+  }, [runningSession?.id, p.session?.id, selectSessionById]);
 
   useEffect(() => {
     if (!p.session?.id) {
@@ -242,6 +257,8 @@ export function useSessionWorkspace(p: Params) {
     const epoch = ++pollEpochRef.current;
     let stopped = false;
     let inFlight = false;
+    let pollDelayMs = 500;
+    let timer: number | undefined;
     const qs = p.querySetters;
 
     const applyPolled = (s: SessionSummary) => {
@@ -258,6 +275,7 @@ export function useSessionWorkspace(p: Params) {
       try {
         const s = await api.session(sessionId);
         if (stopped || pollEpochRef.current !== epoch) return;
+        pollDelayMs = 500;
         const nextFindingsCount = s.progress?.findings_count ?? 0;
         const findingsChanged = nextFindingsCount > liveFindingsCountRef.current;
         const nextReportRecords = Math.max(
@@ -357,6 +375,7 @@ export function useSessionWorkspace(p: Params) {
           void p.refreshGlobalPending();
         }
       } catch {
+        pollDelayMs = Math.min(pollDelayMs * 2, 10_000);
         if (!stopped) {
           p.setError("Koneksi telemetri terputus — coba muat ulang atau pilih sesi ulang");
         }
@@ -365,10 +384,19 @@ export function useSessionWorkspace(p: Params) {
       }
     };
 
-    const t = window.setInterval(() => void tick(), 500);
+    const schedule = () => {
+      if (stopped) return;
+      timer = window.setTimeout(() => {
+        void tick().finally(() => {
+          if (!stopped) schedule();
+        });
+      }, pollDelayMs);
+    };
+
+    schedule();
     return () => {
       stopped = true;
-      window.clearInterval(t);
+      if (timer !== undefined) window.clearTimeout(timer);
       if (pollEpochRef.current === epoch) pollEpochRef.current += 1;
     };
   }, [
@@ -408,6 +436,7 @@ export function useSessionWorkspace(p: Params) {
   );
 
   async function onPickSession(id: string) {
+    if (runningSession && id !== runningSession.id) return;
     try {
       p.setError(null);
       await selectSessionById(id);
@@ -417,6 +446,7 @@ export function useSessionWorkspace(p: Params) {
   }
 
   async function openSession(id: string, nextTab: Tab) {
+    if (runningSession && id !== runningSession.id) return;
     try {
       p.setError(null);
       await selectSessionById(id);
@@ -427,6 +457,7 @@ export function useSessionWorkspace(p: Params) {
   }
 
   async function openSessionWithModule(id: string, modul: import("@/app/routes").ModuleFilterParam) {
+    if (runningSession && id !== runningSession.id) return;
     try {
       p.setError(null);
       await selectSessionById(id);

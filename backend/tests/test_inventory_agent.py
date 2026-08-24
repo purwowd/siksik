@@ -28,10 +28,16 @@ from app.acquisition.errors import AcquisitionError, ErrorCategory
 from app.acquisition.runtime import AgentRuntimeSecrets
 from app.acquisition.time_scope import build_time_scope
 from app.models.schemas import AcquisitionMode, DeviceType, Scenario, SessionStatus
+from app.core import config
 
 SESSION_ID = "session-inventory-001"
 CRAWL_ID = "crawl-inventory-001"
 TIMESTAMP = "2026-07-16T10:00:00Z"
+
+
+@pytest.fixture(autouse=True)
+def disable_unrelated_gmail_acquisition(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config.settings, "gmail_acquisition_enabled", False)
 
 
 def preprocessing_payload(state: str = "complete") -> dict[str, object]:

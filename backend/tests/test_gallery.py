@@ -297,27 +297,19 @@ async def test_loader_binds_social_canonical_paths_and_artifacts(monkeypatch) ->
 
     monkeypatch.setattr(db, "fetchall", fake_fetchall)
     records = await _load_records("session-social", AcquisitionMode.QUICK)
-    assert {item.file_id for item in records} == {
-        "ig-record",
-        "ig-shot",
-        "x-record",
-        "x-shot",
-    }
-    ig_record = next(item for item in records if item.file_id == "ig-record")
+    assert {item.file_id for item in records} == {"ig-shot", "x-record"}
     instagram = next(item for item in records if item.file_id == "ig-shot")
     x_record = next(item for item in records if item.file_id == "x-record")
-    x_shot_record = next(item for item in records if item.file_id == "x-shot")
     assert instagram.album_label == "Instagram"
     assert instagram.presentation == "visual"
-    assert instagram.is_flagged is False
-    assert ig_record.preview_path == ig_shot["path"]
-    assert ig_record.is_flagged is True
+    assert instagram.preview_path == ig_shot["path"]
+    assert instagram.source_path == "ig:own_posts"
+    assert instagram.is_flagged is True
     assert x_record.album_label == "X"
     assert x_record.presentation == "text"
     assert x_record.preview_text == "Isi tweet"
+    assert x_record.source_path == "x:own_tweets"
     assert x_record.is_flagged is False
-    assert x_shot_record.presentation == "text"
-    assert x_shot_record.preview_path == x_canonical["path"]
 
 
 @pytest.fixture

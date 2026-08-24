@@ -3,7 +3,9 @@ from app.services.reports import (
     _is_profile_metric_chrome,
     _profile_metrics,
     _profile_username,
+    _scrub_profile_bio,
     _social_account_heading,
+    _social_account_html,
 )
 
 
@@ -37,6 +39,39 @@ def test_profile_metrics_keep_friends_separate_from_followers() -> None:
         "friends": 2,
         "following": None,
     }
+
+
+def test_scrub_instagram_profile_chrome_keeps_bio() -> None:
+    blob = (
+        "2 = + intel.negara Obsessed with 130 217 6 following followers posts "
+        "2 open spotify com/user/31 gyitwhplxygsmSlv. Add banners Share profile Edit profile +8"
+    )
+    assert (
+        _scrub_profile_bio(
+            blob,
+            "intel.negara",
+            ["open.spotify.com/user/31gyitwhplxygsmSlv"],
+        )
+        == "Obsessed with"
+    )
+
+
+def test_instagram_account_html_does_not_dump_chrome() -> None:
+    html = _social_account_html(
+        {
+            "platform": "Instagram",
+            "username": "intel.negara",
+            "display_name": None,
+            "bio": "Obsessed with",
+            "profile_links": ["open.spotify.com/user/31gyitwhplxygsmSlv"],
+            "profile_metrics": {"posts": 6, "followers": 217, "following": 130, "friends": None},
+        }
+    )
+    assert "Obsessed with" in html
+    assert "Edit profile" not in html
+    assert "Add banners" not in html
+    assert "217 pengikut" in html
+    assert "— · @intel.negara" not in html
 
 
 def test_social_heading_uses_facebook_display_name_without_placeholder_handle() -> None:

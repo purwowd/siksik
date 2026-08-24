@@ -108,6 +108,13 @@ class MeResponse(ResponseModel):
     permissions: list[str] = Field(default_factory=list)
 
 
+class ParticipantIdentity(ResponseModel):
+    full_name: str = ""
+    registration_no: str = ""
+    nik: str | None = None
+    organization: str | None = None
+
+
 class ParticipantInput(RequestModel):
     full_name: str = Field(default="", max_length=256)
     registration_no: str = Field(default="", max_length=64)
@@ -286,7 +293,7 @@ class SessionSummary(ResponseModel):
     created_at: str
     updated_at: str
     error: str | None = None
-    participant: dict[str, Any] | None = None
+    participant: ParticipantIdentity | None = None
 
 
 class FindingOut(ResponseModel):

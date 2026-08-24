@@ -1526,12 +1526,15 @@ class AsyncAdbTransport:
         self,
         serial: str,
         component: str,
+        *,
+        user_id: int | None = None,
     ) -> AccessibilityBindingState:
         expected = validate_component_name(component)
         package_name = expected.split("/", 1)[0]
         direct_status = await self.probe_accessibility_recovery_status(
             serial,
             package_name,
+            user_id=user_id,
         )
         if direct_status == "bound":
             return AccessibilityBindingState.BOUND
@@ -1556,9 +1559,15 @@ class AsyncAdbTransport:
         self,
         serial: str,
         component: str,
+        *,
+        user_id: int | None = None,
     ) -> bool:
         return (
-            await self.accessibility_binding_state(serial, component)
+            await self.accessibility_binding_state(
+                serial,
+                component,
+                user_id=user_id,
+            )
             == AccessibilityBindingState.BOUND
         )
 
@@ -1567,34 +1576,52 @@ class AsyncAdbTransport:
         serial: str,
         component: str,
         *,
+        user_id: int | None = None,
         timeout_seconds: float = ACCESSIBILITY_BINDING_SETTLE_SECONDS,
         poll_seconds: float = ACCESSIBILITY_BINDING_POLL_SECONDS,
     ) -> bool:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            if await self.accessibility_service_bound(serial, component):
+            if await self.accessibility_service_bound(
+                serial,
+                component,
+                user_id=user_id,
+            ):
                 return True
             await asyncio.sleep(poll_seconds)
-        return await self.accessibility_service_bound(serial, component)
+        return await self.accessibility_service_bound(
+            serial,
+            component,
+            user_id=user_id,
+        )
 
     async def wait_accessibility_service_unbound(
         self,
         serial: str,
         component: str,
         *,
+        user_id: int | None = None,
         timeout_seconds: float = ACCESSIBILITY_UNBIND_SETTLE_SECONDS,
         poll_seconds: float = ACCESSIBILITY_BINDING_POLL_SECONDS,
     ) -> bool:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            state = await self.accessibility_binding_state(serial, component)
+            state = await self.accessibility_binding_state(
+                serial,
+                component,
+                user_id=user_id,
+            )
             if state in {
                 AccessibilityBindingState.UNBOUND,
                 AccessibilityBindingState.CRASHED,
             }:
                 return True
             await asyncio.sleep(poll_seconds)
-        return await self.accessibility_binding_state(serial, component) in {
+        return await self.accessibility_binding_state(
+            serial,
+            component,
+            user_id=user_id,
+        ) in {
             AccessibilityBindingState.UNBOUND,
             AccessibilityBindingState.CRASHED,
         }
@@ -1730,7 +1757,11 @@ class AsyncAdbTransport:
         active_user_id = await self.current_user_id(serial) if user_id is None else user_id
         if not 0 <= active_user_id <= 100_000:
             raise acquisition_error(ErrorCategory.VALIDATION_ERROR, "Android user tidak valid.")
-        binding = await self.accessibility_binding_state(serial, expected)
+        binding = await self.accessibility_binding_state(
+            serial,
+            expected,
+            user_id=active_user_id,
+        )
         settings_granted = (
             await self.special_access_state(
                 serial,
@@ -1778,7 +1809,11 @@ class AsyncAdbTransport:
                 return False
             if agent_status == "denied":
                 return False
-        return await self.wait_accessibility_service_unbound(serial, expected)
+        return await self.wait_accessibility_service_unbound(
+            serial,
+            expected,
+            user_id=active_user_id,
+        )
 
     async def restore_accessibility_via_agent(
         self,
@@ -1840,7 +1875,11 @@ class AsyncAdbTransport:
         active_user_id = await self.current_user_id(serial) if user_id is None else user_id
         if not 0 <= active_user_id <= 100_000:
             raise acquisition_error(ErrorCategory.VALIDATION_ERROR, "Android user tidak valid.")
-        if await self.accessibility_service_bound(serial, expected):
+        if await self.accessibility_service_bound(
+            serial,
+            expected,
+            user_id=active_user_id,
+        ):
             return SpecialAccessState.GRANTED
         settings_granted = (
             await self.special_access_state(
@@ -1855,6 +1894,7 @@ class AsyncAdbTransport:
         service_settled = settings_granted and await self.wait_accessibility_service_bound(
             serial,
             expected,
+            user_id=active_user_id,
             timeout_seconds=min(2.0, ACCESSIBILITY_BINDING_SETTLE_SECONDS),
         )
         if not service_settled:
@@ -1870,7 +1910,11 @@ class AsyncAdbTransport:
                         extra={
                             "serial_redacted": serial[:4] + "…" if serial else None,
                             "binding_state": (
-                                await self.accessibility_binding_state(serial, expected)
+                                await self.accessibility_binding_state(
+                                    serial,
+                                    expected,
+                                    user_id=active_user_id,
+                                )
                             ).value,
                         },
                     )
@@ -1897,7 +1941,11 @@ class AsyncAdbTransport:
                     extra={
                         "serial_redacted": serial[:4] + "…" if serial else None,
                         "binding_state": (
-                            await self.accessibility_binding_state(serial, expected)
+                            await self.accessibility_binding_state(
+                                serial,
+                                expected,
+                                user_id=active_user_id,
+                            )
                         ).value,
                     },
                 )
@@ -1913,9 +1961,17 @@ class AsyncAdbTransport:
                         "agent_status": agent_status,
                     },
                 )
-        if await self.wait_accessibility_service_bound(serial, expected):
+        if await self.wait_accessibility_service_bound(
+            serial,
+            expected,
+            user_id=active_user_id,
+        ):
             return SpecialAccessState.GRANTED
-        if await self.accessibility_service_bound(serial, expected):
+        if await self.accessibility_service_bound(
+            serial,
+            expected,
+            user_id=active_user_id,
+        ):
             return SpecialAccessState.GRANTED
         return await self.special_access_state(
             serial,
@@ -2123,6 +2179,7 @@ class AsyncAdbTransport:
         if await self.wait_accessibility_service_bound(
             serial,
             expected,
+            user_id=active_user_id,
             timeout_seconds=min(2.0, ACCESSIBILITY_BINDING_SETTLE_SECONDS),
         ):
             return SpecialAccessState.GRANTED

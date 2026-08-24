@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.models.schemas import ParticipantInput
-from app.services.participant import participant_dict
+from app.services.participant import participant_dict, require_complete_participant
 
 
 def test_participant_rejects_short_nik():
@@ -22,3 +22,10 @@ def test_participant_normalizes_registration():
     )
     assert payload["registration_no"] == "AB-12"
     assert payload["nik"] == "1234567890123456"
+
+
+def test_participant_requires_name_and_registration():
+    with pytest.raises(ValueError, match="Nama lengkap"):
+        require_complete_participant(ParticipantInput(registration_no="REG-1"))
+    with pytest.raises(ValueError, match="registrasi"):
+        require_complete_participant(ParticipantInput(full_name="Budi"))

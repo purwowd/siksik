@@ -104,6 +104,21 @@ PROFILE_METRIC_TOKEN = re.compile(
     r"(friends?|teman|followers?|following|pengikut|mengikuti|posts?|postingan|kiriman)\b"
 )
 PROFILE_METRIC_SEPARATOR = re.compile(r"[\s·•|,;/]+")
+IG_PROFILE_CHROME_PHRASES = (
+    "add banners",
+    "edit profile",
+    "edit profil",
+    "get verified",
+    "share profile",
+    "share profil",
+)
+IG_PROFILE_CHROME_RE = re.compile(
+    r"(?i)\b("
+    r"add banners|edit profile|edit profil|get verified|share profile|share profil|"
+    r"following|followers|posts?|postingan|pengikut|mengikuti|diikuti"
+    r")\b"
+)
+SPOTIFY_OCR_RE = re.compile(r"(?i)\bopen\.?\s*spotify(?:\s*com)?\S*")
 PROFILE_NOISE = {
     "add",
     "add banners",
@@ -645,11 +660,12 @@ def _profile_bio(
             if line.casefold() not in PROFILE_NOISE
             and not _is_chrome_ui_line(line)
             and not _is_profile_metric_chrome(line)
+            and not _is_ig_action_label(line)
             and not re.fullmatch(r"(?i)\d{1,2}:\d{2}(\s*[ap]m)?", line.strip())
         ]
         cleaned = "\n".join(structured_lines).strip()[:4096]
         if cleaned:
-            return cleaned
+            return _scrub_profile_bio(cleaned, username, links)
     username_key = username.casefold() if username else None
     link_keys = [value.casefold() for value in links]
     output: list[str] = []
@@ -660,6 +676,7 @@ def _profile_bio(
             or key in PROFILE_NOISE
             or _is_chrome_ui_line(line)
             or _is_profile_metric_chrome(line)
+            or _is_ig_action_label(line)
             or re.fullmatch(r"[0-9][0-9.,]*", key)
             or re.fullmatch(r"(?i)\d{1,2}:\d{2}(\s*[ap]m)?", line.strip())
             or any(link in key for link in link_keys)
@@ -669,14 +686,58 @@ def _profile_bio(
         if len(output) >= 20:
             break
     value = "\n".join(output).strip()[:4096]
-    return value or None
+    return _scrub_profile_bio(value, username, links) if value else None
 
 
 def _is_profile_metric_chrome(line: str) -> bool:
     if PROFILE_METRIC_TOKEN.search(line) is None:
-        return False
+        remainder = IG_PROFILE_CHROME_RE.sub(" ", line)
+        remainder = re.sub(r"[0-9][0-9.,]*", " ", remainder)
+        remainder = PROFILE_METRIC_SEPARATOR.sub("", remainder)
+        return remainder == "" and bool(IG_PROFILE_CHROME_RE.search(line))
     remainder = PROFILE_METRIC_TOKEN.sub("", line)
+    remainder = IG_PROFILE_CHROME_RE.sub(" ", remainder)
+    remainder = re.sub(r"[0-9][0-9.,]*", " ", remainder)
     return PROFILE_METRIC_SEPARATOR.sub("", remainder) == ""
+
+
+def _is_ig_action_label(text: str) -> bool:
+    key = text.strip().casefold()
+    return key in {
+        "edit",
+        "sunting",
+        "share",
+        "bagikan",
+        *IG_PROFILE_CHROME_PHRASES,
+    } or any(key.startswith(phrase) for phrase in IG_PROFILE_CHROME_PHRASES)
+
+
+def _scrub_profile_bio(text: str, username: str | None, links: list[str]) -> str | None:
+    blob = text
+    if username:
+        blob = re.sub(rf"(?i)@?{re.escape(username)}\b", " ", blob)
+    for link in links:
+        blob = re.sub(re.escape(link), " ", blob, flags=re.I)
+    blob = re.sub(
+        r"(?i)(?:\b[0-9][0-9.,]*\b\s*)+(?=(?:following|followers|posts?|postingan|pengikut|mengikuti|diikuti)\b)",
+        " ",
+        blob,
+    )
+    blob = re.sub(r"(?i)(?:\b\d+\s+)?\bopen\s+spotify\b[\s\S]*", " ", blob)
+    blob = SPOTIFY_OCR_RE.sub(" ", blob)
+    for phrase in IG_PROFILE_CHROME_PHRASES:
+        blob = re.sub(re.escape(phrase), " ", blob, flags=re.I)
+    blob = PROFILE_METRIC_TOKEN.sub(" ", blob)
+    blob = IG_PROFILE_CHROME_RE.sub(" ", blob)
+    blob = re.sub(r"[+=]+", " ", blob)
+    blob = re.sub(r"\b\d+[.,]?\d*\b", " ", blob)
+    blob = re.sub(r"\b[a-z0-9]{12,}\.?\b", " ", blob, flags=re.I)
+    blob = re.sub(r"\s+", " ", blob).strip(" -·,.")
+    if len(blob) < 2:
+        return None
+    if blob.casefold() in PROFILE_NOISE or _is_chrome_ui_line(blob) or _is_profile_metric_chrome(blob):
+        return None
+    return blob[:4096]
 
 
 def _profile_metrics(metadata: dict, lines: list[str]) -> dict[str, int | None]:
@@ -797,8 +858,7 @@ def _spatial_profile_bio(
     action_regions = [
         value
         for value in regions
-        if int(value["top"]) > profile_start
-        and value["text"].strip().casefold() in {"edit", "sunting", "share", "bagikan"}
+        if int(value["top"]) > profile_start and _is_ig_action_label(str(value["text"]))
     ]
     profile_end = min(
         (int(value["top"]) for value in action_regions),
@@ -816,6 +876,9 @@ def _spatial_profile_bio(
             not text
             or key in PROFILE_NOISE
             or key in {"+", "@", "new", "baru"}
+            or _is_chrome_ui_line(text)
+            or _is_profile_metric_chrome(text)
+            or _is_ig_action_label(text)
             or re.fullmatch(r"[0-9][0-9.,]*", key)
             or any(link in key or key in link for link in link_keys)
             or PROFILE_LINK.search(text)
@@ -832,7 +895,7 @@ def _spatial_profile_bio(
             row_top = top
         rows[-1].append(region["text"].strip())
     value = "\n".join(" ".join(row) for row in rows if row).strip()[:4096]
-    return value or None
+    return _scrub_profile_bio(value, username, links) if value else None
 
 
 def _social_preview(text: object) -> str | None:
@@ -1199,12 +1262,22 @@ def _short_text(value: object, limit: int = 120) -> str:
     return text[: max(1, limit - 1)] + "…"
 
 
-def _short_path(value: object, limit: int = 52) -> str:
+def _is_opaque_file_id(name: str) -> bool:
+    n = name.strip()
+    if not n:
+        return True
+    lower = n.lower()
+    if lower.startswith("record_"):
+        return True
+    stem = n.rsplit(".", 1)[0]
+    return len(stem) >= 40 and all(c.isalnum() or c in "_-" for c in stem)
+
+
+def _short_path(value: object, limit: int = 36) -> str:
     path = str(value or "").strip() or "—"
     if path == "—":
         return path
     base = path.rsplit("/", 1)[-1]
-    # Path teknis .imgmeta/.vidmeta — tampilkan nama berkas saja
     if base.endswith((".imgmeta", ".vidmeta", ".json")) or len(path) > limit:
         return base if len(base) <= limit else base[: max(1, limit - 1)] + "…"
     if len(path) <= limit:
@@ -1273,10 +1346,10 @@ def _finding_evidence(finding: dict) -> str:
             tag_bits = [tags.strip()]
 
         parts: list[str] = []
-        if name:
+        if name and not _is_opaque_file_id(name):
             parts.append(name)
         if tag_bits:
-            parts.append(", ".join(tag_bits))
+            parts.append("[" + "+".join(tag_bits) + "]" if len(tag_bits) > 1 else tag_bits[0])
         keyframes = evidence.get("keyframes")
         if keyframes not in (None, "", 0) and not tag_bits:
             parts.append(f"{keyframes} keyframe")
@@ -1291,13 +1364,29 @@ def _finding_evidence(finding: dict) -> str:
 
 
 def _social_account_html(account: dict) -> str:
-    username = account.get("username")
-    user_suffix = f" · @{_esc(username)}" if username else ""
+    username = str(account.get("username") or "").strip().removeprefix("@")
+    display_name = str(account.get("display_name") or "").strip()
+    if display_name in {"", "—"}:
+        identity = f"@{username}" if username else "—"
+    elif username:
+        identity = f"{display_name} · @{username}"
+    else:
+        identity = display_name
+    metrics = account.get("profile_metrics") if isinstance(account.get("profile_metrics"), dict) else {}
+    metric_bits = []
+    for key, label in (("posts", "postingan"), ("followers", "pengikut"), ("following", "diikuti"), ("friends", "teman")):
+        value = metrics.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            metric_bits.append(f"{value} {label}")
+    metric_html = (
+        f"<p class=\"muted\">{_esc(' · '.join(metric_bits))}</p>" if metric_bits else ""
+    )
     return (
         "<article class=\"account-card\">"
         f"<h3>{_esc(_social_account_heading(account))}</h3>"
-        f"<p class=\"muted\">{_esc(account.get('display_name') or '—')}{user_suffix}</p>"
+        f"<p class=\"muted\">{_esc(identity)}</p>"
         f"<p>{_esc(_short_text(account.get('bio') or 'Bio tidak terbaca', 220))}</p>"
+        f"{metric_html}"
         f"<p class=\"links\">{_esc(', '.join(account.get('profile_links', [])) or '—')}</p>"
         "</article>"
     )
@@ -1327,15 +1416,17 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
 
     findings_rows = "".join(
         "<tr>"
-        f"<td>{_esc(f.get('label'))}</td>"
+        f"<td class=\"label-cell\">{_esc(f.get('label'))}</td>"
         f"<td>{_esc(_report_label(f.get('source'), REPORT_SOURCE_LABELS))}</td>"
-        f"<td>{float(f.get('confidence') or 0):.0%}</td>"
-        f"<td>{_review_pill(f.get('review_status'))}</td>"
-        f"<td class=\"evidence\">{_esc(_finding_evidence(f))}</td>"
-        f"<td class=\"path-cell\"><code>{_esc(_short_path(f.get('path')))}</code></td>"
+        f"<td class=\"num-cell\">{float(f.get('confidence') or 0):.0%}</td>"
+        f"<td class=\"status-cell\">{_review_pill(f.get('review_status'))}</td>"
+        f"<td class=\"evidence-file\">"
+        f"<span>{_esc(_finding_evidence(f))}</span>"
+        f"<code title=\"{_esc(str(f.get('path') or ''))}\">{_esc(_short_path(f.get('path')))}</code>"
+        f"</td>"
         "</tr>"
         for f in findings[:200]
-    ) or '<tr><td colspan="6">Tidak ada temuan</td></tr>'
+    ) or '<tr><td colspan="5">Tidak ada temuan</td></tr>'
 
     cat_items = (
         "".join(
@@ -1505,7 +1596,7 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
             "<div class=\"sign-grid\">"
             "<div><span>Nama / jabatan</span><div class=\"sign-line\"></div></div>"
             "<div><span>Tanggal</span><div class=\"sign-line\"></div></div>"
-            "<div><span>Tanda tangan</span><div class=\"sign-box\"></div></div>"
+            "<div class=\"sign-full\"><span>Tanda tangan</span><div class=\"sign-box\"></div></div>"
             "</div>"
             "</section>"
         )
@@ -1744,7 +1835,6 @@ h2 {{
 }}
 table.data {{
   width: 100%;
-  table-layout: fixed;
   border-collapse: collapse;
   font-size: 0.8rem;
 }}
@@ -1754,38 +1844,51 @@ table.data th, table.data td {{
   text-align: left;
   vertical-align: top;
   overflow: hidden;
-  overflow-wrap: anywhere;
-  word-break: break-word;
 }}
 table.data th {{
   font-size: 0.65rem;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.03em;
   color: var(--muted);
+  white-space: normal;
+  line-height: 1.25;
+  overflow-wrap: break-word;
 }}
-table.data.findings-summary th:nth-child(1),
-table.data.findings-summary td:nth-child(1) {{ width: 22%; }}
-table.data.findings-summary th:nth-child(2),
-table.data.findings-summary td:nth-child(2) {{ width: 12%; }}
-table.data.findings-summary th:nth-child(3),
-table.data.findings-summary td:nth-child(3) {{ width: 9%; }}
-table.data.findings-summary th:nth-child(4),
-table.data.findings-summary td:nth-child(4) {{ width: 13%; }}
-table.data.findings-summary th:nth-child(5),
-table.data.findings-summary td:nth-child(5) {{ width: 22%; }}
-table.data.findings-summary th:nth-child(6),
-table.data.findings-summary td:nth-child(6) {{ width: 22%; }}
-code {{ font-size: 0.74rem; }}
-.evidence, .path-cell {{
-  max-width: none;
+table.data.findings-summary {{
+  table-layout: fixed;
+  width: 100%;
 }}
-.evidence, .path-cell code {{
+table.data.findings-summary col.c-label {{ width: 28%; }}
+table.data.findings-summary col.c-source {{ width: 6.2rem; }}
+table.data.findings-summary col.c-pct {{ width: 5.2rem; }}
+table.data.findings-summary col.c-status {{ width: 7.6rem; }}
+table.data.findings-summary col.c-bukti {{ width: 26%; }}
+.label-cell {{
+  overflow-wrap: break-word;
+  word-break: normal;
+}}
+.num-cell {{
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}}
+.status-cell {{
+  white-space: nowrap;
+}}
+.evidence-file span,
+.evidence-file code {{
   display: block;
   max-width: 100%;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
 }}
+.evidence-file code {{
+  margin-top: 2px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}}
+code {{ font-size: 0.74rem; }}
 .preview {{ white-space: pre-wrap; max-width: 420px; }}
 .pill {{
   display: inline-block;
@@ -1794,6 +1897,7 @@ code {{ font-size: 0.74rem; }}
   border-radius: 999px;
   font-size: 0.7rem;
   font-weight: 700;
+  white-space: nowrap;
 }}
 .pill.bad {{ border-color: var(--bad); color: var(--bad); }}
 .pill.warn {{ border-color: var(--warn); color: var(--warn); }}
@@ -1819,6 +1923,9 @@ ul.stats li span {{ color: var(--muted); }}
   gap: 16px;
   margin-top: 12px;
 }}
+.sign-grid .sign-full {{
+  grid-column: 1 / -1;
+}}
 .sign-grid span {{
   display: block;
   font-size: 0.68rem;
@@ -1833,7 +1940,8 @@ ul.stats li span {{ color: var(--muted); }}
 }}
 .sign-box {{
   border: 1px solid var(--ink);
-  min-height: 72px;
+  height: 64px;
+  box-sizing: border-box;
 }}
 footer {{
   margin-top: 16px;
@@ -1852,6 +1960,12 @@ footer {{
     background: #fff !important;
     border-color: #ccc !important;
     box-shadow: none !important;
+  }}
+  header.cover,
+  .panel.signature,
+  .sign-grid,
+  .sign-box,
+  table.data.findings-summary tr {{
     break-inside: avoid;
     page-break-inside: avoid;
   }}
@@ -1859,19 +1973,19 @@ footer {{
   .letterhead-brand .brand {{ color: var(--brand) !important; }}
   .summary {{ background: #f5f5f5 !important; }}
   .pill {{ border-color: #666 !important; color: #111 !important; }}
-  table.data {{ font-size: 9.5pt; table-layout: fixed; }}
+  table.data {{ font-size: 9.5pt; }}
   table.data th, table.data td {{
     border-color: #ccc !important;
     padding: 5px 6px;
-    overflow-wrap: anywhere;
-    word-break: break-word;
   }}
   .meta-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }}
   .meta-grid code {{ word-break: break-all !important; white-space: normal !important; }}
-  .evidence, .path-cell code {{
-    white-space: normal !important;
-    word-break: break-all !important;
-    overflow-wrap: anywhere !important;
+  .evidence-file span,
+  .evidence-file code {{
+    white-space: nowrap !important;
+    word-break: normal !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
   }}
   .doc-footer {{
     border-top-color: #111 !important;
@@ -1915,14 +2029,20 @@ footer {{
   <h2>Ringkasan temuan</h2>
   <div class="table-wrap">
   <table class="data findings-summary">
+    <colgroup>
+      <col class="c-label" />
+      <col class="c-source" />
+      <col class="c-pct" />
+      <col class="c-status" />
+      <col class="c-bukti" />
+    </colgroup>
     <thead>
       <tr>
         <th>Label</th>
         <th>Sumber</th>
-        <th>Keyakinan</th>
-        <th>Verifikasi</th>
-        <th>Bukti singkat</th>
-        <th>Berkas</th>
+        <th>Yakin</th>
+        <th>Status</th>
+        <th>Bukti</th>
       </tr>
     </thead>
     <tbody>{findings_rows}</tbody>

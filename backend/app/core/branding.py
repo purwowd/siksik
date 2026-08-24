@@ -46,8 +46,6 @@ def crawl_record_filename_mime(name: str) -> str | None:
         return CANONICAL_CRAWL_RECORD_MIME
     if lower.endswith(".siksik-record.json"):
         return LEGACY_CRAWL_RECORD_MIME
-    if lower.endswith(".siksik-record.json"):
-        return MAIN_AGENT_CRAWL_RECORD_MIME
     return None
 
 

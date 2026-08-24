@@ -15,6 +15,85 @@ function capturedLabel(value: string | null | undefined): string {
   return stamp.slice(0, 16);
 }
 
+const SOCIAL_LABELS: Record<string, string> = {
+  "com.instagram.android": "Instagram",
+  "com.twitter.android": "X",
+  "com.facebook.katana": "Facebook",
+};
+
+const SCOPE_LABELS: Record<string, string> = {
+  own_profile: "Profil akun",
+  own_posts: "Postingan akun",
+  own_tweets: "Tweet akun",
+  own_story_archive: "Arsip story",
+  own_comments: "Komentar akun",
+  own_replies: "Balasan akun",
+  own_likes: "Aktivitas suka akun",
+};
+
+const ROLE_LABELS: Record<string, string> = {
+  canonical_record: "Data terstruktur",
+  source_binary: "File sumber",
+  screenshot: "Snapshot visual",
+  email_body: "Isi email",
+  email_attachment: "Lampiran email",
+  email_metadata: "Metadata email",
+};
+
+const RECOVERY_LABELS = {
+  normal: "Data normal",
+  trash: "Masih berada di Trash",
+  recovered_deleted: "Recovered image · sumber asli sudah terhapus",
+} as const;
+
+function recoveryState(item: GalleryItem): keyof typeof RECOVERY_LABELS {
+  return item.recovery_state || "normal";
+}
+
+function sourceLabel(item: GalleryItem): string {
+  const recovery = recoveryState(item);
+  if (recovery === "trash") return "Trash perangkat";
+  if (recovery === "recovered_deleted") return "Recovery cache/thumbnail";
+  return (item.source_app && SOCIAL_LABELS[item.source_app]) || humanLabel("source", item.source);
+}
+
+function sourcePath(item: GalleryItem): string {
+  return item.source_path || item.path;
+}
+
+function AccessMeta({ item }: { item: GalleryItem }) {
+  return (
+    <>
+      <div>Data: {capturedLabel(item.captured_at)}</div>
+      <div className="finding-meta">Terakhir diakses: {capturedLabel(item.accessed_at)}</div>
+      {(item.access_count ?? 0) > 0 ? (
+        <div className="finding-meta">{item.access_count} kali dilihat/diputar</div>
+      ) : null}
+    </>
+  );
+}
+
+function ItemMeta({ item }: { item: GalleryItem }) {
+  const recovery = recoveryState(item);
+  return (
+    <>
+      <div className={`finding-meta gallery-state gallery-state-${recovery}`}>
+        {RECOVERY_LABELS[recovery]}
+      </div>
+      {item.artifact_role ? (
+        <div className="finding-meta">
+          {ROLE_LABELS[item.artifact_role] || item.artifact_role.replace(/_/g, " ")}
+        </div>
+      ) : null}
+      {item.favorite ? <div className="finding-meta">Favorit perangkat</div> : null}
+      {item.flagged ? <div className="finding-meta gallery-flagged">Terflag</div> : null}
+      {item.social_scope ? (
+        <div className="finding-meta">{SCOPE_LABELS[item.social_scope] || item.social_scope}</div>
+      ) : null}
+    </>
+  );
+}
+
 export function GalleryList({ sessionId, data, onPage }: Props) {
   return (
     <>
@@ -26,7 +105,7 @@ export function GalleryList({ sessionId, data, onPage }: Props) {
               <th>Nama</th>
               <th>Album</th>
               <th>Sumber</th>
-              <th>Waktu</th>
+              <th>Waktu data / akses</th>
             </tr>
           </thead>
           <tbody>
@@ -35,23 +114,26 @@ export function GalleryList({ sessionId, data, onPage }: Props) {
                 <td>
                   <MediaPreview
                     sessionId={sessionId}
-                    path={item.preview_path || item.path}
+                    path={item.preview_path}
                     text={item.preview_text || item.label}
-                    mime={item.mime}
+                    mime={item.preview_mime || item.mime}
+                    presentation={item.presentation}
                   />
                 </td>
                 <td>
                   <strong className="finding-label">{item.label}</strong>
-                  {item.favorite ? <div className="finding-meta">Favorit perangkat</div> : null}
+                  <ItemMeta item={item} />
                 </td>
                 <td>
                   <span className="finding-source">{item.album}</span>
                 </td>
                 <td>
-                  <span className="finding-source">{humanLabel("source", item.source)}</span>
-                  <div className="finding-path">{item.path}</div>
+                  <span className="finding-source">{sourceLabel(item)}</span>
+                  <div className="finding-path">{sourcePath(item)}</div>
                 </td>
-                <td>{capturedLabel(item.captured_at)}</td>
+                <td>
+                  <AccessMeta item={item} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -60,30 +142,31 @@ export function GalleryList({ sessionId, data, onPage }: Props) {
 
       <div className="findings-cards" aria-label="Daftar galeri">
         {data.items.map((item) => (
-          <article key={item.id} className="finding-card">
+          <article
+            key={item.id}
+            className={`finding-card ${item.presentation === "text" ? "gallery-text-card" : ""}`}
+          >
             <div className="finding-card-media">
               <MediaPreview
                 sessionId={sessionId}
-                path={item.preview_path || item.path}
+                path={item.preview_path}
                 text={item.preview_text || item.label}
-                mime={item.mime}
+                mime={item.preview_mime || item.mime}
+                presentation={item.presentation}
               />
             </div>
             <div className="finding-card-body">
               <strong className="finding-label">{item.label}</strong>
+              <ItemMeta item={item} />
               <div className="finding-meta">
                 <span>{item.album}</span>
                 <span>·</span>
-                <span>{humanLabel("source", item.source)}</span>
-                {item.favorite ? (
-                  <>
-                    <span>·</span>
-                    <span>Favorit</span>
-                  </>
-                ) : null}
+                <span>{sourceLabel(item)}</span>
               </div>
-              <div className="finding-path">{item.path}</div>
-              <div className="evidence-body">{capturedLabel(item.captured_at)}</div>
+              <div className="finding-path">{sourcePath(item)}</div>
+              <div className="evidence-body">
+                <AccessMeta item={item} />
+              </div>
             </div>
           </article>
         ))}

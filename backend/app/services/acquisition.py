@@ -13,7 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.acquisition.adb import AsyncAdbTransport
-from app.acquisition.contracts import AcquisitionContext, AcquisitionResult, UploadedArchive
+from app.acquisition.contracts import (
+    AcquisitionContext,
+    AcquisitionResult,
+    UploadedArchive,
+)
 from app.acquisition.errors import AcquisitionError, ErrorCategory
 from app.acquisition.file_identity import stable_file_id
 from app.acquisition.process import run_process
@@ -913,67 +917,73 @@ async def acquire_dispatch(
 
         token = None
         account_name = None
-        if not simulated and agent_runner is not None:
+        if not simulated and settings.android_agent_enabled:
             from app.acquisition.runtime import agent_runtime_registry as registry
 
-            runtime = await registry.get(session_id)
-            account_name = runtime.google_account
-            token = runtime.google_token
-            from app.acquisition.agent_client import AgentClient, AgentClientConfig
+            try:
+                runtime = await registry.get(session_id)
+            except AcquisitionError as exc:
+                if exc.category != ErrorCategory.NOT_FOUND:
+                    raise
+            else:
+                account_name = runtime.google_account
+                token = runtime.google_token
+                from app.acquisition.agent_client import AgentClient, AgentClientConfig
 
-            runtime_client = AgentClient(
-                runtime.forward_host_port,
-                runtime.token,
-                config=AgentClientConfig(
-                    timeout_seconds=settings.android_agent_request_timeout_s,
-                    max_attempts=settings.android_agent_request_attempts,
-                    max_response_bytes=(
-                        settings.android_agent_max_response_mb * 1024 * 1024
+                runtime_client = AgentClient(
+                    runtime.forward_host_port,
+                    runtime.token,
+                    config=AgentClientConfig(
+                        timeout_seconds=settings.android_agent_request_timeout_s,
+                        max_attempts=settings.android_agent_request_attempts,
+                        max_response_bytes=(
+                            settings.android_agent_max_response_mb * 1024 * 1024
+                        ),
                     ),
-                ),
-            )
-            account_name, token = await ensure_gmail_oauth(
-                client=runtime_client,
+                )
+                account_name, token = await ensure_gmail_oauth(
+                    client=runtime_client,
+                    session_id=session_id,
+                    serial=device_id,
+                    adb=None,
+                    on_progress=on_progress,
+                    request_id=context.request_id,
+                    existing_account=account_name,
+                    existing_token=token,
+                )
+                await agent_runtime_registry.bind(
+                    AgentRuntimeSecrets(
+                        session_id=runtime.session_id,
+                        serial=runtime.serial,
+                        token=runtime.token,
+                        forward_host_port=runtime.forward_host_port,
+                        token_expires_at=runtime.token_expires_at,
+                        google_token=token,
+                        google_account=account_name,
+                    )
+                )
+        if simulated or token:
+            reference = await session_acquisition_reference(session_id)
+            gmail_svc = GmailAcquisitionService()
+            gmail_count, _ = await gmail_svc.acquire(
                 session_id=session_id,
-                serial=device_id,
-                adb=None,
+                staging=result.staging,
+                mode=mode,
+                token=token,
+                account_name=account_name,
+                simulated=simulated,
                 on_progress=on_progress,
                 request_id=context.request_id,
-                existing_account=account_name,
-                existing_token=token,
+                reference=reference,
             )
-            await agent_runtime_registry.bind(
-                AgentRuntimeSecrets(
-                    session_id=runtime.session_id,
-                    serial=runtime.serial,
-                    token=runtime.token,
-                    forward_host_port=runtime.forward_host_port,
-                    token_expires_at=runtime.token_expires_at,
-                    google_token=token,
-                    google_account=account_name,
+            if gmail_count > 0:
+                result = AcquisitionResult(
+                    staging=result.staging,
+                    item_count=result.item_count + gmail_count,
+                    duration_ms=result.duration_ms,
+                    method=f"{result.method}+gmail_api",
+                    provider=result.provider,
                 )
-            )
-        reference = await session_acquisition_reference(session_id)
-        gmail_svc = GmailAcquisitionService()
-        gmail_count, _ = await gmail_svc.acquire(
-            session_id=session_id,
-            staging=result.staging,
-            mode=mode,
-            token=token,
-            account_name=account_name,
-            simulated=simulated,
-            on_progress=on_progress,
-            request_id=context.request_id,
-            reference=reference,
-        )
-        if gmail_count > 0:
-            result = AcquisitionResult(
-                staging=result.staging,
-                item_count=result.item_count + gmail_count,
-                duration_ms=result.duration_ms,
-                method=f"{result.method}+gmail_api",
-                provider=result.provider,
-            )
 
     return result.as_legacy_tuple()
 

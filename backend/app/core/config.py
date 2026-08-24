@@ -1,7 +1,8 @@
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.branding import PRODUCT_FULL_NAME, promote_satria_env
 
@@ -28,12 +29,26 @@ class Settings(BaseSettings):
 
     app_name: str = f"{PRODUCT_FULL_NAME} — SATRIA"
     api_prefix: str = "/api/v1"
-    cors_origins: list[str] = [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:4173",
-        "http://127.0.0.1:4173",
+    cors_origins: Annotated[
+        list[str],
+        NoDecode,
+        Field(
+            default_factory=lambda: [
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                "http://localhost:4173",
+                "http://127.0.0.1:4173",
+            ]
+        ),
     ]
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
+
     # Lab LAN / WSL mirrored: allow private-network Origins (phone, other PCs)
     cors_allow_origin_regex: str = (
         r"https?://("

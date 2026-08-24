@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import mimetypes
 from pathlib import Path
 from typing import Annotated
@@ -10,6 +11,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
+from app.core.branding import PRODUCT_NAME, PRODUCT_TAGLINE
 from app.core.config import settings
 from app.core.db import db, utcnow
 from app.models.schemas import (
@@ -56,6 +58,8 @@ from app.services.auth import (
     user_from_token,
 )
 from app.services.reports import build_session_report, report_to_html, save_session_report
+from app.services.recommendation import REC_MENUNGGU_REVIEW
+from app.services.participant import require_complete_participant
 from app.services.sessions import sessions
 from app.services.vision import vision_status
 from app.selection.contracts import (
@@ -70,6 +74,7 @@ from app.selection.contracts import (
 from app.selection.service import selection_review_service
 
 router = APIRouter()
+audit_logger = logging.getLogger("siksik.auth")
 MAX_FINDING_PREVIEW_CHARS = 320
 MEDIA_EXTENSIONS = {
     ".jpg",
@@ -265,6 +270,11 @@ def _perms(user: AuthUser) -> list[str]:
     return sorted(PERMISSIONS.get(user.role, set()))
 
 
+@router.get("/ready")
+async def ready() -> dict:
+    return {"status": "ok", "app": settings.app_name}
+
+
 @router.get("/health", response_model=HealthOut)
 async def health(user: Annotated[AuthUser, Depends(require_perm("health"))]) -> HealthOut:
     tools = await toolchain_status()
@@ -283,7 +293,8 @@ async def health(user: Annotated[AuthUser, Depends(require_perm("health"))]) -> 
         "worker_concurrency": settings.worker_concurrency,
         "lab_demo_mode": settings.lab_demo_mode,
         "runtime_env": settings.runtime_env,
-        "product": "SATRIA",
+        "product": PRODUCT_NAME,
+        "tagline": PRODUCT_TAGLINE,
         "toolchain": tools,
         "vision": vision_status(),
         "rbac": True,
@@ -412,10 +423,14 @@ async def start_session(
             detail="Mode lab/simulator dinonaktifkan. Sambungkan perangkat live atau set SADT_LAB_DEMO_MODE=1.",
         )
     try:
+        if not wants_sim:
+            require_complete_participant(body.participant)
         data = await sessions.create_and_run(body, operator_id=user.id)
         return SessionSummary.model_validate(data)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/sessions/from-zip", response_model=SessionSummary)
@@ -442,17 +457,20 @@ async def start_session_from_zip(
     if len(raw) > max_b:
         raise HTTPException(status_code=413, detail=f"ZIP melebihi {settings.zip_max_mb} MB")
     try:
+        participant = ParticipantInput(
+            full_name=participant_full_name,
+            registration_no=participant_registration_no,
+            nik=participant_nik,
+            organization=participant_organization,
+        )
+        if not settings.lab_demo_mode and not settings.e2e_simulation:
+            require_complete_participant(participant)
         data = await sessions.create_and_run_from_zip(
             zip_bytes=raw,
             original_name=name,
             mode=mode,
             label=label,
-            participant=ParticipantInput(
-                full_name=participant_full_name,
-                registration_no=participant_registration_no,
-                nik=participant_nik,
-                organization=participant_organization,
-            ),
+            participant=participant,
             operator_id=user.id,
         )
         return SessionSummary.model_validate(data)
@@ -800,6 +818,18 @@ async def authorize_session(
     row = await db.fetchone("SELECT * FROM sessions WHERE id = ?", (session_id,))
     if not row:
         raise HTTPException(status_code=404, detail="Session not found")
+    if row["status"] != "completed":
+        raise HTTPException(status_code=409, detail="Sesi belum selesai — pengesahan ditunda")
+    pending_row = await db.fetchone(
+        "SELECT COUNT(*) AS c FROM findings WHERE session_id = ? AND review_status = 'pending'",
+        (session_id,),
+    )
+    pending = int(pending_row["c"]) if pending_row else 0
+    if pending > 0 or row["recommendation"] == REC_MENUNGGU_REVIEW:
+        raise HTTPException(
+            status_code=403,
+            detail="Pengesahan diblokir — masih ada temuan menunggu verifikasi analis",
+        )
     progress = json.loads(row["progress_json"])
     progress["authorized_by"] = user.username
     progress["authorized_at"] = utcnow()
@@ -808,10 +838,17 @@ async def authorize_session(
         "UPDATE sessions SET progress_json = ?, updated_at = ? WHERE id = ?",
         (json.dumps(progress), utcnow(), session_id),
     )
+    audit_logger.info(
+        "session_authorized",
+        extra={"session_id": session_id, "actor": user.username},
+    )
     try:
         await save_session_report(session_id)
     except Exception:
-        pass
+        audit_logger.exception(
+            "session_report_save_failed",
+            extra={"session_id": session_id, "actor": user.username},
+        )
     return {
         "status": "authorized",
         "session_id": session_id,

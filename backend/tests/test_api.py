@@ -21,6 +21,13 @@ async def test_health(client: AsyncClient):
 
 
 @pytest.mark.api
+async def test_ready_is_public(anon_client: AsyncClient):
+    res = await anon_client.get("/api/v1/ready")
+    assert res.status_code == 200
+    assert res.json()["status"] == "ok"
+
+
+@pytest.mark.api
 async def test_devices_include_simulators(client: AsyncClient):
     res = await client.get("/api/v1/devices")
     assert res.status_code == 200
@@ -216,6 +223,35 @@ async def test_session_report(client: AsyncClient):
     printed = await client.get(f"/api/v1/sessions/{sid}/report?format=print")
     assert printed.status_code == 200
     assert printed.headers["content-type"].startswith("text/html")
+
+
+@pytest.mark.api
+async def test_authorize_blocks_pending_review(client: AsyncClient, anon_client: AsyncClient):
+    created = await client.post(
+        "/api/v1/sessions",
+        json={
+            "device_id": "sim-android-01",
+            "device_type": "android",
+            "mode": "quick",
+            "scenario": "tidak_lulus",
+            "file_count": 80,
+            "label": "Authorize guard",
+            "force_simulated": True,
+        },
+    )
+    sid = created.json()["id"]
+    await wait_session(client, sid)
+    login = await anon_client.post(
+        "/api/v1/auth/login",
+        json={"username": "pimpinan", "password": "Pimpinan@2026"},
+    )
+    headers = {"Authorization": f"Bearer {login.json()['token']}"}
+    blocked = await anon_client.post(
+        f"/api/v1/sessions/{sid}/authorize",
+        headers=headers,
+        json={"note": "Belum boleh"},
+    )
+    assert blocked.status_code == 403
 
 
 @pytest.mark.api

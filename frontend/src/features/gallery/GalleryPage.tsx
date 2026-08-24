@@ -34,6 +34,9 @@ export function GalleryPage({
   onRefresh,
 }: Props) {
   const originAlbums = albums.filter((item) => item.kind === "album" && item.count > 0);
+  const classificationAlbums = albums.filter(
+    (item) => item.kind === "classification" && item.count > 0,
+  );
   const accessAlbums = ACCESS_FILTERS.map((id) => {
     const match = albums.find((item) => item.id === id);
     return {
@@ -56,7 +59,8 @@ export function GalleryPage({
       }}
       toolbarNote={
         <p className="review-progress compact" role="note">
-          Bukan seluruh isi HP — hanya hasil crawl sesi aktif.
+          Semua data yang berhasil ditarik pada sesi ditampilkan. Flag tidak menyaring data; Trash
+          dan hasil recovery dihitung terpisah.
         </p>
       }
       filters={
@@ -73,6 +77,17 @@ export function GalleryPage({
             </button>
           ) : null}
           {accessAlbums.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`chip ${album === item.id ? "active" : ""}`}
+              aria-pressed={album === item.id}
+              onClick={() => setAlbum(item.id)}
+            >
+              {item.label} {item.count}
+            </button>
+          ))}
+          {classificationAlbums.map((item) => (
             <button
               key={item.id}
               type="button"

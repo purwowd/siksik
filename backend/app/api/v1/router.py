@@ -1,9 +1,37 @@
-"""SATRIA / SIKSIK API v1 aggregator.
+from __future__ import annotations
 
-Handlers live in ``app.api.routes`` (union of main crawl routes + SATRIA extras).
-This module is the stable include target so callers import ``app.api.v1.router``.
-"""
+from fastapi import APIRouter
 
-from app.api.routes import router
+from app.api.v1 import (
+    admin,
+    agent,
+    auth,
+    dashboard,
+    devices,
+    findings,
+    gallery,
+    health,
+    media,
+    reports,
+    selection,
+    sessions,
+)
+
+router = APIRouter()
+for group in (
+    health.router,
+    auth.router,
+    devices.router,
+    agent.router,
+    sessions.router,
+    selection.router,
+    findings.router,
+    gallery.router,
+    media.router,
+    reports.router,
+    dashboard.router,
+    admin.router,
+):
+    router.routes.extend(group.routes)
 
 __all__ = ["router"]

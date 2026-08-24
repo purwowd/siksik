@@ -5,6 +5,7 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.acquisition.errors import AcquisitionError
 from app.api.v1.router import router
@@ -96,10 +97,30 @@ async def acquisition_error_handler(request: Request, exc: AcquisitionError) -> 
 app.include_router(router, prefix=settings.api_prefix)
 
 
-@app.get("/")
-async def root():
-    return {
-        "app": settings.app_name,
-        "docs": "/docs",
-        "api": settings.api_prefix,
-    }
+def _mount_desktop_ui() -> bool:
+    if not settings.desktop_ui_enabled:
+        return False
+    dist = settings.desktop_ui_dist.resolve()
+    if not dist.is_dir():
+        request_logger.warning(
+            "desktop_ui_dist_missing",
+            extra={"desktop_ui_dist": str(dist)},
+        )
+        return False
+    app.mount("/", StaticFiles(directory=str(dist), html=True), name="desktop-ui")
+    request_logger.info(
+        "desktop_ui_mounted",
+        extra={"desktop_ui_dist": str(dist)},
+    )
+    return True
+
+
+if not _mount_desktop_ui():
+
+    @app.get("/")
+    async def root():
+        return {
+            "app": settings.app_name,
+            "docs": "/docs",
+            "api": settings.api_prefix,
+        }

@@ -22,6 +22,7 @@ from app.services.participant import (
     find_registration_conflict,
     participant_dict,
     participant_display_label,
+    require_complete_participant,
 )
 from app.services import acquisition as acq
 from app.services import analysis as ai
@@ -223,6 +224,7 @@ class SessionManager:
         row = await db.fetchone("SELECT * FROM sessions WHERE id = ?", (session_id,))
         if not row:
             raise KeyError("Session not found")
+        require_complete_participant(participant)
         payload = await _ensure_unique_registration(
             participant,
             exclude_session_id=session_id,

@@ -634,6 +634,8 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
     preview_text = _compact_preview(_row_get(row, "preview_text")) or _compact_preview(
         meta.get("preview_text") or meta.get("normalized_text")
     )
+    if preview_text is None and source.casefold() in {"email", "gmail"}:
+        preview_text = _compact_preview(display_name)
     recovery_state = _recovery_state(meta, source, path)
     label = _resolved_album(
         source=source,
@@ -675,7 +677,10 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
     source_locator = _optional_text(_row_get(row, "source_locator"))
     preview_path = path
     preview_mime = mime
-    if source_app_l in SOCIAL_TEXT_ONLY and role.casefold() == "screenshot":
+    if role.casefold() == "email_metadata":
+        preview_path = _optional_text(_row_get(row, "canonical_preview_path"))
+        preview_mime = "text/html" if preview_path else None
+    elif source_app_l in SOCIAL_TEXT_ONLY and role.casefold() == "screenshot":
         # A legacy/invalid X or Facebook screenshot remains accounted for as a
         # pulled file, but it can only render the canonical text record.
         preview_path = _optional_text(_row_get(row, "canonical_preview_path"))
@@ -686,11 +691,11 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         preview_path = _optional_text(_row_get(row, "visual_preview_path"))
         preview_mime = _optional_text(_row_get(row, "visual_preview_mime"))
     origin_path = _origin_path(directory_hint, str(display_name), path)
-    if directory_hint:
+    if source_app:
+        source_path = source_locator or origin_path
+    elif directory_hint:
         source_path = origin_path
     elif recovery_state != RECOVERY_NORMAL:
-        source_path = source_locator or path
-    elif source_app:
         source_path = source_locator or path
     elif source.casefold() in PATH_MAPPED_SOURCES and Path(str(display_name)).name:
         source_path = f"{label}/{Path(str(display_name)).name}"

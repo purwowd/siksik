@@ -83,10 +83,12 @@ export function SessionPicker({
   }, [sessions, query, statusFilter, sort, compact]);
 
   const selected = sessions.find((x) => x.id === value);
+  const runningSession = sessions.find((session) => ACTIVE.has(session.status));
   const activeOutsideFilter = Boolean(
     value && selected && !filtered.some((s) => s.id === value),
   );
-  const selectDisabled = loading || (filtered.length === 0 && !activeOutsideFilter);
+  const selectDisabled =
+    loading || Boolean(runningSession) || (filtered.length === 0 && !activeOutsideFilter);
 
   return (
     <div className={`session-picker session-picker-enhanced${compact ? " session-picker-compact" : ""}`}>
@@ -131,6 +133,7 @@ export function SessionPicker({
         <select
           id="sadt-session-pick"
           disabled={selectDisabled}
+          title={runningSession ? "Sesi berjalan dikunci sampai akuisisi selesai" : undefined}
           value={value || ""}
           onChange={(e) => {
             const id = e.target.value;

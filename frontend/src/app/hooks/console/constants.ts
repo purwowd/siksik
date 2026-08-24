@@ -1,4 +1,5 @@
 import type { SessionSummary } from "@/shared/api/client";
+import { ACTIVE } from "@/shared/constants";
 
 export const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 export const QUICK_VIDEO_CAP = 80;
@@ -29,6 +30,9 @@ export function pickBootstrapSession(
   preferId: string | null,
 ): SessionSummary | undefined {
   if (!items.length) return undefined;
+
+  const active = items.find((s) => ACTIVE.has(s.status));
+  if (active) return active;
 
   const fromPrefer = preferId ? items.find((s) => s.id === preferId) : undefined;
   if (fromPrefer && !isStaleTestSession(fromPrefer)) return fromPrefer;

@@ -58,3 +58,15 @@ def test_timeline_elevated_current_year():
     tl = build_risk_timeline(rows, years_back=5, now=datetime(2026, 7, 1))
     assert tl["current_year_count"] == 3
     assert tl["trend"] in {"elevated", "stable", "improving"}
+
+
+@pytest.mark.unit
+def test_timeline_ignores_pending_and_rejected():
+    rows = [
+        {"media_year": 2026, "category": "konten_visual", "review_status": "confirmed"},
+        {"media_year": 2026, "category": "konten_visual", "review_status": "pending"},
+        {"media_year": 2026, "category": "konten_visual", "review_status": "rejected"},
+    ]
+    timeline = build_risk_timeline(rows, years_back=5, now=datetime(2026, 8, 23))
+    assert timeline["current_year_count"] == 1
+    assert timeline["series"][-1]["total"] == 1
