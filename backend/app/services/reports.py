@@ -1738,8 +1738,13 @@ h2 {{
 }}
 .kpi span {{ display: block; font-size: 0.62rem; color: var(--muted); text-transform: uppercase; }}
 .kpi strong {{ font-size: 1.1rem; font-variant-numeric: tabular-nums; }}
+.table-wrap {{
+  width: 100%;
+  overflow-x: auto;
+}}
 table.data {{
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 0.8rem;
 }}
@@ -1748,6 +1753,9 @@ table.data th, table.data td {{
   padding: 7px 8px;
   text-align: left;
   vertical-align: top;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }}
 table.data th {{
   font-size: 0.65rem;
@@ -1755,10 +1763,29 @@ table.data th {{
   letter-spacing: 0.05em;
   color: var(--muted);
 }}
+table.data.findings-summary th:nth-child(1),
+table.data.findings-summary td:nth-child(1) {{ width: 22%; }}
+table.data.findings-summary th:nth-child(2),
+table.data.findings-summary td:nth-child(2) {{ width: 12%; }}
+table.data.findings-summary th:nth-child(3),
+table.data.findings-summary td:nth-child(3) {{ width: 9%; }}
+table.data.findings-summary th:nth-child(4),
+table.data.findings-summary td:nth-child(4) {{ width: 13%; }}
+table.data.findings-summary th:nth-child(5),
+table.data.findings-summary td:nth-child(5) {{ width: 22%; }}
+table.data.findings-summary th:nth-child(6),
+table.data.findings-summary td:nth-child(6) {{ width: 22%; }}
 code {{ font-size: 0.74rem; }}
-.evidence {{ max-width: 280px; }}
-.path-cell {{ max-width: 140px; }}
-.path-cell code {{ white-space: normal; word-break: break-word; overflow-wrap: anywhere; }}
+.evidence, .path-cell {{
+  max-width: none;
+}}
+.evidence, .path-cell code {{
+  display: block;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}}
 .preview {{ white-space: pre-wrap; max-width: 420px; }}
 .pill {{
   display: inline-block;
@@ -1832,11 +1859,20 @@ footer {{
   .letterhead-brand .brand {{ color: var(--brand) !important; }}
   .summary {{ background: #f5f5f5 !important; }}
   .pill {{ border-color: #666 !important; color: #111 !important; }}
-  table.data {{ font-size: 9.5pt; }}
-  table.data th, table.data td {{ border-color: #ccc !important; padding: 5px 6px; }}
+  table.data {{ font-size: 9.5pt; table-layout: fixed; }}
+  table.data th, table.data td {{
+    border-color: #ccc !important;
+    padding: 5px 6px;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }}
   .meta-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }}
   .meta-grid code {{ word-break: break-all !important; white-space: normal !important; }}
-  .path-cell code {{ white-space: normal; word-break: break-all; }}
+  .evidence, .path-cell code {{
+    white-space: normal !important;
+    word-break: break-all !important;
+    overflow-wrap: anywhere !important;
+  }}
   .doc-footer {{
     border-top-color: #111 !important;
     color: #444 !important;
@@ -1877,7 +1913,8 @@ footer {{
 
 <section class="panel">
   <h2>Ringkasan temuan</h2>
-  <table class="data">
+  <div class="table-wrap">
+  <table class="data findings-summary">
     <thead>
       <tr>
         <th>Label</th>
@@ -1890,6 +1927,7 @@ footer {{
     </thead>
     <tbody>{findings_rows}</tbody>
   </table>
+  </div>
 </section>
 
 {social_section}
