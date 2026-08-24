@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SATRIA",
+  "version": "0.1.0",
+  "identifier": "id.go.satria.desktop",
+  "build": {
+    "beforeDevCommand": "SATRIA_DESKTOP=1 npm run dev --prefix ../frontend",
+    "devUrl": "http://localhost:5175",
+    "beforeBuildCommand": "npm run build --prefix ../frontend",
+    "frontendDist": "../../frontend/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "SATRIA — Sistem Analisis Terpadu",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 680,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Utility",
+    "shortDescription": "SATRIA workstation",
+    "longDescription": "All-in-one forensic analysis workstation — UI + local API sidecar."
+  }
+}

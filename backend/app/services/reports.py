@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.acquisition.social_ocr import repair_ocr_link_text
+from app.core.branding import PRODUCT_FULL_NAME, PRODUCT_NAME, PRODUCT_TAGLINE
 from app.core.config import settings
 from app.core.db import db
 
@@ -31,8 +32,27 @@ MAX_SOCIAL_REPORT_ITEMS = 500
 MAX_SOCIAL_PREVIEW_CHARS = 2_000
 REPORT_CATEGORY_LABELS = {
     "ketelanjangan": "Ketelanjangan / konten eksplisit",
+    "konten_visual": "Konten visual berisiko",
+    "konten visual": "Konten visual berisiko",
+    "konten_teks": "Teks berisiko",
+    "dokumen": "Dokumen",
+    "pesan": "Pesan",
+    "audio": "Audio / rekaman",
+    "video": "Video",
+    "politik": "Konten politik",
+    "makar": "Indikasi makar",
+    "senjata": "Senjata / bom",
+    "lainnya": "Lainnya",
 }
 REPORT_SOURCE_LABELS = {
+    "image": "Foto / screenshot",
+    "video": "Video",
+    "audio": "Audio",
+    "document": "Dokumen",
+    "text": "Teks",
+    "gallery": "Galeri HP",
+    "dcim": "Kamera HP",
+    "download": "Folder unduhan",
     "recovered_trash": "Sampah / media terhapus",
     "ios_hidden": "Photos Tersembunyi (iOS)",
     "ios_recently_deleted": "Baru Dihapus (iOS)",
@@ -64,6 +84,11 @@ RECOVERY_STATE_LABELS = {
     "complete": "selesai",
     "partial": "sebagian",
     "unavailable": "tidak tersedia",
+}
+REVIEW_STATUS_LABELS = {
+    "pending": "Menunggu",
+    "confirmed": "Dikonfirmasi",
+    "rejected": "Ditolak",
 }
 PROFILE_USERNAME = re.compile(r"(?<![A-Za-z0-9._])@([A-Za-z0-9._]{2,30})")
 PROFILE_LINK = re.compile(
@@ -266,6 +291,18 @@ def _ms(v: float) -> str:
     if v < 1000:
         return f"{v:.0f} ms"
     return f"{v / 1000:.2f} s"
+
+
+def _fmt_bytes(value: object) -> str:
+    try:
+        n = int(value or 0)
+    except (TypeError, ValueError):
+        return "0 B"
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
 
 
 def _esc(value: object) -> str:
@@ -1038,6 +1075,26 @@ async def build_session_report(session_id: str) -> dict:
     progress = json.loads(row["progress_json"])
     timing = json.loads(row["timing_json"])
     social_accounts, social_total, social_truncated = await _social_report_data(session_id)
+    participant = None
+    try:
+        raw_participant = row["participant_json"]
+    except (KeyError, IndexError):
+        raw_participant = None
+    if raw_participant:
+        try:
+            parsed = json.loads(raw_participant)
+            if isinstance(parsed, dict) and (
+                str(parsed.get("full_name") or "").strip()
+                or str(parsed.get("registration_no") or "").strip()
+            ):
+                participant = {
+                    "full_name": str(parsed.get("full_name") or "").strip(),
+                    "registration_no": str(parsed.get("registration_no") or "").strip(),
+                    "nik": str(parsed.get("nik") or "").strip() or None,
+                    "organization": str(parsed.get("organization") or "").strip() or None,
+                }
+        except (TypeError, json.JSONDecodeError):
+            participant = None
 
     by_cat: dict[str, int] = {}
     by_layer: dict[str, int] = {}
@@ -1059,6 +1116,10 @@ async def build_session_report(session_id: str) -> dict:
             "status": row["status"],
             "recommendation": row["recommendation"],
             "acquisition_method": progress.get("acquisition_method", "unknown"),
+            "authorized_by": progress.get("authorized_by"),
+            "authorized_at": progress.get("authorized_at"),
+            "authorize_note": progress.get("authorize_note"),
+            "participant": participant,
         },
         "metrics": {
             "files": files["c"] if files else 0,
@@ -1096,130 +1157,756 @@ async def build_session_report(session_id: str) -> dict:
     return report
 
 
-def report_to_html(report: dict) -> str:
+def _rec_badge_class(recommendation: str | None) -> str:
+    if recommendation == "TIDAK LULUS":
+        return "pill bad"
+    if recommendation == "MENUNGGU REVIEW":
+        return "pill warn"
+    if recommendation == "LULUS":
+        return "pill ok"
+    return "pill"
+
+
+def _review_pill(status: str | None) -> str:
+    label = REVIEW_STATUS_LABELS.get(status or "", status or "—")
+    if status == "confirmed":
+        css = "pill bad"
+    elif status == "pending":
+        css = "pill warn"
+    else:
+        css = "pill muted"
+    return f'<span class="{css}">{_esc(label)}</span>'
+
+
+def _mode_label(mode: object) -> str:
+    key = "" if mode is None else str(mode).strip().lower()
+    if key == "full":
+        return "Penuh"
+    if key == "quick":
+        return "Cepat"
+    return key or "—"
+
+
+def _short_text(value: object, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return "—"
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)] + "…"
+
+
+def _short_path(value: object, limit: int = 52) -> str:
+    path = str(value or "").strip() or "—"
+    if path == "—":
+        return path
+    base = path.rsplit("/", 1)[-1]
+    # Path teknis .imgmeta/.vidmeta — tampilkan nama berkas saja
+    if base.endswith((".imgmeta", ".vidmeta", ".json")) or len(path) > limit:
+        return base if len(base) <= limit else base[: max(1, limit - 1)] + "…"
+    if len(path) <= limit:
+        return path
+    return f"…/{base}" if len(base) < limit else base[: max(1, limit - 1)] + "…"
+
+
+def _format_generated_at(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%d %b %Y · %H:%M")
+    except ValueError:
+        return raw
+
+
+def _executive_summary(
+    recommendation: str | None,
+    *,
+    pending: int,
+    confirmed: int,
+    rejected: int,
+    total: int,
+) -> str:
+    if recommendation == "LULUS":
+        if total == 0:
+            return "Tidak ada sinyal indikasi pada sesi ini. Rekomendasi sistem: LULUS."
+        return (
+            f"Dari {total} sinyal, {confirmed} dikonfirmasi dan {rejected} ditolak. "
+            "Rekomendasi sistem: LULUS."
+        )
+    if recommendation == "MENUNGGU REVIEW":
+        return (
+            f"Masih ada {pending} temuan menunggu verifikasi analis "
+            f"(total sinyal {total}). Pengesahan belum dapat dilakukan."
+        )
+    if recommendation == "TIDAK LULUS":
+        return (
+            f"{confirmed} temuan dikonfirmasi analis dari {total} sinyal "
+            f"({rejected} ditolak, {pending} menunggu). Rekomendasi sistem: TIDAK LULUS."
+        )
+    return "Rekomendasi belum tersedia untuk sesi ini."
+
+
+def _finding_evidence(finding: dict) -> str:
+    evidence = finding.get("evidence")
+    if isinstance(evidence, str):
+        raw = evidence.strip()
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                evidence = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return _short_text(raw, 100)
+        else:
+            return _short_text(raw, 100)
+
+    if isinstance(evidence, dict):
+        name = str(evidence.get("name") or evidence.get("file") or "").strip()
+        tags = evidence.get("tags")
+        tag_bits: list[str] = []
+        if isinstance(tags, list):
+            tag_bits = [str(t).strip() for t in tags if str(t).strip()][:4]
+        elif isinstance(tags, str) and tags.strip():
+            tag_bits = [tags.strip()]
+
+        parts: list[str] = []
+        if name:
+            parts.append(name)
+        if tag_bits:
+            parts.append(", ".join(tag_bits))
+        keyframes = evidence.get("keyframes")
+        if keyframes not in (None, "", 0) and not tag_bits:
+            parts.append(f"{keyframes} keyframe")
+        if parts:
+            return _short_text(" · ".join(parts), 100)
+        for key in ("snippet", "text", "ocr", "summary"):
+            if evidence.get(key):
+                return _short_text(evidence.get(key), 100)
+        return "—"
+
+    return _short_text(evidence, 100)
+
+
+def _social_account_html(account: dict) -> str:
+    username = account.get("username")
+    user_suffix = f" · @{_esc(username)}" if username else ""
+    return (
+        "<article class=\"account-card\">"
+        f"<h3>{_esc(_social_account_heading(account))}</h3>"
+        f"<p class=\"muted\">{_esc(account.get('display_name') or '—')}{user_suffix}</p>"
+        f"<p>{_esc(_short_text(account.get('bio') or 'Bio tidak terbaca', 220))}</p>"
+        f"<p class=\"links\">{_esc(', '.join(account.get('profile_links', [])) or '—')}</p>"
+        "</article>"
+    )
+
+
+def report_to_html(report: dict, *, print_mode: bool = False) -> str:
     s = report["session"]
     m = report["metrics"]
     b = report["breakdown"]
-    rows = "".join(
-        "<tr>"
-        f"<td>{_esc(f['label'])}</td>"
-        f"<td>{_esc(_report_label(f['category'], REPORT_CATEGORY_LABELS))}</td>"
-        f"<td>{_esc(_report_label(f['source'], REPORT_SOURCE_LABELS))}</td>"
-        f"<td>{_esc(f['layer'])}</td>"
-        f"<td>{f['confidence']:.0%}</td>"
-        f"<td><code>{_esc(f['path'])}</code></td>"
-        "</tr>"
-        for f in report["findings"][:200]
-    )
-    cat = (
-        "".join(
-            f"<li>{_esc(_report_label(k, REPORT_CATEGORY_LABELS))}: "
-            f"<b>{_esc(v)}</b></li>"
-            for k, v in b["by_category"].items()
-        )
-        or "<li>-</li>"
-    )
     progress = m.get("progress") if isinstance(m.get("progress"), dict) else {}
-    recovery_state = progress.get("recovery_state")
-    recovery_metric = ""
-    if recovery_state:
-        state_label = _report_label(recovery_state, RECOVERY_STATE_LABELS)
-        recovery_metric = (
-            "<li>Recovery sampah Android: "
-            f"{_esc(progress.get('recovery_captured', 0))} item · "
-            f"{_esc(progress.get('recovery_bytes', 0))} bytes · "
-            f"{_esc(state_label)} · "
-            f"{_esc(progress.get('recovery_warning_count', 0))} peringatan · "
-            f"cache { _esc(progress.get('recovery_cache_captured', 0))} preview/"
-            f"{ _esc(progress.get('recovery_cache_sources', 0))} sumber</li>"
+    timing = m.get("timing") if isinstance(m.get("timing"), dict) else {}
+    findings = list(report.get("findings") or [])
+    social_accounts = list(report.get("social_accounts") or [])
+
+    pending = sum(1 for f in findings if f.get("review_status") == "pending")
+    confirmed = sum(1 for f in findings if f.get("review_status") == "confirmed")
+    rejected = sum(1 for f in findings if f.get("review_status") == "rejected")
+    total_findings = int(m.get("findings") or len(findings))
+    recommendation = s.get("recommendation")
+    summary = _executive_summary(
+        recommendation,
+        pending=pending,
+        confirmed=confirmed,
+        rejected=rejected,
+        total=total_findings,
+    )
+
+    findings_rows = "".join(
+        "<tr>"
+        f"<td>{_esc(f.get('label'))}</td>"
+        f"<td>{_esc(_report_label(f.get('source'), REPORT_SOURCE_LABELS))}</td>"
+        f"<td>{float(f.get('confidence') or 0):.0%}</td>"
+        f"<td>{_review_pill(f.get('review_status'))}</td>"
+        f"<td class=\"evidence\">{_esc(_finding_evidence(f))}</td>"
+        f"<td class=\"path-cell\"><code>{_esc(_short_path(f.get('path')))}</code></td>"
+        "</tr>"
+        for f in findings[:200]
+    ) or '<tr><td colspan="6">Tidak ada temuan</td></tr>'
+
+    cat_items = (
+        "".join(
+            f"<li><span>{_esc(_report_label(k, REPORT_CATEGORY_LABELS))}</span>"
+            f"<strong>{_esc(v)}</strong></li>"
+            for k, v in sorted(
+                (b.get("by_category") or {}).items(),
+                key=lambda item: (-int(item[1]), str(item[0])),
+            )
         )
+        or "<li><span>Tidak ada kategori</span><strong>0</strong></li>"
+    )
+
+    source_items = (
+        "".join(
+            f"<li><span>{_esc(_report_label(k, REPORT_SOURCE_LABELS))}</span>"
+            f"<strong>{_esc(v)}</strong></li>"
+            for k, v in sorted(
+                (b.get("by_source") or {}).items(),
+                key=lambda item: (-int(item[1]), str(item[0])),
+            )
+        )
+        or "<li><span>Tidak ada sumber</span><strong>0</strong></li>"
+    )
+
+    files_count = int(m.get("files") or 0)
+    bytes_label = _fmt_bytes(m.get("bytes", 0))
+    analyzed = int(progress.get("files_analyzed") or 0)
+    evidence_stats = f"""
+    <li><span>Total temuan</span><strong>{_esc(total_findings)}</strong></li>
+    <li><span>Dikonfirmasi</span><strong>{confirmed}</strong></li>
+    <li><span>Ditolak</span><strong>{rejected}</strong></li>
+    <li><span>Menunggu verifikasi</span><strong>{pending}</strong></li>
+    <li><span>Berkas diperiksa</span><strong>{_esc(files_count)} · {_esc(bytes_label)}</strong></li>
+"""
+    if analyzed and analyzed != files_count:
+        evidence_stats += (
+            f"<li><span>Berkas dianalisis</span><strong>{_esc(analyzed)}</strong></li>"
+        )
+
+    recovery_metric = ""
+    if progress.get("recovery_state"):
+        state_label = _report_label(progress["recovery_state"], RECOVERY_STATE_LABELS)
+        recovery_metric = (
+            "<li><span>Recovery sampah Android</span>"
+            f"<strong>{_esc(progress.get('recovery_captured', 0))} item · "
+            f"{_esc(state_label)}</strong></li>"
+        )
+
     ios_library_metric = ""
     if progress.get("ios_library_state"):
         ios_library_metric = (
-            "<li>Recovery Photos iOS: "
-            f"Hidden {_esc(progress.get('ios_hidden_captured', 0))} · "
-            f"baru dihapus {_esc(progress.get('ios_recently_deleted_captured', 0))} · "
-            f"cache {_esc(progress.get('ios_cache_captured', 0))} · "
-            f"jejak purge {_esc(progress.get('ios_deleted_metadata_captured', 0))} · "
-            f"{_esc(progress.get('ios_library_warning_count', 0))} peringatan</li>"
+            "<li><span>Recovery Photos iOS</span>"
+            f"<strong>Hidden {_esc(progress.get('ios_hidden_captured', 0))} · "
+            f"hapus {_esc(progress.get('ios_recently_deleted_captured', 0))}</strong></li>"
         )
-    rec = s["recommendation"] or "-"
-    if s["recommendation"] == "TIDAK LULUS":
-        rec_class = "bad"
-    elif s["recommendation"] == "MENUNGGU REVIEW":
-        rec_class = "warn"
-    else:
-        rec_class = ""
-    rec_badge = f'<span class="badge {rec_class}">{_esc(rec)}</span>'
-    social_accounts = report.get("social_accounts", [])
-    account_rows = "".join(
-        "<div class=\"account\">"
-        f"<h3>{_esc(_social_account_heading(account))}</h3>"
-        f"<div><b>Nama tampilan:</b> {_esc(account.get('display_name') or '-')}</div>"
-        f"<div><b>Bio / profil terlihat:</b><br>{_esc(account.get('bio') or '-')}</div>"
-        f"<div><b>Link profil:</b> {_esc(', '.join(account.get('profile_links', [])) or '-')}</div>"
-        f"<div><b>Metrik profil:</b> {_esc(json.dumps(account.get('profile_metrics', {}), ensure_ascii=False))}</div>"
-        "</div>"
-        for account in social_accounts
+
+    rec = recommendation or "—"
+    rec_badge = f'<span class="{_rec_badge_class(recommendation)}">{_esc(rec)}</span>'
+
+    participant = s.get("participant") if isinstance(s.get("participant"), dict) else None
+    has_participant = bool(
+        participant
+        and (
+            str(participant.get("full_name") or "").strip()
+            or str(participant.get("registration_no") or "").strip()
+        )
     )
+    if has_participant:
+        nik_val = str(participant.get("nik") or "").strip() or "—"
+        org_val = str(participant.get("organization") or "").strip() or "—"
+        identity_section = f"""
+<section class="panel">
+  <h2>Identitas peserta seleksi</h2>
+  <div class="meta-grid">
+    <div><span>Nama lengkap</span><strong>{_esc(participant.get('full_name') or '—')}</strong></div>
+    <div><span>No. peserta / registrasi</span><strong>{_esc(participant.get('registration_no') or '—')}</strong></div>
+    <div><span>NIK</span><strong>{_esc(nik_val)}</strong></div>
+    <div><span>Instansi / formasi</span><strong>{_esc(org_val)}</strong></div>
+    <div><span>Rekomendasi</span><strong>{rec_badge}</strong></div>
+  </div>
+  <div class="kpi-row">
+    <div class="kpi"><span>Menunggu</span><strong>{pending}</strong></div>
+    <div class="kpi"><span>Dikonfirmasi</span><strong>{confirmed}</strong></div>
+    <div class="kpi"><span>Ditolak</span><strong>{rejected}</strong></div>
+    <div class="kpi"><span>Total temuan</span><strong>{_esc(total_findings)}</strong></div>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Detail teknis akuisisi</h2>
+  <div class="meta-grid">
+    <div><span>Sesi</span><strong><code title="{_esc(s.get('id'))}">{_esc(str(s.get('id', ''))[:8])}</code></strong></div>
+    <div><span>Label sesi</span><strong>{_esc(s.get('label'))}</strong></div>
+    <div><span>ID perangkat</span><strong>{_esc(s.get('device_id'))} ({_esc(s.get('device_type'))})</strong></div>
+    <div><span>Mode</span><strong>{_esc(_mode_label(s.get('mode')))}</strong></div>
+    <div><span>Cara ambil data</span><strong>{_esc(_report_method(s.get('acquisition_method')))}</strong></div>
+  </div>
+</section>
+"""
+    else:
+        identity_section = f"""
+<section class="panel">
+  <h2>Identitas peserta seleksi</h2>
+  <p class="muted" style="margin:0 0 12px;color:#5c6570;font-size:13px">
+    Identitas peserta belum diisi saat akuisisi. Detail teknis sesi ditampilkan di bawah.
+  </p>
+  <div class="meta-grid">
+    <div><span>Sesi</span><strong><code title="{_esc(s.get('id'))}">{_esc(str(s.get('id', ''))[:8])}</code></strong></div>
+    <div><span>Label / perangkat</span><strong>{_esc(s.get('label'))}</strong></div>
+    <div><span>ID perangkat</span><strong>{_esc(s.get('device_id'))} ({_esc(s.get('device_type'))})</strong></div>
+    <div><span>Mode</span><strong>{_esc(_mode_label(s.get('mode')))}</strong></div>
+    <div><span>Cara ambil data</span><strong>{_esc(_report_method(s.get('acquisition_method')))}</strong></div>
+    <div><span>Rekomendasi</span><strong>{rec_badge}</strong></div>
+  </div>
+  <div class="kpi-row">
+    <div class="kpi"><span>Menunggu</span><strong>{pending}</strong></div>
+    <div class="kpi"><span>Dikonfirmasi</span><strong>{confirmed}</strong></div>
+    <div class="kpi"><span>Ditolak</span><strong>{rejected}</strong></div>
+    <div class="kpi"><span>Total temuan</span><strong>{_esc(total_findings)}</strong></div>
+  </div>
+</section>
+"""
+
+    letterhead_participant = ""
+    if has_participant:
+        letterhead_participant = (
+            f"{_esc(participant.get('full_name'))}<br/>"
+            f"{_esc(participant.get('registration_no') or '')}<br/>"
+        )
+
+    account_blocks = "".join(_social_account_html(account) for account in social_accounts)
     social_rows = "".join(
         "<tr>"
-        f"<td>{_esc(account['platform'])}</td>"
-        f"<td>{_esc(item['scope_label'])}</td>"
-        f"<td>{_esc(item.get('observed_at') or '-')}</td>"
-        f"<td class=\"preview\">{_esc(item.get('preview_text') or '-')}</td>"
+        f"<td>{_esc(account.get('platform'))}</td>"
+        f"<td>{_esc(item.get('scope_label'))}</td>"
+        f"<td>{_esc(item.get('observed_at') or '—')}</td>"
+        f"<td class=\"preview\">{_esc(_short_text(item.get('preview_text'), 160))}</td>"
         "</tr>"
         for account in social_accounts
         for item in account.get("items", [])
     )
+    has_social = bool(social_accounts) or bool(social_rows)
+
+    if s.get("authorized_by"):
+        when = f" · {_esc(_format_generated_at(s.get('authorized_at')))}" if s.get("authorized_at") else ""
+        authorize_block = (
+            "<section class=\"panel signature\">"
+            "<h2>Pengesahan pimpinan</h2>"
+            f"<p><span class=\"pill ok\">Disahkan</span> "
+            f"<strong>{_esc(s['authorized_by'])}</strong>{when}</p>"
+            f"<p class=\"note\">{_esc(s.get('authorize_note') or '—')}</p>"
+            "</section>"
+        )
+    else:
+        authorize_block = (
+            "<section class=\"panel signature\">"
+            "<h2>Pengesahan pimpinan</h2>"
+            "<p class=\"muted\">Belum disahkan — ruang tanda tangan untuk pimpinan.</p>"
+            "<div class=\"sign-grid\">"
+            "<div><span>Nama / jabatan</span><div class=\"sign-line\"></div></div>"
+            "<div><span>Tanggal</span><div class=\"sign-line\"></div></div>"
+            "<div><span>Tanda tangan</span><div class=\"sign-box\"></div></div>"
+            "</div>"
+            "</section>"
+        )
+
+    social_section = ""
+    if has_social:
+        social_section = f"""
+<section class="panel">
+  <h2>Data akun &amp; sosial</h2>
+  {account_blocks or '<p class="muted">Tidak ada profil sosial terverifikasi.</p>'}
+  <table class="data">
+    <thead><tr><th>Platform</th><th>Jenis</th><th>Waktu</th><th>Preview</th></tr></thead>
+    <tbody>{social_rows or '<tr><td colspan="4">Tidak ada aktivitas sosial yang dikoleksi.</td></tr>'}</tbody>
+  </table>
+</section>
+"""
+
+    body_class = "doc print-doc" if print_mode else "doc screen-doc"
+    toolbar = ""
+    if print_mode:
+        toolbar = (
+            '<div class="toolbar no-print">'
+            "<div><strong>Pratinjau cetak SATRIA</strong>"
+            "<p class=\"muted\" style=\"margin:4px 0 0\">"
+            "Di dialog cetak Chrome: More settings → uncheck "
+            "<em>Headers and footers</em> agar tanggal/URL tidak ikut tercetak. "
+            "Lalu Save as PDF."
+            "</p></div>"
+            '<button type="button" onclick="window.print()">Cetak / Simpan PDF</button>'
+            "</div>"
+        )
+    auto_print = (
+        "<script>window.addEventListener('load',function(){setTimeout(function(){window.print();},250);});</script>"
+        if print_mode
+        else ""
+    )
+    generated = _format_generated_at(report.get("generated_at"))
+
     return f"""<!DOCTYPE html>
 <html lang="id"><head><meta charset="utf-8"/>
-<title>SADT Report — {_esc(s['id'][:8])}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>{_esc(PRODUCT_NAME)} · Laporan · {_esc(str(s.get('id', ''))[:8])}</title>
 <style>
-body{{font-family:ui-monospace,Menlo,monospace;background:#061018;color:#d7ece8;padding:24px}}
-h1,h2{{color:#00e5c8;letter-spacing:.06em;text-transform:uppercase}}
-.box{{border:1px solid rgba(0,229,200,.25);padding:14px;margin:12px 0}}
-table{{width:100%;border-collapse:collapse;font-size:13px}}
-th,td{{border-bottom:1px solid rgba(0,229,200,.15);padding:8px;text-align:left;vertical-align:top}}
-.badge{{display:inline-block;padding:4px 8px;border:1px solid #00e5c8;color:#00e5c8}}
-.bad{{border-color:#ff4d5a;color:#ff4d5a}}
-.warn{{border-color:#e6a23c;color:#e6a23c}}
-.account{{border-top:1px solid rgba(0,229,200,.15);padding:10px 0}}
-.preview{{white-space:pre-wrap;max-width:760px}}
-</style></head><body>
-<h1>SADT // OPS REPORT</h1>
-<div class="box">
-  <div>Session: <code>{_esc(s['id'])}</code></div>
-  <div>Device: {_esc(s['label'])} / {_esc(s['device_id'])} ({_esc(s['device_type'])})</div>
-  <div>Mode: {_esc(s['mode'])} · Method: {_esc(_report_method(s['acquisition_method']))}</div>
-  <div>Recommendation: {rec_badge}</div>
-</div>
-<div class="box">
-  <h2>Data akun & sosial yang dikoleksi</h2>
-  {account_rows or '<div>Tidak ada data sosial terverifikasi.</div>'}
-  <table><thead><tr><th>Platform</th><th>Jenis data</th><th>Waktu</th><th>Preview</th></tr></thead>
-  <tbody>{social_rows or '<tr><td colspan="4">Tidak ada postingan / tweet / arsip / komentar yang dikoleksi.</td></tr>'}</tbody></table>
-</div>
-<div class="box">
-  <h2>Metrics</h2>
-  <ul>
-    <li>Files: {_esc(m['files'])} ({_esc(m['bytes'])} bytes)</li>
-    <li>Findings: {_esc(m['findings'])}</li>
-    <li>Acquire: {_esc(_ms(m['timing'].get('t_acquire_ms',0)))}</li>
-    <li>Analyze: {_esc(_ms(m['timing'].get('t_analyze_ms',0)))}</li>
-    <li>Total: {_esc(_ms(m['timing'].get('t_total_ms',0)))}</li>
+:root {{
+  --ink: #1a1a1a;
+  --muted: #5c6570;
+  --line: #d7dbe0;
+  --panel: #ffffff;
+  --bg: #f4f5f7;
+  --brand: #9b1c2e;
+  --gold: #8a6a12;
+  --ok: #1f6b45;
+  --warn: #9a6700;
+  --bad: #b42318;
+}}
+* {{ box-sizing: border-box; }}
+body {{
+  margin: 0;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+  line-height: 1.45;
+}}
+.screen-doc {{
+  --ink: #ece8df;
+  --muted: #9aa3b2;
+  --line: rgba(255,255,255,0.12);
+  --panel: #12161f;
+  --bg: #0a0c10;
+  --brand: #e04555;
+  --gold: #e8c547;
+  --ok: #3d9b6c;
+  --warn: #e6a23c;
+  --bad: #e04555;
+}}
+.wrap {{ max-width: 980px; margin: 0 auto; padding: 24px; }}
+.toolbar {{
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}}
+.toolbar button {{
+  border: 1px solid var(--gold);
+  background: #fff8e1;
+  color: #1a1208;
+  padding: 8px 12px;
+  font-weight: 700;
+  cursor: pointer;
+}}
+header.cover {{
+  border: 1px solid var(--line);
+  border-top: 4px solid var(--brand);
+  background: var(--panel);
+  padding: 0;
+  margin-bottom: 14px;
+  overflow: hidden;
+}}
+.letterhead {{
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--line);
+}}
+.letterhead-brand .brand {{
+  font-size: 1rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--brand);
+  font-weight: 800;
+  margin: 0;
+}}
+.letterhead-brand .org {{
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  max-width: 42ch;
+  line-height: 1.35;
+}}
+.letterhead-meta {{
+  text-align: right;
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.45;
+  white-space: nowrap;
+}}
+.letterhead-meta strong {{
+  display: block;
+  color: var(--ink);
+  font-size: 0.8rem;
+}}
+.cover-body {{
+  padding: 14px 20px 16px;
+}}
+.cover-body h1 {{
+  margin: 0 0 6px;
+  font-size: 1.25rem;
+}}
+.cover-rec {{
+  margin: 0 0 12px;
+  font-size: 0.9rem;
+}}
+.summary {{
+  margin-top: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--brand);
+  background: rgba(155, 28, 46, 0.04);
+}}
+.screen-doc .summary {{ background: rgba(224, 69, 85, 0.08); }}
+.summary strong {{ display: block; margin-bottom: 4px; font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; }}
+.doc-footer {{
+  margin-top: 18px;
+  padding-top: 10px;
+  border-top: 2px solid var(--ink);
+  font-size: 0.7rem;
+  color: var(--muted);
+  display: grid;
+  gap: 4px;
+}}
+.doc-footer .confidential {{
+  color: var(--brand);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}}
+.doc-footer .meta-line {{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}}
+.panel {{
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 6px;
+  padding: 16px 18px;
+  margin-bottom: 12px;
+}}
+h2 {{
+  margin: 0 0 12px;
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--gold);
+}}
+.meta-grid {{
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 14px;
+}}
+.meta-grid > div {{
+  min-width: 0;
+}}
+.meta-grid span {{
+  display: block;
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}}
+.meta-grid strong {{
+  display: block;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}}
+.meta-grid code {{
+  display: block;
+  font-size: 0.72rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}}
+.kpi-row {{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}}
+.kpi {{
+  min-width: 92px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}}
+.kpi span {{ display: block; font-size: 0.62rem; color: var(--muted); text-transform: uppercase; }}
+.kpi strong {{ font-size: 1.1rem; font-variant-numeric: tabular-nums; }}
+table.data {{
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}}
+table.data th, table.data td {{
+  border-bottom: 1px solid var(--line);
+  padding: 7px 8px;
+  text-align: left;
+  vertical-align: top;
+}}
+table.data th {{
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}}
+code {{ font-size: 0.74rem; }}
+.evidence {{ max-width: 280px; }}
+.path-cell {{ max-width: 140px; }}
+.path-cell code {{ white-space: normal; word-break: break-word; overflow-wrap: anywhere; }}
+.preview {{ white-space: pre-wrap; max-width: 420px; }}
+.pill {{
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}}
+.pill.bad {{ border-color: var(--bad); color: var(--bad); }}
+.pill.warn {{ border-color: var(--warn); color: var(--warn); }}
+.pill.ok {{ border-color: var(--ok); color: var(--ok); }}
+.pill.muted {{ color: var(--muted); }}
+.account-card {{ border-top: 1px solid var(--line); padding: 10px 0; }}
+.account-card:first-child {{ border-top: 0; padding-top: 0; }}
+.account-card h3 {{ margin: 0 0 4px; font-size: 0.95rem; }}
+.muted {{ color: var(--muted); font-size: 0.85rem; }}
+.links {{ font-family: ui-monospace, monospace; font-size: 0.75rem; word-break: break-all; }}
+ul.stats {{ list-style: none; margin: 0; padding: 0; }}
+ul.stats li {{
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}}
+ul.stats li span {{ color: var(--muted); }}
+.sign-grid {{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 12px;
+}}
+.sign-grid span {{
+  display: block;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 8px;
+}}
+.sign-line {{
+  border-bottom: 1px solid var(--ink);
+  height: 28px;
+}}
+.sign-box {{
+  border: 1px solid var(--ink);
+  min-height: 72px;
+}}
+footer {{
+  margin-top: 16px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}}
+.note {{ margin: 8px 0 0; color: var(--muted); }}
+@media print {{
+  body, .print-doc, .screen-doc {{
+    background: #fff !important;
+    color: #111 !important;
+  }}
+  .wrap {{ max-width: none; padding: 0; }}
+  .no-print {{ display: none !important; }}
+  .panel, header.cover {{
+    background: #fff !important;
+    border-color: #ccc !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }}
+  h1, h2, .brand {{ color: #111 !important; }}
+  .letterhead-brand .brand {{ color: var(--brand) !important; }}
+  .summary {{ background: #f5f5f5 !important; }}
+  .pill {{ border-color: #666 !important; color: #111 !important; }}
+  table.data {{ font-size: 9.5pt; }}
+  table.data th, table.data td {{ border-color: #ccc !important; padding: 5px 6px; }}
+  .meta-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }}
+  .meta-grid code {{ word-break: break-all !important; white-space: normal !important; }}
+  .path-cell code {{ white-space: normal; word-break: break-all; }}
+  .doc-footer {{
+    border-top-color: #111 !important;
+    color: #444 !important;
+  }}
+  .doc-footer .confidential {{ color: #9b1c2e !important; }}
+  a {{ color: inherit; text-decoration: none; }}
+}}
+@page {{ size: A4; margin: 12mm 12mm 14mm 12mm; }}
+</style></head>
+<body class="{body_class}">
+<div class="wrap">
+{toolbar}
+<header class="cover">
+  <div class="letterhead">
+    <div class="letterhead-brand">
+      <p class="brand">{_esc(PRODUCT_NAME)}</p>
+      <p class="org">{_esc(PRODUCT_FULL_NAME)}</p>
+    </div>
+    <div class="letterhead-meta">
+      <strong>Dokumen internal panitia</strong>
+      {letterhead_participant}Sesi {_esc(str(s.get('id', ''))[:8])}<br/>
+      {_esc(generated)}
+    </div>
+  </div>
+  <div class="cover-body">
+    <h1>Laporan Hasil Analisis</h1>
+    <p class="cover-rec">Rekomendasi sistem: {rec_badge}</p>
+    <div class="summary">
+      <strong>Ringkasan eksekutif</strong>
+      {_esc(summary)}
+    </div>
+  </div>
+</header>
+
+{identity_section}
+
+{authorize_block}
+
+<section class="panel">
+  <h2>Ringkasan temuan</h2>
+  <table class="data">
+    <thead>
+      <tr>
+        <th>Label</th>
+        <th>Sumber</th>
+        <th>Keyakinan</th>
+        <th>Verifikasi</th>
+        <th>Bukti singkat</th>
+        <th>Berkas</th>
+      </tr>
+    </thead>
+    <tbody>{findings_rows}</tbody>
+  </table>
+</section>
+
+{social_section}
+
+<section class="panel">
+  <h2>Ringkasan bukti</h2>
+  <ul class="stats">
+    {evidence_stats}
     {recovery_metric}
     {ios_library_metric}
   </ul>
-  <h2>By category</h2>
-  <ul>{cat}</ul>
+  <h2 style="margin-top:16px">Per kategori</h2>
+  <ul class="stats">{cat_items}</ul>
+  <h2 style="margin-top:16px">Per jenis sumber</h2>
+  <ul class="stats">{source_items}</ul>
+</section>
+
+<footer class="doc-footer">
+  <div class="confidential">Rahasia — hanya untuk keperluan panitia seleksi</div>
+  <div class="meta-line">
+    <span>{_esc(PRODUCT_NAME)}</span>
+    <span>Sesi {_esc(str(s.get('id', ''))[:8])}</span>
+    <span>Dibuat {_esc(generated)}</span>
+  </div>
+</footer>
 </div>
-<div class="box">
-  <h2>Findings</h2>
-  <table><thead><tr><th>Label</th><th>Category</th><th>Source</th><th>Layer</th><th>Conf</th><th>Path</th></tr></thead>
-  <tbody>{rows or '<tr><td colspan="6">No findings</td></tr>'}</tbody></table>
-</div>
-<p>Generated {_esc(report['generated_at'])} · {_esc(settings.app_name)}</p>
+{auto_print}
 </body></html>"""
 
 
