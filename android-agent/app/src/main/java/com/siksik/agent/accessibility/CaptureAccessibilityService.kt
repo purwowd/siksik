@@ -26,6 +26,9 @@ class CaptureAccessibilityService : AccessibilityService() {
         super.onCreate()
         store = CommunicationCaptureStore(applicationContext)
         textOnlyCover = TextOnlyCrawlCover(this)
+        // An overlay window cannot survive a service-process recreation. Clear
+        // any persisted attach marker before accepting host probe results.
+        TextOnlyCrawlCoverState.markAttached(applicationContext, false)
     }
 
     override fun onServiceConnected() {
@@ -105,6 +108,36 @@ class CaptureAccessibilityService : AccessibilityService() {
         return dispatchGesture(gesture, null, null)
     }
 
+    private fun dispatchSwipe(
+        xFrom: Int,
+        yFrom: Int,
+        xTo: Int,
+        yTo: Int,
+        durationMs: Long,
+    ): Boolean {
+        val metrics = resources.displayMetrics
+        if (
+            xFrom !in 0 until metrics.widthPixels || xTo !in 0 until metrics.widthPixels ||
+            yFrom !in 0 until metrics.heightPixels || yTo !in 0 until metrics.heightPixels
+        ) {
+            return false
+        }
+        val path = Path().apply {
+            moveTo(xFrom.toFloat(), yFrom.toFloat())
+            lineTo(xTo.toFloat(), yTo.toFloat())
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(
+                GestureDescription.StrokeDescription(
+                    path,
+                    0L,
+                    durationMs.coerceIn(MIN_SWIPE_DURATION_MS, MAX_SWIPE_DURATION_MS),
+                ),
+            )
+            .build()
+        return dispatchGesture(gesture, null, null)
+    }
+
     private fun updatePackageFilter(targets: Set<String>? = null) {
         val packages = targets ?: store.activeSession()?.targetPackages ?: emptySet()
         val current = serviceInfo ?: return
@@ -122,10 +155,34 @@ class CaptureAccessibilityService : AccessibilityService() {
             return true
         }
 
+        fun isTextOnlyCoverAttached(): Boolean =
+            activeService?.textOnlyCover?.isAttached() == true
+
         fun applyAccessibilityTap(x: Int, y: Int): Boolean =
             activeService?.dispatchTap(x, y) ?: false
 
+        fun applyAccessibilitySwipe(
+            xFrom: Int,
+            yFrom: Int,
+            xTo: Int,
+            yTo: Int,
+            durationMs: Long,
+        ): Boolean = activeService?.dispatchSwipe(
+            xFrom,
+            yFrom,
+            xTo,
+            yTo,
+            durationMs,
+        ) ?: false
+
+        fun applyAccessibilityBack(): Boolean =
+            activeService?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK) ?: false
+
+        fun isServiceConnected(): Boolean = activeService != null
+
         private const val MIN_CAPTURE_INTERVAL_MS = 500L
         private const val TAP_DURATION_MS = 80L
+        private const val MIN_SWIPE_DURATION_MS = 120L
+        private const val MAX_SWIPE_DURATION_MS = 1_500L
     }
 }

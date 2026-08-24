@@ -164,7 +164,7 @@ def test_email_html_preview_is_readable_and_does_not_execute_source_html() -> No
 
 
 @pytest.mark.asyncio
-async def test_gmail_fallback_uses_bound_runtime_client(monkeypatch, tmp_path: Path) -> None:
+async def test_gmail_fallback_uses_bound_runtime_client(client, monkeypatch, tmp_path: Path) -> None:
     staging = tmp_path / "fallback"
     staging.mkdir()
     received: dict[str, str | None] = {}
@@ -174,8 +174,11 @@ async def test_gmail_fallback_uses_bound_runtime_client(monkeypatch, tmp_path: P
 
     async def fake_runtime(_session_id: str):
         return SimpleNamespace(
+            session_id=_session_id,
+            serial="android-live",
             forward_host_port=38471,
             token="a" * 32,
+            token_expires_at="2099-01-01T00:00:00+00:00",
             google_account=None,
             google_token=None,
         )
@@ -184,7 +187,7 @@ async def test_gmail_fallback_uses_bound_runtime_client(monkeypatch, tmp_path: P
         def __init__(self, *_args, **_kwargs) -> None:
             pass
 
-        async def list_google_accounts(self, _session_id: str):
+        async def list_google_accounts(self, _session_id: str, **_kwargs):
             return [SimpleNamespace(name="user@example.test")]
 
         async def get_google_auth_token(self, _session_id: str, _account: str, **_kwargs):
@@ -200,8 +203,16 @@ async def test_gmail_fallback_uses_bound_runtime_client(monkeypatch, tmp_path: P
         "app.acquisition.providers.registry.AcquisitionProviderRegistry.acquire",
         fake_provider,
     )
+    async def fake_ensure(**kwargs):
+        return "user@example.test", "gmail-token"
+
     monkeypatch.setattr(agent_runtime_registry, "get", fake_runtime)
     monkeypatch.setattr("app.acquisition.agent_client.AgentClient", FakeClient)
+    monkeypatch.setattr("app.acquisition.gmail_oauth.ensure_gmail_oauth", fake_ensure)
+    async def fake_bind(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.acquisition.runtime.agent_runtime_registry.bind", fake_bind)
     monkeypatch.setattr(GmailAcquisitionService, "acquire", fake_gmail)
     monkeypatch.setattr(config.settings, "android_agent_enabled", True)
     monkeypatch.setattr(config.settings, "android_recovery_enabled", False)
@@ -305,8 +316,13 @@ async def test_gmail_rest_api_mock(client, tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_client_google_accounts_mock() -> None:
+async def test_agent_client_google_accounts_mock(monkeypatch) -> None:
     session_id = "session-agent-acc-mock-004"
+    monkeypatch.setattr(
+        "app.acquisition.agent_client.settings.gmail_client_id",
+        "667923128803-mock-client.apps.googleusercontent.com",
+    )
+    captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         url_str = str(request.url)
@@ -314,6 +330,7 @@ async def test_agent_client_google_accounts_mock() -> None:
         headers = {"x-request-id": req_id}
         if "/v1/accounts/google/token" in url_str:
             body = json.loads(request.content.decode())
+            captured.update(body)
             return httpx.Response(
                 200,
                 headers=headers,
@@ -350,3 +367,119 @@ async def test_agent_client_google_accounts_mock() -> None:
 
     token = await client.get_google_auth_token(session_id, "test.user@gmail.com")
     assert token == "ya29.mock_token_test_12345"
+    assert captured["client_id"] == "667923128803-mock-client.apps.googleusercontent.com"
+
+
+@pytest.mark.asyncio
+async def test_gmail_canonical_json_has_source_created_at(client, tmp_path: Path) -> None:
+    session_id = "session-gmail-source-time-005"
+    await _create_test_session(session_id)
+
+    staging = tmp_path / session_id
+    staging.mkdir(parents=True, exist_ok=True)
+
+    gmail_svc = GmailAcquisitionService()
+    await gmail_svc.acquire(
+        session_id=session_id,
+        staging=staging,
+        mode=AcquisitionMode.QUICK,
+        simulated=True,
+    )
+
+    row = await db.fetchone(
+        "SELECT canonical_json FROM crawl_records WHERE session_id = ? AND source_kind = 'email' LIMIT 1",
+        (session_id,),
+    )
+    assert row is not None
+    payload = json.loads(row["canonical_json"])
+    assert payload["source_created_at"]
+    assert payload["source_modified_at"]
+    assert payload["metadata"]["date_header"]
+
+
+@pytest.mark.asyncio
+async def test_gmail_acquire_uses_session_reference_for_time_scope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session_id = "session-gmail-reference-006"
+    staging = tmp_path / session_id
+    staging.mkdir(parents=True, exist_ok=True)
+    reference = datetime(2026, 2, 15, 12, 0, tzinfo=timezone.utc)
+    captured: dict[str, str] = {}
+
+    class MockAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            del args
+            return False
+
+        async def get(self, url: str, **kwargs):
+            if "/messages" in url:
+                captured["query"] = kwargs.get("params", {}).get("q", "")
+            return httpx.Response(200, json={"messages": []})
+
+    monkeypatch.setattr("app.acquisition.gmail_service.httpx.AsyncClient", MockAsyncClient)
+    gmail_svc = GmailAcquisitionService()
+    count, _ = await gmail_svc.acquire(
+        session_id=session_id,
+        staging=staging,
+        mode=AcquisitionMode.QUICK,
+        token="ya29.test",
+        account_name="user@gmail.com",
+        reference=reference,
+    )
+    assert count == 0
+    assert captured["query"] == "after:2025/11/15"
+
+
+@pytest.mark.asyncio
+async def test_ensure_gmail_oauth_publishes_awaiting_access(client, monkeypatch) -> None:
+    from app.acquisition.errors import AcquisitionError
+    from app.acquisition.gmail_oauth import ensure_gmail_oauth
+    from app.models.schemas import SessionStatus
+
+    messages: list[tuple[SessionStatus, str]] = []
+
+    async def on_progress(phase, _percent, message, **_kwargs):
+        messages.append((phase, message))
+
+    class FakeClient:
+        async def list_google_accounts(self, *_a, **_k):
+            return [SimpleNamespace(name="user@gmail.com")]
+
+        async def get_google_auth_token(self, *_a, **_k):
+            return "ya29.live"
+
+    monkeypatch.setattr("app.acquisition.gmail_oauth.settings.gmail_client_id", "client-id")
+
+    async def no_peek(*_a, **_k):
+        return None
+
+    async def no_fetch(*_a, **kwargs):
+        on_progress = kwargs.get("on_progress")
+        if on_progress is not None:
+            await on_progress(
+                SessionStatus.AWAITING_ACCESS,
+                52.0,
+                "Menunggu otorisasi Gmail di perangkat",
+            )
+        return None
+
+    monkeypatch.setattr("app.acquisition.gmail_oauth.peek_gmail_oauth_token", no_peek)
+    monkeypatch.setattr("app.acquisition.gmail_oauth.fetch_gmail_oauth_token", no_fetch)
+    with pytest.raises(AcquisitionError) as exc:
+        await ensure_gmail_oauth(
+            client=FakeClient(),
+            session_id="session-oauth-gate",
+            serial="device-1",
+            adb=None,
+            on_progress=on_progress,
+        )
+    assert exc.value.category.value == "awaiting_user"
+    assert any(phase == SessionStatus.AWAITING_ACCESS for phase, _ in messages)

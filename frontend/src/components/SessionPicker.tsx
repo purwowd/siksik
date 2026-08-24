@@ -13,18 +13,20 @@ export function SessionPicker({
   value,
   onChange,
   loading,
+  locked,
 }: {
   sessions: SessionSummary[];
   value: string | null;
   onChange: (sessionId: string) => void;
   loading?: boolean;
+  locked?: boolean;
 }) {
   return (
     <div className="session-picker">
       <label htmlFor="sadt-session-pick">Sesi aktif</label>
       <select
         id="sadt-session-pick"
-        disabled={loading || sessions.length === 0}
+        disabled={loading || sessions.length === 0 || locked}
         value={value || ""}
         onChange={(e) => {
           const id = e.target.value;

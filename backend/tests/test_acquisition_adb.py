@@ -8,14 +8,20 @@ import pytest
 from app.acquisition.adb import (
     AdbDevice,
     AsyncAdbTransport,
+    AccessibilityBindingState,
     PermissionState,
-    SpecialAccessKind,
     SpecialAccessState,
+    SpecialAccessKind,
+    accessibility_binding_state_for_component,
+    parse_accessibility_recovery_probe,
+    parse_accessibility_service_sets,
     parse_available_data_bytes,
     parse_device_unlocked,
     parse_devices,
     parse_package_dump,
     parse_runtime_permission_dump,
+    parse_text_only_cover_probe,
+    resolve_agent_forward_host,
     select_device,
     validate_serial,
 )
@@ -83,6 +89,32 @@ def test_select_device_categorizes_failures(
         select_device(devices, serial)
     assert captured.value.category == category
     assert captured.value.retryable is retryable
+
+
+@pytest.mark.unit
+def test_resolve_agent_forward_host_prefers_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SADT_AGENT_FORWARD_HOST", raising=False)
+    monkeypatch.delenv("ADB_SERVER_SOCKET", raising=False)
+    assert resolve_agent_forward_host("10.0.0.5") == "10.0.0.5"
+
+
+@pytest.mark.unit
+def test_resolve_agent_forward_host_uses_remote_adb_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SADT_AGENT_FORWARD_HOST", raising=False)
+    monkeypatch.setenv("ADB_SERVER_SOCKET", "tcp:172.21.16.1:5037")
+    assert resolve_agent_forward_host() == "172.21.16.1"
+
+
+@pytest.mark.unit
+def test_resolve_agent_forward_host_defaults_to_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SADT_AGENT_FORWARD_HOST", raising=False)
+    monkeypatch.delenv("ADB_SERVER_SOCKET", raising=False)
+    monkeypatch.setattr("app.acquisition.adb._running_under_wsl", lambda: False)
+    assert resolve_agent_forward_host() == "127.0.0.1"
 
 
 @pytest.mark.unit
@@ -174,6 +206,295 @@ def test_runtime_permission_parser_is_scoped_to_android_user() -> None:
         parse_runtime_permission_dump(output, "android.permission.READ_MEDIA_VIDEO", 0)
         == PermissionState.UNSUPPORTED
     )
+
+
+@pytest.mark.unit
+def test_parse_text_only_cover_probe_reads_broadcast_data() -> None:
+    shown = (
+        "Broadcasting: Intent { ... }\n"
+        'Broadcast completed: result=-1, data="SIKSIK_COVER_V1;status=shown"\n'
+    )
+    hidden = (
+        "Broadcasting: Intent { ... }\n"
+        'Broadcast completed: result=-1, data="SIKSIK_COVER_V1;status=hidden"\n'
+    )
+    assert parse_text_only_cover_probe(shown) == "shown"
+    assert parse_text_only_cover_probe(hidden) == "hidden"
+    assert parse_text_only_cover_probe("Broadcast completed: result=0") is None
+
+
+@pytest.mark.unit
+def test_parse_accessibility_recovery_probe_reads_broadcast_data() -> None:
+    bound = (
+        "Broadcasting: Intent { ... }\n"
+        'Broadcast completed: result=-1, data="SIKSIK_A11Y_V1;status=bound"\n'
+    )
+    crashed = (
+        "Broadcasting: Intent { ... }\n"
+        'Broadcast completed: result=-1, data="SIKSIK_A11Y_V1;status=crashed"\n'
+    )
+    assert parse_accessibility_recovery_probe(bound) == "bound"
+    assert parse_accessibility_recovery_probe(crashed) == "crashed"
+    assert parse_accessibility_recovery_probe("Broadcast completed: result=0") is None
+
+
+@pytest.mark.unit
+async def test_accessibility_ready_for_text_only_requires_master_and_binding(
+    tmp_path: Path,
+) -> None:
+    adb = executable(tmp_path)
+    component = (
+        "com.siksik.agent/com.siksik.agent.accessibility.CaptureAccessibilityService"
+    )
+
+    async def runner(argv, **_kwargs):
+        command = tuple(argv)
+        if any(part == "get-current-user" for part in command):
+            return ProcessResult(command, 0, "0\n", "")
+        if "get" in command and "accessibility_enabled" in command:
+            return ProcessResult(command, 0, "0\n", "")
+        if "dumpsys" in command and "accessibility" in command:
+            body = (
+                f"Enabled services:{{{component}}}\n"
+                f"Binding services:{{{component}}}\n"
+                "Bound services:{}\n"
+                "Crashed services:{}\n"
+            )
+            return ProcessResult(command, 0, body, "")
+        return ProcessResult(command, 0, "", "")
+
+    transport = AsyncAdbTransport(str(adb), runner=runner)
+    assert await transport.accessibility_ready_for_text_only("serial-1", component) is False
+
+    async def runner_bound(argv, **_kwargs):
+        command = tuple(argv)
+        if any(part == "get-current-user" for part in command):
+            return ProcessResult(command, 0, "0\n", "")
+        if "get" in command and "accessibility_enabled" in command:
+            return ProcessResult(command, 0, "1\n", "")
+        if "dumpsys" in command and "accessibility" in command:
+            body = (
+                f"Enabled services:{{{component}}}\n"
+                "Binding services:{}\n"
+                f"Bound services:{{{component}}}\n"
+                "Crashed services:{}\n"
+            )
+            return ProcessResult(command, 0, body, "")
+        return ProcessResult(command, 0, "", "")
+
+    transport_bound = AsyncAdbTransport(str(adb), runner=runner_bound)
+    assert await transport_bound.accessibility_ready_for_text_only("serial-1", component)
+
+
+@pytest.mark.unit
+async def test_accessibility_restore_uses_agent_when_shell_denied(
+    tmp_path: Path,
+) -> None:
+    adb = executable(tmp_path)
+    component = (
+        "com.siksik.agent/com.siksik.agent.accessibility.CaptureAccessibilityService"
+    )
+    binding = {"bound": False}
+    agent_calls: list[str] = []
+
+    async def runner(argv, **_kwargs):
+        command = tuple(argv)
+        if "dumpsys" in command and "accessibility" in command:
+            if binding["bound"]:
+                body = (
+                    f"Enabled services:{{{component}}}\n"
+                    "Binding services:{}\n"
+                    f"Bound services:{{{component}}}\n"
+                    "Crashed services:{}\n"
+                )
+            else:
+                body = (
+                    f"Enabled services:{{{component}}}\n"
+                    "Binding services:{}\n"
+                    "Bound services:{}\n"
+                    f"Crashed services:{{{component}}}\n"
+                )
+            return ProcessResult(command, 0, body, "")
+        if "get" in command and "enabled_accessibility_services" in command:
+            return ProcessResult(command, 0, f"{component}\n", "")
+        if "get" in command and "accessibility_enabled" in command:
+            return ProcessResult(command, 0, "1\n", "")
+        if "put" in command and "accessibility_enabled" in command:
+            return ProcessResult(
+                command,
+                1,
+                "",
+                "java.lang.SecurityException: Permission denial: writing to settings requires:android.permission.WRITE_SECURE_SETTINGS\n",
+            )
+        if "pm" in command and "grant" in command:
+            return ProcessResult(command, 0, "", "")
+        if "broadcast" in command and any(
+            "RECOVER_ACCESSIBILITY" in part for part in command
+        ):
+            agent_calls.append("recover")
+            binding["bound"] = True
+            return ProcessResult(
+                command,
+                0,
+                'Broadcast completed: result=-1, data="SIKSIK_A11Y_V1;status=bound"\n',
+                "",
+            )
+        return ProcessResult(command, 0, "", "")
+
+    transport = AsyncAdbTransport(str(adb), runner=runner)
+    state = await transport.restore_accessibility_service(
+        "serial-1",
+        "com.siksik.agent",
+        component,
+        user_id=0,
+    )
+    assert state == SpecialAccessState.GRANTED
+    assert agent_calls == ["recover"]
+    assert binding["bound"] is True
+
+
+@pytest.mark.unit
+async def test_accessibility_suspend_unbinds_when_shell_writable(
+    tmp_path: Path,
+) -> None:
+    adb = executable(tmp_path)
+    component = (
+        "com.siksik.agent/com.siksik.agent.accessibility.CaptureAccessibilityService"
+    )
+    binding = {"bound": True}
+    writes: list[tuple[str, str]] = []
+
+    async def runner(argv, **_kwargs):
+        command = tuple(argv)
+        if "dumpsys" in command and "accessibility" in command:
+            if binding["bound"]:
+                body = (
+                    f"Enabled services:{{{component}}}\n"
+                    "Binding services:{}\n"
+                    f"Bound services:{{{component}}}\n"
+                    "Crashed services:{}\n"
+                )
+            else:
+                body = (
+                    f"Enabled services:{{{component}}}\n"
+                    "Binding services:{}\n"
+                    "Bound services:{}\n"
+                    "Crashed services:{}\n"
+                )
+            return ProcessResult(command, 0, body, "")
+        if "get" in command and "enabled_accessibility_services" in command:
+            return ProcessResult(command, 0, f"{component}\n", "")
+        if "get" in command and "accessibility_enabled" in command:
+            return ProcessResult(command, 0, "1\n", "")
+        if "put" in command and "enabled_accessibility_services" in command:
+            writes.append(("enabled", command[-1]))
+            binding["bound"] = False
+            return ProcessResult(command, 0, "", "")
+        if "delete" in command and "enabled_accessibility_services" in command:
+            writes.append(("enabled", ""))
+            binding["bound"] = False
+            return ProcessResult(command, 0, "", "")
+        if "put" in command and "accessibility_enabled" in command:
+            writes.append(("master", command[-1]))
+            return ProcessResult(command, 0, "", "")
+        if "pm" in command and "grant" in command:
+            return ProcessResult(command, 0, "", "")
+        return ProcessResult(command, 0, "", "")
+
+    transport = AsyncAdbTransport(str(adb), runner=runner)
+    suspended = await transport.suspend_accessibility_service(
+        "serial-1",
+        "com.siksik.agent",
+        component,
+        user_id=0,
+    )
+    assert suspended is True
+    assert binding["bound"] is False
+    assert writes
+
+
+@pytest.mark.unit
+def test_parse_accessibility_service_sets_reads_xiaomi_dumpsys() -> None:
+    blob = (
+        "     Enabled services:"
+        "{{com.siksik.agent/com.siksik.agent.accessibility.CaptureAccessibilityService}}\n"
+        "     Binding services:{}\n"
+        "     Bound services:{Service[label=Pengambilan UI terlihat S…]}\n"
+        "     Crashed services:"
+        "{{com.siksik.agent/com.siksik.agent.accessibility.CaptureAccessibilityService}}\n"
+    )
+    sets = parse_accessibility_service_sets(blob)
+    component = (
+        "com.siksik.agent/com.siksik.agent.accessibility.CaptureAccessibilityService"
+    )
+    assert component in sets["enabled"]
+    assert sets["binding"] == set()
+    assert sets["bound"] == set()
+    assert sets["bound_unknown"]
+    assert component in sets["crashed"]
+    assert (
+        accessibility_binding_state_for_component(sets, component)
+        == AccessibilityBindingState.BOUND
+    )
+
+
+@pytest.mark.unit
+async def test_accessibility_restore_rebinds_when_enabled_but_crashed(
+    tmp_path: Path,
+) -> None:
+    adb = executable(tmp_path)
+    component = (
+        "com.siksik.agent/com.siksik.agent.accessibility.CaptureAccessibilityService"
+    )
+    writes: list[tuple[str, str]] = []
+    binding = {"crashed": True}
+
+    async def runner(argv, **_kwargs):
+        command = tuple(argv)
+        if "dumpsys" in command and "accessibility" in command:
+            if binding["crashed"]:
+                body = (
+                    f"Enabled services:{{{component}}}\n"
+                    "Binding services:{}\n"
+                    "Bound services:{}\n"
+                    f"Crashed services:{{{component}}}\n"
+                )
+            else:
+                body = (
+                    f"Enabled services:{{{component}}}\n"
+                    "Binding services:{}\n"
+                    f"Bound services:{{{component}}}\n"
+                    "Crashed services:{}\n"
+                )
+            return ProcessResult(command, 0, body, "")
+        if "get" in command and "enabled_accessibility_services" in command:
+            return ProcessResult(command, 0, f"{component}\n", "")
+        if "put" in command and "enabled_accessibility_services" in command:
+            writes.append(("enabled", command[-1]))
+            return ProcessResult(command, 0, "", "")
+        if "delete" in command and "enabled_accessibility_services" in command:
+            writes.append(("enabled", ""))
+            return ProcessResult(command, 0, "", "")
+        if "put" in command and "accessibility_enabled" in command:
+            writes.append(("master", command[-1]))
+            if command[-1] == "1":
+                binding["crashed"] = False
+            return ProcessResult(command, 0, "", "")
+        return ProcessResult(command, 0, "", "")
+
+    transport = AsyncAdbTransport(str(adb), runner=runner)
+    state = await transport.restore_accessibility_service(
+        "serial-1",
+        "com.siksik.agent",
+        component,
+        user_id=0,
+    )
+    assert state == SpecialAccessState.GRANTED
+    assert ("master", "0") in writes
+    assert ("master", "1") in writes
+    enabled_writes = [value for kind, value in writes if kind == "enabled"]
+    assert enabled_writes
+    assert component in enabled_writes[-1]
 
 
 @pytest.mark.unit
@@ -424,4 +745,3 @@ async def test_instrumentation_is_serial_pinned_and_argv_only(tmp_path: Path) ->
     assert command[1:3] == ("-s", "serial-1")
     assert command[3:7] == ("shell", "am", "instrument", "-w")
     assert all(value not in {"sh", "bash", "zsh", "-c"} for value in command)
-

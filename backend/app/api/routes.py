@@ -639,6 +639,27 @@ async def _resolve_session_media(session_id: str, path: str) -> tuple[str, Path,
     mime_allowed = indexed_mime.startswith(("image/", "video/", "audio/", "text/")) or (
         indexed_mime in MEDIA_APPLICATION_MIMES
     )
+    if not mime_allowed:
+        from app.acquisition.android_recovery.service import (
+            detect_recovery_mime_type,
+            recovery_metadata,
+        )
+
+        def recovery_mime() -> str | None:
+            recovery_artifact = recovery_metadata(staging).get(rel)
+            if recovery_artifact is None:
+                return None
+            return detect_recovery_mime_type(
+                target,
+                recovery_artifact.mime_type,
+            )
+
+        resolved_recovery_mime = recovery_mime()
+        if resolved_recovery_mime is not None:
+            indexed_mime = resolved_recovery_mime
+            mime_allowed = indexed_mime.startswith(
+                ("image/", "video/", "audio/", "text/")
+            ) or indexed_mime in MEDIA_APPLICATION_MIMES
     if target.suffix.lower() not in MEDIA_EXTENSIONS and not mime_allowed:
         raise HTTPException(status_code=415, detail="Tipe media tidak didukung preview")
     return rel, target, indexed_mime or None

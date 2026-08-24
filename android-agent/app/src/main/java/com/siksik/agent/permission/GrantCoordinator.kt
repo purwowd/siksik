@@ -63,6 +63,19 @@ class GrantCoordinator(
         )
     }
 
+    private val communicationPermissionRequest = activity.registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { result ->
+        val grantId = consumePending("communication_runtime") ?: return@registerForActivityResult
+        publish(
+            if (effectiveCommunicationScope(result) == null) {
+                store.finish(grantId, GrantState.DENIED)
+            } else {
+                store.approve(grantId, effectiveScope = "sms_and_contacts")
+            },
+        )
+    }
+
     @Synchronized
     fun launch(sessionId: String, scope: String, grantId: String, maxItems: Int): GrantRecord {
         if (scope !in GrantStore.ALLOWED_SCOPES) {
@@ -87,6 +100,9 @@ class GrantCoordinator(
                 )
                 "directory" -> directoryPicker.launch(null)
                 "media_library" -> permissionRequest.launch(libraryPermissions())
+                "communication_runtime" -> communicationPermissionRequest.launch(
+                    communicationPermissions(),
+                )
             }
         }
         publish(record)
@@ -132,6 +148,17 @@ class GrantCoordinator(
             Manifest.permission.READ_MEDIA_AUDIO,
         )
         else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+
+    private fun communicationPermissions(): Array<String> = arrayOf(
+        Manifest.permission.READ_SMS,
+        Manifest.permission.READ_CONTACTS,
+    )
+
+    private fun effectiveCommunicationScope(result: Map<String, Boolean>): String? {
+        val sms = result[Manifest.permission.READ_SMS] == true
+        val contacts = result[Manifest.permission.READ_CONTACTS] == true
+        return if (sms && contacts) "sms_and_contacts" else null
     }
 
     private fun effectiveLibraryScope(result: Map<String, Boolean>): String? {

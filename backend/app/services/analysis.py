@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -186,6 +187,7 @@ from app.services.hash_cache import (
     set_analysis_mode,
     set_cached,
 )
+from app.services.inference_guard import run_guarded
 
 
 def analyze_content_result(
@@ -512,12 +514,26 @@ async def _analyze_session_body(
 
     async def process(row) -> list[tuple]:
         async with sem:
-            cached = await get_cached(row["sha256"]) if row["sha256"] else None
             path = staging / row["path"]
             try:
                 meta = json.loads(row["meta_json"] or "{}")
             except (TypeError, json.JSONDecodeError):
                 meta = {}
+            canonical_text = str(meta.get("canonical_normalized_text") or "").strip()
+            cache_key = str(row["sha256"] or "")
+            if (
+                cache_key
+                and meta.get("crawl_artifact_role") == "source_binary"
+                and canonical_text
+            ):
+                # The same bytes can carry different MediaStore/source
+                # metadata. Cache the actual analysis input, not only the
+                # binary hash, or Qwen/OCR findings from canonical context can
+                # be silently reused or omitted across records/sessions.
+                cache_key = hashlib.sha256(
+                    f"{cache_key}\0{canonical_text}".encode("utf-8")
+                ).hexdigest()
+            cached = await get_cached(cache_key) if cache_key else None
             precomputed = None
             record_id_for_ocr = None
             if meta.get("crawl_artifact_role") == "screenshot":
@@ -544,6 +560,15 @@ async def _analyze_session_body(
             else:
                 text = await read_preview(path, row["mime"] or "")
                 if (
+                    meta.get("crawl_artifact_role") == "source_binary"
+                    and canonical_text
+                ):
+                    source_text = text.strip() if isinstance(text, str) else ""
+                    if canonical_text not in source_text:
+                        text = "\n".join(
+                            value for value in (source_text, canonical_text) if value
+                        )[:200_000]
+                if (
                     precomputed
                     and precomputed[0].strip()
                     and row["source"] in {"visible_ui", "accessibility_visible_ui"}
@@ -569,6 +594,7 @@ async def _analyze_session_body(
                 )
                 if is_heavy:
                     outcome = await asyncio.to_thread(
+                        run_guarded,
                         analyze_content_result,
                         path,
                         row["mime"] or "",
@@ -591,8 +617,8 @@ async def _analyze_session_body(
                         origin_hint=origin_hint,
                     )
                 results = list(outcome.findings)
-                if row["sha256"] and outcome.cacheable:
-                    await set_cached(row["sha256"], results)
+                if cache_key and outcome.cacheable:
+                    await set_cached(cache_key, results)
 
             media_year = None
             media_captured_at = None
@@ -633,10 +659,10 @@ async def _analyze_session_body(
     analyzed_ids: list[str] = []
 
     async def publish_progress() -> None:
-        analyzed = previously_analyzed + len(analyzed_ids)
+        analyzed = min(previously_analyzed + len(analyzed_ids), file_count)
         elapsed = max(time.perf_counter() - t0, 1e-6)
         fps = len(analyzed_ids) / elapsed
-        batch_fraction = len(analyzed_ids) / max(total, 1)
+        batch_fraction = min(len(analyzed_ids) / max(total, 1), 1.0)
         pct = progress_start + batch_fraction * (progress_end - progress_start)
         msg = (
             f"{progress_label} ({analyzed}/{file_count}) · "
@@ -727,6 +753,17 @@ async def _analyze_session_body(
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    final_file_row = await db.fetchone(
+        "SELECT COUNT(*) AS total, COALESCE(SUM(analyzed), 0) AS analyzed "
+        "FROM files WHERE session_id = ?",
+        (session_id,),
+    )
+    final_finding_row = await db.fetchone(
+        "SELECT COUNT(*) AS total FROM findings WHERE session_id = ?",
+        (session_id,),
+    )
+    final_analyzed = int(final_file_row["analyzed"]) if final_file_row else 0
+    final_findings = int(final_finding_row["total"]) if final_finding_row else 0
     stats = {
         "layer_counts": layer_counts,
         "category_counts": category_counts,
@@ -736,8 +773,8 @@ async def _analyze_session_body(
         "hits_asr": hits_asr,
     }
     return (
-        previously_analyzed + len(analyzed_ids),
-        findings_count,
+        final_analyzed,
+        final_findings,
         (time.perf_counter() - t0) * 1000,
         stats,
     )

@@ -1,4 +1,4 @@
-import type { AuthSession } from "./api";
+import type { AuthSession, SessionSummary } from "./api";
 import { can } from "./api";
 import type { Tab } from "./types";
 
@@ -76,6 +76,23 @@ export function preferredLandingTab(
     return "report";
   }
   return allowed[0].id;
+}
+
+export function resolvePreferredSession(
+  items: SessionSummary[],
+  preferId: string | null,
+): SessionSummary | undefined {
+  const active = items.find((s) => ACTIVE.has(s.status));
+  if (active) return active;
+  if (preferId) {
+    const preferred = items.find((s) => s.id === preferId);
+    if (preferred) return preferred;
+  }
+  return (
+    items.find((s) => s.status === "completed") ||
+    items.find((s) => s.recommendation) ||
+    items[0]
+  );
 }
 
 /** Lab demo usernames only — passwords filled on click for PoC convenience. */

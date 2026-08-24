@@ -11,24 +11,21 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams
-import com.siksik.agent.source.communication.CommunicationPolicy
 
 internal class TextOnlyCrawlCover(
     private val service: AccessibilityService,
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val windowManager = service.getSystemService(WindowManager::class.java)
+    private var attachedWindowManager: WindowManager? = null
     private var sheet: View? = null
     @Volatile
     private var pinnedVisible = false
 
-    fun onForegroundPackage(packageName: String) {
-        when {
-            packageName == INSTAGRAM_PACKAGE -> hide()
-            pinnedVisible -> show()
-            CommunicationPolicy.usesTextOnlyCrawlCover(packageName) -> show()
-            else -> hide()
-        }
+    fun onForegroundPackage(@Suppress("UNUSED_PARAMETER") packageName: String) {
+        // A pin exists only for an active X/Facebook crawl. Keep the cover
+        // attached across transient OEM/system windows until the host explicitly
+        // unpins it after restoring the agent foreground.
+        if (pinnedVisible) show() else hide()
     }
 
     fun setPinned(visible: Boolean) {
@@ -44,9 +41,26 @@ internal class TextOnlyCrawlCover(
         mainHandler.post { detach() }
     }
 
+    fun isAttached(): Boolean = sheet?.isAttachedToWindow == true
+
     private fun attach() {
-        if (sheet != null) return
-        val wm = windowManager ?: return
+        val existing = sheet
+        if (existing?.isAttachedToWindow == true) {
+            TextOnlyCrawlCoverState.markAttached(service.applicationContext, true)
+            return
+        }
+        // AccessibilityService is constructed before onServiceConnected(). A
+        // WindowManager cached in the constructor can therefore retain an OEM
+        // window context without the live accessibility overlay token. Resolve
+        // it only when the host actually requests the cover.
+        sheet = null
+        attachedWindowManager = null
+        val wm = service.getSystemService(WindowManager::class.java)
+        if (wm == null) {
+            TextOnlyCrawlCoverState.markAttached(service.applicationContext, false)
+            Log.w(LOG_TAG, "event=text_only_cover_show_failed reason=no_window_manager")
+            return
+        }
         val cover = View(service).apply {
             setBackgroundColor(Color.WHITE)
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
@@ -89,23 +103,40 @@ internal class TextOnlyCrawlCover(
         try {
             wm.addView(cover, params)
             sheet = cover
+            attachedWindowManager = wm
+            TextOnlyCrawlCoverState.markAttached(service.applicationContext, true)
             Log.i(LOG_TAG, "event=text_only_cover_shown")
-        } catch (_: RuntimeException) {
-            Log.w(LOG_TAG, "event=text_only_cover_show_failed")
+        } catch (error: RuntimeException) {
+            TextOnlyCrawlCoverState.markAttached(service.applicationContext, false)
+            Log.w(
+                LOG_TAG,
+                "event=text_only_cover_show_failed type=${error.javaClass.simpleName} " +
+                    "message=${error.message.orEmpty().replace(' ', '_').take(160)}",
+                error,
+            )
         }
     }
 
     private fun detach() {
-        val cover = sheet ?: return
+        val cover = sheet
+        val wm = attachedWindowManager
         sheet = null
-        try {
-            windowManager?.removeView(cover)
-        } catch (_: RuntimeException) {}
-        Log.i(LOG_TAG, "event=text_only_cover_hidden")
+        attachedWindowManager = null
+        if (cover != null) {
+            try {
+                wm?.removeView(cover)
+            } catch (error: RuntimeException) {
+                Log.w(
+                    LOG_TAG,
+                    "event=text_only_cover_hide_failed type=${error.javaClass.simpleName}",
+                )
+            }
+        }
+        TextOnlyCrawlCoverState.markAttached(service.applicationContext, false)
+        if (cover != null) Log.i(LOG_TAG, "event=text_only_cover_hidden")
     }
 
     companion object {
         private const val LOG_TAG = "SIKSIKAccessibility"
-        private const val INSTAGRAM_PACKAGE = "com.instagram.android"
     }
 }

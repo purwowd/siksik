@@ -298,76 +298,58 @@ class Phase7AndroidAgentRunner:
 
         # Ingest Gmail if enabled
         if settings.gmail_acquisition_enabled:
+            from app.acquisition.gmail_oauth import (
+                ensure_gmail_oauth,
+                session_acquisition_reference,
+            )
             from app.acquisition.gmail_service import GmailAcquisitionService
+            from app.acquisition.runtime import AgentRuntimeSecrets, agent_runtime_registry
 
-            try:
-                account_name = getattr(runtime, "google_account", None)
-                token = getattr(runtime, "google_token", None)
-
-                if not account_name:
-                    accounts = await client.list_google_accounts(
-                        context.session_id,
-                        request_id=context.request_id,
-                    )
-                    if accounts:
-                        account_name = accounts[0].name
-
-                    if not account_name and context.device_id:
-                        try:
-                            adb = AsyncAdbTransport(settings.adb_path)
-                            dumpsys_res = await adb.run(
-                                context.device_id,
-                                ["shell", "dumpsys", "account"],
-                                operation="dumpsys_account_probe",
-                                timeout=5.0,
-                                check=False,
-                            )
-                            if dumpsys_res.returncode == 0:
-                                match = re.search(
-                                    r"Account \{name=([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}), type=com\.google\}",
-                                    dumpsys_res.stdout,
-                                )
-                                if match:
-                                    account_name = match.group(1)
-                        except Exception:
-                            pass
-
-                if not token and account_name:
-                    token = await client.get_google_auth_token(
-                        context.session_id,
-                        account_name,
-                        scope=settings.resolved_gmail_scope,
-                        request_id=context.request_id,
-                    )
-                    if not token and settings.resolved_gmail_scope != settings.gmail_scope:
-                        token = await client.get_google_auth_token(
-                            context.session_id,
-                            account_name,
-                            scope=settings.gmail_scope,
-                            request_id=context.request_id,
-                        )
-
-                gmail_svc = GmailAcquisitionService()
-                gmail_count, _ = await gmail_svc.acquire(
+            account_name = getattr(runtime, "google_account", None)
+            token = getattr(runtime, "google_token", None)
+            if not context.simulated:
+                account_name, token = await ensure_gmail_oauth(
+                    client=client,
                     session_id=context.session_id,
-                    staging=transfer.staging,
-                    mode=context.mode,
-                    token=token,
-                    account_name=account_name,
-                    simulated=context.simulated,
+                    serial=context.device_id,
+                    adb=AsyncAdbTransport(settings.adb_path),
                     on_progress=context.on_progress,
                     request_id=context.request_id,
+                    existing_account=account_name,
+                    existing_token=token,
                 )
-                if gmail_count > 0:
-                    transfer = AcquisitionResult(
-                        staging=transfer.staging,
-                        item_count=transfer.item_count + gmail_count,
-                        duration_ms=transfer.duration_ms,
-                        method=f"{transfer.method}+gmail_api",
-                        provider=transfer.provider,
-                    )
-            except Exception as exc:
-                logger.warning("gmail_acquisition_live_error", extra={"error": str(exc)})
+                runtime = AgentRuntimeSecrets(
+                    session_id=runtime.session_id,
+                    serial=runtime.serial,
+                    token=runtime.token,
+                    forward_host_port=runtime.forward_host_port,
+                    token_expires_at=runtime.token_expires_at,
+                    google_token=token,
+                    google_account=account_name,
+                )
+                await agent_runtime_registry.bind(runtime)
+
+            reference = await session_acquisition_reference(context.session_id)
+            gmail_svc = GmailAcquisitionService()
+            gmail_count, _ = await gmail_svc.acquire(
+                session_id=context.session_id,
+                staging=transfer.staging,
+                mode=context.mode,
+                token=token,
+                account_name=account_name,
+                simulated=context.simulated,
+                on_progress=context.on_progress,
+                request_id=context.request_id,
+                reference=reference,
+            )
+            if gmail_count > 0:
+                transfer = AcquisitionResult(
+                    staging=transfer.staging,
+                    item_count=transfer.item_count + gmail_count,
+                    duration_ms=transfer.duration_ms,
+                    method=f"{transfer.method}+gmail_api",
+                    provider=transfer.provider,
+                )
 
         acquisition_ms = round((time.perf_counter() - started) * 1000)
         await context.on_progress(
@@ -452,22 +434,53 @@ class Phase7AndroidAgentRunner:
                     "com.twitter.android": "X",
                     "com.facebook.katana": "Facebook",
                 }
+                system_messages = {
+                    "build": "Build APK UiAutomator",
+                    "install": "Memasang paket UiAutomator",
+                    "install_skip": "Paket UiAutomator sudah terbaru",
+                }
+                instrument_messages = {
+                    "target_probe": "Memeriksa target",
+                    "preflight_visual_suspend": "Menyiapkan crawl visual",
+                    "preflight_accessibility": "Memverifikasi accessibility",
+                    "preflight_cover": "Memverifikasi pelindung text-only",
+                    "instrument": "Menjalankan instrumentation",
+                    "restore_agent": "Memulihkan agent setelah instrumentation",
+                    "restore_agent_failed": "Pemulihan agent setelah instrumentation gagal",
+                    "restore_accessibility": "Memulihkan accessibility setelah crawl visual",
+                }
 
                 async def on_social_progress(target_package: str, phase: str) -> None:
-                    label = social_labels.get(target_package, target_package)
+                    if target_package == "__system__":
+                        message = system_messages.get(phase, phase)
+                        percent = 10.0 if phase == "build" else 11.0
+                    else:
+                        label = social_labels.get(target_package, target_package)
+                        if phase in instrument_messages:
+                            message = (
+                                f"{instrument_messages[phase]} {label}"
+                            )
+                            percent = 12.0
+                        else:
+                            message = f"Crawl sosial {label}: {phase}"
+                            percent = 12.0
                     await context.on_progress(
                         SessionStatus.ACQUIRING,
-                        12.0,
-                        f"Crawl sosial {label}: {phase}",
+                        percent,
+                        message,
                         crawl_id=run.crawl_id,
                         crawl_state="social_automation",
                         crawl_source="accessibility_visible_ui",
+                        crawl_target=(
+                            None if target_package == "__system__" else target_package
+                        ),
+                        crawl_stage=phase,
                     )
 
                 await context.on_progress(
                     SessionStatus.ACQUIRING,
-                    10.0,
-                    "Memulai crawl sosial di perangkat",
+                    9.0,
+                    "Menyiapkan instrumentation sosial",
                     crawl_id=run.crawl_id,
                     crawl_state="social_automation",
                     crawl_source="accessibility_visible_ui",

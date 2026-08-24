@@ -204,7 +204,7 @@ object SelectionPolicyCodec {
             threshold !in 0..MAX_BASIS_POINTS ||
             maximumCandidates !in 1..MAX_CANDIDATES ||
             maximumBytes !in 1..MAX_BYTES ||
-            duplicatePolicy != "representative_only" ||
+            duplicatePolicy !in setOf("representative_only", "include_all") ||
             !SHA256.matches(fingerprint)
         ) {
             invalidPolicy()

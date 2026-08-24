@@ -11,6 +11,14 @@ from app.models.schemas import AcquisitionMode
 from app.selection.policy import build_selection_policy
 
 
+@pytest.fixture(autouse=True)
+def _agent_forward_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.acquisition.agent_client.resolve_agent_forward_host",
+        lambda explicit=None: (explicit.strip() if explicit else "127.0.0.1"),
+    )
+
+
 def capability_payload() -> dict[str, object]:
     granted = {"state": "granted", "required_for_full": False}
     unavailable = {"state": "unavailable", "required_for_full": True}

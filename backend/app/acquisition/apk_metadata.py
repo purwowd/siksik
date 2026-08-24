@@ -162,13 +162,19 @@ class ApkMetadataInspector:
             self._config.android_home,
             Path(os.environ["ANDROID_HOME"]) if os.environ.get("ANDROID_HOME") else None,
             Path(os.environ["ANDROID_SDK_ROOT"]) if os.environ.get("ANDROID_SDK_ROOT") else None,
+            Path.home() / "Android" / "Sdk",
+            Path("/usr/lib/android-sdk"),
             Path("/opt/homebrew/share/android-commandlinetools"),
+            Path("/usr/local/share/android-commandlinetools"),
             Path.home() / "Library" / "Android" / "sdk",
         )
         for candidate in candidates:
             if candidate is None:
                 continue
-            resolved = candidate.expanduser().resolve()
+            try:
+                resolved = candidate.expanduser().resolve()
+            except (OSError, RuntimeError):
+                continue
             if resolved.is_dir():
                 return resolved
         raise acquisition_error(
@@ -181,8 +187,16 @@ class ApkMetadataInspector:
         java_home = self._config.java_home
         if java_home is None and os.environ.get("JAVA_HOME"):
             java_home = Path(os.environ["JAVA_HOME"])
-        if java_home is None and Path("/opt/homebrew/opt/openjdk@17").is_dir():
-            java_home = Path("/opt/homebrew/opt/openjdk@17")
+        if java_home is None:
+            for candidate in (
+                Path("/usr/lib/jvm/java-17-openjdk-amd64"),
+                Path("/usr/lib/jvm/java-17-openjdk"),
+                Path("/opt/homebrew/opt/openjdk@17"),
+                Path("/usr/local/opt/openjdk@17"),
+            ):
+                if candidate.is_dir():
+                    java_home = candidate
+                    break
         if java_home is not None and java_home.expanduser().is_dir():
             environment["JAVA_HOME"] = str(java_home.expanduser().resolve())
         android_home = self._android_home()

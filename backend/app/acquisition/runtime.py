@@ -23,6 +23,7 @@ class AgentRuntimeState(str, Enum):
     RESOLVE_OR_BUILD_AGENT = "resolve_or_build_agent"
     INSPECT_INSTALLED_PACKAGE = "inspect_installed_package"
     INSTALL_OR_UPDATE = "install_or_update"
+    INSTALL_AUTOMATION = "install_automation"
     AWAITING_INSTALL_APPROVAL = "awaiting_install_approval"
     APPLY_RUNTIME_PERMISSIONS = "apply_runtime_permissions"
     AWAITING_RUNTIME_PERMISSION = "awaiting_runtime_permission"
@@ -265,6 +266,23 @@ class AgentRuntimeRegistry:
     async def remove(self, session_id: str) -> AgentRuntimeSecrets | None:
         async with self._lock:
             return self._items.pop(session_id, None)
+
+    async def remove_for_serial(
+        self,
+        serial: str,
+        *,
+        except_session_id: str | None = None,
+    ) -> list[AgentRuntimeSecrets]:
+        value = validate_serial(serial)
+        async with self._lock:
+            removed: list[AgentRuntimeSecrets] = []
+            for session_id, runtime in list(self._items.items()):
+                if runtime.serial != value:
+                    continue
+                if except_session_id is not None and session_id == except_session_id:
+                    continue
+                removed.append(self._items.pop(session_id))
+            return removed
 
     async def pop_all(self) -> list[AgentRuntimeSecrets]:
         async with self._lock:

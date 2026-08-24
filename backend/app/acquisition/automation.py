@@ -12,25 +12,34 @@ AutomationProgressCallback = Callable[[str, str], Awaitable[None]]
 
 from pydantic import ValidationError
 
-from app.acquisition.adb import SpecialAccessKind, SpecialAccessState
+from app.acquisition.adb import (
+    AccessibilityBindingState,
+    SpecialAccessKind,
+    SpecialAccessState,
+)
 from app.acquisition.agent_client import AutomationResultV1
+from app.acquisition.bootstrap_contracts import InstallAction
+from app.acquisition.automation_package import AutomationPackageCoordinator
 from app.acquisition.errors import AcquisitionError, ErrorCategory, acquisition_error
 from app.acquisition.process import ProcessResult
 from app.acquisition.time_scope import MIN_TIME_SCOPE_EPOCH_MS, build_time_scope
+from app.core.config import settings
 from app.models.schemas import AcquisitionMode
 
 logger = logging.getLogger("siksik.acquisition.automation")
-ALLOWED_SOCIAL_TARGETS = frozenset(
-    {
-        "com.twitter.android",
-        "com.facebook.katana",
-        "com.instagram.android",
-    }
-)
+SYSTEM_PROGRESS_TARGET = "__system__"
 TEXT_ONLY_SOCIAL_TARGETS = frozenset({
     "com.twitter.android",
     "com.facebook.katana",
 })
+TEXT_ONLY_COVER_PREFLIGHT_ATTEMPTS = 5
+TEXT_ONLY_COVER_PREFLIGHT_SETTLE_SECONDS = 0.4
+TEXT_ONLY_ACCESSIBILITY_SETTLE_SECONDS = 8.0
+TEXT_ONLY_ACCESSIBILITY_POLL_SECONDS = 0.3
+
+
+def allowed_social_targets() -> frozenset[str]:
+    return frozenset(settings.android_agent_social_targets)
 RESULT_PREFIXES = (
     "INSTRUMENTATION_STATUS: siksik_result=",
     "INSTRUMENTATION_RESULT: siksik_result=",
@@ -63,6 +72,49 @@ class AutomationAdb(Protocol):
         component: str,
         **kwargs,
     ): ...
+    async def suspend_accessibility_service(
+        self,
+        serial: str,
+        package_name: str,
+        component: str,
+        **kwargs,
+    ) -> bool: ...
+    async def accessibility_service_bound(self, serial: str, component: str) -> bool: ...
+    async def accessibility_binding_state(
+        self,
+        serial: str,
+        component: str,
+    ) -> AccessibilityBindingState: ...
+    async def wait_accessibility_service_bound(
+        self,
+        serial: str,
+        component: str,
+        *,
+        timeout_seconds: float = ...,
+        poll_seconds: float = ...,
+    ) -> bool: ...
+    async def set_text_only_cover_visible(
+        self,
+        serial: str,
+        package_name: str,
+        *,
+        visible: bool,
+        user_id: int | None = None,
+    ) -> None: ...
+    async def probe_text_only_cover_status(
+        self,
+        serial: str,
+        package_name: str,
+        *,
+        user_id: int | None = None,
+    ) -> str | None: ...
+    async def open_special_access_settings(
+        self,
+        serial: str,
+        package_name: str,
+        access: SpecialAccessKind,
+        **kwargs,
+    ) -> None: ...
     async def pull_social_debug_mapping(self, serial: str, **kwargs) -> int: ...
 
 
@@ -106,11 +158,14 @@ class AndroidUiAutomationOrchestrator:
         config: AutomationConfig,
         adb: AutomationAdb,
         artifact_builder: ArtifactBuilder,
+        *,
+        package_coordinator: AutomationPackageCoordinator | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._config = config
         self._adb = adb
         self._artifact_builder = artifact_builder
+        self._packages = package_coordinator
         self._clock = clock
 
     async def run(
@@ -138,12 +193,12 @@ class AndroidUiAutomationOrchestrator:
                 ErrorCategory.VALIDATION_ERROR,
                 "Runtime automation Android tidak valid.",
             )
-        if not targets or len(targets) > len(ALLOWED_SOCIAL_TARGETS):
+        if not targets or len(targets) > len(allowed_social_targets()):
             raise acquisition_error(
                 ErrorCategory.VALIDATION_ERROR,
                 "Daftar target social Android tidak valid.",
             )
-        if not set(targets) <= ALLOWED_SOCIAL_TARGETS or mode not in {"quick", "full"}:
+        if not set(targets) <= allowed_social_targets() or mode not in {"quick", "full"}:
             raise acquisition_error(
                 ErrorCategory.VALIDATION_ERROR,
                 "Konfigurasi automation Android tidak valid.",
@@ -164,22 +219,34 @@ class AndroidUiAutomationOrchestrator:
                 "Batas waktu automation Android tidak valid.",
             )
         await self._artifact_builder.build_debug_apk(request_id)
-        apk = self._validated_apk()
-        logger.info(
-            "automation_install_started",
-            extra={"request_id": request_id, "session_id": session_id},
+        if on_progress is not None:
+            await on_progress(SYSTEM_PROGRESS_TARGET, "build")
+        if self._packages is None:
+            raise acquisition_error(
+                ErrorCategory.INTERNAL_ERROR,
+                "Koordinator paket UiAutomator belum dikonfigurasi.",
+            )
+        install_action = await self._packages.ensure_installed(
+            session_id=session_id,
+            serial=serial,
+            request_id=request_id,
         )
-        await self._adb.install_apk(
-            serial,
-            apk,
-            grant_runtime_permissions=False,
-            allow_test_packages=True,
-            replace_package_on_uid_mismatch=self._config.package_name,
-            timeout=self._config.install_timeout_seconds,
-        )
+        if on_progress is not None:
+            await on_progress(
+                SYSTEM_PROGRESS_TARGET,
+                "install_skip" if install_action == InstallAction.CURRENT else "install",
+            )
         logger.info(
-            "automation_install_completed",
-            extra={"request_id": request_id, "session_id": session_id},
+            "automation_runtime_identity",
+            extra={
+                "request_id": request_id,
+                "session_id": session_id,
+                "crawl_id": crawl_id,
+                "runner_component": self._config.runner_component,
+                "test_class": self._config.test_class,
+                "install_state": install_action.value,
+                "targets": list(targets),
+            },
         )
         user_id: int | None = None
         restore_accessibility = False
@@ -207,42 +274,51 @@ class AndroidUiAutomationOrchestrator:
         results: list[AutomationResultV1] = []
         try:
             for target in targets:
-                if on_progress is not None:
-                    await on_progress(target, "started")
-                result, instrumented, requires_force_stop = await self._run_target(
-                    serial=serial,
-                    session_id=session_id,
-                    crawl_id=crawl_id,
-                    mode=mode,
-                    not_before_epoch_ms=cutoff_epoch_ms,
-                    target_package=target,
-                    request_id=request_id,
-                )
-                await self._pull_debug_mapping(
-                    serial=serial,
-                    session_id=session_id,
-                    crawl_id=crawl_id,
-                    target_package=target,
-                    request_id=request_id,
-                )
-                if on_progress is not None:
-                    detail = result.reason or result.state
-                    await on_progress(target, f"{result.state}:{detail}")
-                if instrumented:
-                    if requires_force_stop:
-                        await self._stop_instrumentation(serial, request_id)
-                    if restore_accessibility and user_id is not None:
+                if target in TEXT_ONLY_SOCIAL_TARGETS:
+                    pass
+                else:
+                    if on_progress is not None:
+                        await on_progress(target, "preflight_visual_suspend")
+                    await self._suspend_accessibility_for_visual(
+                        serial=serial,
+                        request_id=request_id,
+                        session_id=session_id,
+                        crawl_id=crawl_id,
+                        target_package=target,
+                    )
+                try:
+                    result, instrumented, requires_force_stop = await self._run_target(
+                        serial=serial,
+                        session_id=session_id,
+                        crawl_id=crawl_id,
+                        mode=mode,
+                        not_before_epoch_ms=cutoff_epoch_ms,
+                        target_package=target,
+                        request_id=request_id,
+                        on_progress=on_progress,
+                    )
+                    await self._pull_debug_mapping(
+                        serial=serial,
+                        session_id=session_id,
+                        crawl_id=crawl_id,
+                        target_package=target,
+                        request_id=request_id,
+                    )
+                    if instrumented:
+                        if requires_force_stop:
+                            await self._stop_instrumentation(serial, request_id)
+                        if on_progress is not None:
+                            await on_progress(target, "restore_agent")
                         try:
-                            restored = await self._adb.restore_accessibility_service(
+                            await self._restart_agent(
                                 serial,
-                                self._config.agent_package_name,
-                                self._config.accessibility_component,
-                                user_id=user_id,
+                                session_id,
+                                session_token,
+                                token_expires_at_epoch_ms,
                             )
                         except AcquisitionError as exc:
-                            restored = SpecialAccessState.UNAVAILABLE
                             logger.error(
-                                "automation_accessibility_restore_command_failed",
+                                "automation_agent_restart_failed",
                                 extra={
                                     "request_id": request_id,
                                     "session_id": session_id,
@@ -251,39 +327,49 @@ class AndroidUiAutomationOrchestrator:
                                     "error_category": exc.category.value,
                                 },
                             )
-                        if restored != SpecialAccessState.GRANTED:
-                            logger.error(
-                                "automation_accessibility_restore_failed",
-                                extra={
-                                    "request_id": request_id,
-                                    "session_id": session_id,
-                                    "crawl_id": crawl_id,
-                                    "target_package": target,
-                                    "access_state": restored.value,
-                                },
-                            )
-                    try:
-                        await self._restart_agent(
-                            serial,
-                            session_id,
-                            session_token,
-                            token_expires_at_epoch_ms,
+                            if on_progress is not None:
+                                await on_progress(target, "restore_agent_failed")
+                    if target not in TEXT_ONLY_SOCIAL_TARGETS and restore_accessibility:
+                        if on_progress is not None:
+                            await on_progress(target, "restore_accessibility")
+                        await self._restore_accessibility_best_effort(
+                            serial=serial,
+                            user_id=user_id,
+                            request_id=request_id,
+                            session_id=session_id,
+                            crawl_id=crawl_id,
+                            target_package=target,
                         )
-                    except AcquisitionError as exc:
-                        logger.error(
-                            "automation_agent_restart_failed",
-                            extra={
-                                "request_id": request_id,
-                                "session_id": session_id,
-                                "crawl_id": crawl_id,
-                                "target_package": target,
-                                "error_category": exc.category.value,
-                            },
+                    results.append(result)
+                    if on_progress is not None:
+                        detail = result.reason or result.state
+                        await on_progress(target, f"{result.state}:{detail}")
+                finally:
+                    if target in TEXT_ONLY_SOCIAL_TARGETS:
+                        # Instrumentation intentionally leaves the opaque cover
+                        # pinned. Unpin only after the host has left X/Facebook
+                        # and restored the agent foreground.
+                        await self._hide_text_only_cover_best_effort(
+                            serial=serial,
+                            user_id=user_id,
+                            request_id=request_id,
+                            session_id=session_id,
+                            crawl_id=crawl_id,
+                            target_package=target,
                         )
-                        result = failure_result(target, "failed", "agent_restart_failed")
-                results.append(result)
         except asyncio.CancelledError:
-            await self._adb.force_stop(serial, self._config.package_name)
+            await self._hide_text_only_cover_best_effort(
+                serial=serial,
+                user_id=user_id,
+                request_id=request_id,
+                session_id=session_id,
+                crawl_id=crawl_id,
+                target_package="cancelled",
+            )
+            try:
+                await self._adb.force_stop(serial, self._config.package_name)
+            except AcquisitionError:
+                pass
             await self._restart_agent_best_effort(
                 serial,
                 session_id,
@@ -291,8 +377,130 @@ class AndroidUiAutomationOrchestrator:
                 token_expires_at_epoch_ms,
                 request_id,
             )
+            if restore_accessibility:
+                await self._restore_accessibility_best_effort(
+                    serial=serial,
+                    user_id=user_id,
+                    request_id=request_id,
+                    session_id=session_id,
+                    crawl_id=crawl_id,
+                    target_package="cancelled",
+                )
+            raise
+        except Exception:
+            await self._hide_text_only_cover_best_effort(
+                serial=serial,
+                user_id=user_id,
+                request_id=request_id,
+                session_id=session_id,
+                crawl_id=crawl_id,
+                target_package="failed",
+            )
+            try:
+                await self._adb.force_stop(serial, self._config.package_name)
+            except AcquisitionError:
+                pass
+            await self._restart_agent_best_effort(
+                serial,
+                session_id,
+                session_token,
+                token_expires_at_epoch_ms,
+                request_id,
+            )
+            if restore_accessibility:
+                await self._restore_accessibility_best_effort(
+                    serial=serial,
+                    user_id=user_id,
+                    request_id=request_id,
+                    session_id=session_id,
+                    crawl_id=crawl_id,
+                    target_package="failed",
+                )
             raise
         return results
+
+    async def _restore_accessibility_best_effort(
+        self,
+        *,
+        serial: str,
+        user_id: int | None,
+        request_id: str | None,
+        session_id: str,
+        crawl_id: str,
+        target_package: str,
+    ) -> bool:
+        try:
+            restored = await self._adb.restore_accessibility_service(
+                serial,
+                self._config.agent_package_name,
+                self._config.accessibility_component,
+                user_id=user_id,
+            )
+        except AcquisitionError as exc:
+            logger.error(
+                "automation_accessibility_restore_command_failed",
+                extra={
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "crawl_id": crawl_id,
+                    "target_package": target_package,
+                    "error_category": exc.category.value,
+                },
+            )
+            return False
+        if restored == SpecialAccessState.GRANTED and await self._adb.wait_accessibility_service_bound(
+            serial,
+            self._config.accessibility_component,
+            timeout_seconds=TEXT_ONLY_ACCESSIBILITY_SETTLE_SECONDS,
+            poll_seconds=TEXT_ONLY_ACCESSIBILITY_POLL_SECONDS,
+        ):
+            return True
+        logger.error(
+            "automation_accessibility_restore_failed",
+            extra={
+                "request_id": request_id,
+                "session_id": session_id,
+                "crawl_id": crawl_id,
+                "target_package": target_package,
+                "access_state": restored.value,
+                "binding_state": (
+                    await self._adb.accessibility_binding_state(
+                        serial,
+                        self._config.accessibility_component,
+                    )
+                ).value,
+            },
+        )
+        return False
+
+    async def _hide_text_only_cover_best_effort(
+        self,
+        *,
+        serial: str,
+        user_id: int | None,
+        request_id: str | None,
+        session_id: str,
+        crawl_id: str,
+        target_package: str,
+    ) -> None:
+        try:
+            await self._adb.set_text_only_cover_visible(
+                serial,
+                self._config.agent_package_name,
+                visible=False,
+                user_id=user_id,
+            )
+        except AcquisitionError as exc:
+            logger.warning(
+                "automation_text_only_cover_cleanup_failed",
+                extra={
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "crawl_id": crawl_id,
+                    "target_package": target_package,
+                    "error_category": exc.category.value,
+                },
+            )
 
     async def _pull_debug_mapping(
         self,
@@ -397,6 +605,260 @@ class AndroidUiAutomationOrchestrator:
                 },
             )
 
+    async def _accessibility_failure_reason(self, serial: str) -> str:
+        binding = await self._adb.accessibility_binding_state(
+            serial,
+            self._config.accessibility_component,
+        )
+        if binding == AccessibilityBindingState.CRASHED:
+            return "accessibility_crashed"
+        return "accessibility_required"
+
+    async def _wait_for_accessibility_service(
+        self,
+        *,
+        serial: str,
+        request_id: str | None,
+        session_id: str,
+        crawl_id: str,
+        target_package: str,
+    ) -> bool:
+        component = self._config.accessibility_component
+        if await self._adb.accessibility_service_bound(serial, component):
+            # A bound service can still retain a failed/stale overlay attempt.
+            # Clear the pin before the next functional show+probe retry.
+            try:
+                user_id = await self._adb.current_user_id(serial)
+                await self._adb.set_text_only_cover_visible(
+                    serial,
+                    self._config.agent_package_name,
+                    visible=False,
+                    user_id=user_id,
+                )
+                await asyncio.sleep(TEXT_ONLY_COVER_PREFLIGHT_SETTLE_SECONDS)
+            except AcquisitionError:
+                pass
+            return True
+        try:
+            user_id = await self._adb.current_user_id(serial)
+            restored = await self._adb.restore_accessibility_service(
+                serial,
+                self._config.agent_package_name,
+                component,
+                user_id=user_id,
+            )
+        except AcquisitionError:
+            restored = SpecialAccessState.UNAVAILABLE
+        if restored == SpecialAccessState.GRANTED and await self._adb.wait_accessibility_service_bound(
+            serial,
+            component,
+            timeout_seconds=TEXT_ONLY_ACCESSIBILITY_SETTLE_SECONDS,
+            poll_seconds=TEXT_ONLY_ACCESSIBILITY_POLL_SECONDS,
+        ):
+            return True
+        logger.error(
+            "automation_text_only_accessibility_settle_timeout",
+            extra={
+                "request_id": request_id,
+                "session_id": session_id,
+                "crawl_id": crawl_id,
+                "target_package": target_package,
+                "binding_state": (
+                    await self._adb.accessibility_binding_state(serial, component)
+                ).value,
+            },
+        )
+        return False
+
+    async def _recover_accessibility_for_cover(
+        self,
+        *,
+        serial: str,
+        request_id: str | None,
+        session_id: str,
+        crawl_id: str,
+        target_package: str,
+    ) -> bool:
+        component = self._config.accessibility_component
+        if await self._adb.accessibility_service_bound(serial, component):
+            return True
+        try:
+            user_id = await self._adb.current_user_id(serial)
+            restored = await self._adb.restore_accessibility_service(
+                serial,
+                self._config.agent_package_name,
+                component,
+                user_id=user_id,
+            )
+        except AcquisitionError as exc:
+            logger.error(
+                "automation_text_only_cover_accessibility_recovery_failed",
+                extra={
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "crawl_id": crawl_id,
+                    "target_package": target_package,
+                    "error_category": exc.category.value,
+                },
+            )
+            return False
+        if restored != SpecialAccessState.GRANTED:
+            return False
+        return await self._adb.wait_accessibility_service_bound(
+            serial,
+            component,
+            timeout_seconds=TEXT_ONLY_ACCESSIBILITY_SETTLE_SECONDS,
+            poll_seconds=TEXT_ONLY_ACCESSIBILITY_POLL_SECONDS,
+        )
+
+    async def _ensure_text_only_cover_preflight(
+        self,
+        *,
+        serial: str,
+        request_id: str | None,
+        session_id: str,
+        crawl_id: str,
+        target_package: str,
+        on_progress: AutomationProgressCallback | None = None,
+    ) -> tuple[bool, str]:
+        user_id = await self._adb.current_user_id(serial)
+        last_reason = "cover_probe_timeout"
+        recovered = False
+        for attempt in range(1, TEXT_ONLY_COVER_PREFLIGHT_ATTEMPTS + 1):
+            try:
+                await self._adb.set_text_only_cover_visible(
+                    serial,
+                    self._config.agent_package_name,
+                    visible=True,
+                    user_id=user_id,
+                )
+            except AcquisitionError as exc:
+                logger.error(
+                    "automation_text_only_cover_preflight_failed",
+                    extra={
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "crawl_id": crawl_id,
+                        "target_package": target_package,
+                        "attempt": attempt,
+                        "error_category": exc.category.value,
+                    },
+                )
+                return False, "cover_broadcast_denied"
+            await asyncio.sleep(TEXT_ONLY_COVER_PREFLIGHT_SETTLE_SECONDS)
+            status = await self._adb.probe_text_only_cover_status(
+                serial,
+                self._config.agent_package_name,
+                user_id=user_id,
+            )
+            if on_progress is not None:
+                await on_progress(
+                    target_package,
+                    f"preflight_cover_attempt_{attempt}:{status or 'no_response'}",
+                )
+            logger.info(
+                "automation_text_only_cover_preflight_attempt",
+                extra={
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "crawl_id": crawl_id,
+                    "target_package": target_package,
+                    "attempt": attempt,
+                    "cover_status": status,
+                },
+            )
+            if status == "shown":
+                try:
+                    await self._adb.set_text_only_cover_visible(
+                        serial,
+                        self._config.agent_package_name,
+                        visible=False,
+                        user_id=user_id,
+                    )
+                except AcquisitionError:
+                    pass
+                return True, "shown"
+            if status == "hidden":
+                last_reason = "cover_attach_failed"
+            else:
+                last_reason = "cover_probe_timeout"
+            if (
+                not recovered
+                and attempt >= 2
+                and last_reason == "cover_attach_failed"
+            ):
+                recovered = await self._recover_accessibility_for_cover(
+                    serial=serial,
+                    request_id=request_id,
+                    session_id=session_id,
+                    crawl_id=crawl_id,
+                    target_package=target_package,
+                )
+        try:
+            await self._adb.set_text_only_cover_visible(
+                serial,
+                self._config.agent_package_name,
+                visible=False,
+                user_id=user_id,
+            )
+        except AcquisitionError:
+            pass
+        return False, last_reason
+
+    async def _suspend_accessibility_for_visual(
+        self,
+        *,
+        serial: str,
+        request_id: str | None,
+        session_id: str,
+        crawl_id: str,
+        target_package: str,
+    ) -> None:
+        component = self._config.accessibility_component
+        try:
+            user_id = await self._adb.current_user_id(serial)
+            suspended = await self._adb.suspend_accessibility_service(
+                serial,
+                self._config.agent_package_name,
+                component,
+                user_id=user_id,
+            )
+        except AcquisitionError as exc:
+            logger.warning(
+                "automation_visual_accessibility_suspend_failed",
+                extra={
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "crawl_id": crawl_id,
+                    "target_package": target_package,
+                    "error_category": exc.category.value,
+                },
+            )
+            return
+        if suspended:
+            logger.info(
+                "automation_visual_accessibility_suspended",
+                extra={
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "crawl_id": crawl_id,
+                    "target_package": target_package,
+                },
+            )
+            return
+        logger.warning(
+            "automation_visual_accessibility_suspend_incomplete",
+            extra={
+                "request_id": request_id,
+                "session_id": session_id,
+                "crawl_id": crawl_id,
+                "target_package": target_package,
+                "binding_state": (
+                    await self._adb.accessibility_binding_state(serial, component)
+                ).value,
+            },
+        )
+
     async def _run_target(
         self,
         *,
@@ -407,7 +869,10 @@ class AndroidUiAutomationOrchestrator:
         not_before_epoch_ms: int,
         target_package: str,
         request_id: str | None,
+        on_progress: AutomationProgressCallback | None = None,
     ) -> tuple[AutomationResultV1, bool, bool]:
+        if on_progress is not None:
+            await on_progress(target_package, "target_probe")
         try:
             installed = await self._adb.package_exists(serial, target_package)
         except AcquisitionError:
@@ -419,36 +884,56 @@ class AndroidUiAutomationOrchestrator:
                 False,
             )
         if target_package in TEXT_ONLY_SOCIAL_TARGETS:
-            try:
-                access_state = await self._adb.special_access_state(
-                    serial,
-                    self._config.agent_package_name,
-                    SpecialAccessKind.ACCESSIBILITY,
-                    component=self._config.accessibility_component,
-                    user_id=await self._adb.current_user_id(serial),
+            if on_progress is not None:
+                await on_progress(target_package, "preflight_accessibility")
+            if not await self._wait_for_accessibility_service(
+                serial=serial,
+                request_id=request_id,
+                session_id=session_id,
+                crawl_id=crawl_id,
+                target_package=target_package,
+            ):
+                return (
+                    failure_result(
+                        target_package,
+                        "failed",
+                        await self._accessibility_failure_reason(serial),
+                    ),
+                    False,
+                    False,
                 )
-            except AcquisitionError:
-                access_state = SpecialAccessState.UNAVAILABLE
-            if access_state != SpecialAccessState.GRANTED:
+            if on_progress is not None:
+                await on_progress(target_package, "preflight_cover")
+            cover_ready, cover_reason = await self._ensure_text_only_cover_preflight(
+                serial=serial,
+                request_id=request_id,
+                session_id=session_id,
+                crawl_id=crawl_id,
+                target_package=target_package,
+                on_progress=on_progress,
+            )
+            if not cover_ready:
                 logger.error(
-                    "automation_text_only_accessibility_missing",
+                    "automation_text_only_cover_unavailable",
                     extra={
                         "request_id": request_id,
                         "session_id": session_id,
                         "crawl_id": crawl_id,
                         "target_package": target_package,
-                        "access_state": getattr(access_state, "value", str(access_state)),
+                        "cover_reason": cover_reason,
                     },
                 )
                 return (
                     failure_result(
                         target_package,
                         "failed",
-                        "accessibility_required",
+                        "text_only_cover_required",
                     ),
                     False,
                     False,
                 )
+        if on_progress is not None:
+            await on_progress(target_package, "instrument")
         scrolls = self._config.quick_scrolls if mode == "quick" else self._config.full_scrolls
         screenshots = 0
         if target_package not in TEXT_ONLY_SOCIAL_TARGETS:
@@ -521,8 +1006,11 @@ class AndroidUiAutomationOrchestrator:
                 True,
             )
         try:
-            parsed = parse_instrumentation_result(
-                f"{result.stdout}\n{result.stderr}",
+            parsed = normalize_automation_result(
+                parse_instrumentation_result(
+                    f"{result.stdout}\n{result.stderr}",
+                    target_package,
+                ),
                 target_package,
             )
         except AcquisitionError:
@@ -546,19 +1034,6 @@ class AndroidUiAutomationOrchestrator:
             },
         )
         return parsed, True, False
-
-    def _validated_apk(self) -> Path:
-        path = self._config.apk_path.expanduser().resolve()
-        if (
-            not path.is_file()
-            or path.suffix.lower() != ".apk"
-            or not 0 < path.stat().st_size <= 250 * 1024 * 1024
-        ):
-            raise acquisition_error(
-                ErrorCategory.AGENT_BUILD_FAILED,
-                "Build tidak menghasilkan APK automation yang valid.",
-            )
-        return path
 
 
 def instrumentation_failure_token(stdout: str, stderr: str) -> str:
@@ -600,6 +1075,19 @@ def parse_instrumentation_result(
         raise acquisition_error(
             ErrorCategory.AGENT_INVALID_RESPONSE,
             "Target hasil automation Android tidak konsisten.",
+        )
+    return result
+
+
+def normalize_automation_result(
+    result: AutomationResultV1,
+    target_package: str,
+) -> AutomationResultV1:
+    if result.state == "partial" and target_package in allowed_social_targets():
+        return failure_result(
+            target_package,
+            "failed",
+            result.reason or "scope_navigation_incomplete",
         )
     return result
 

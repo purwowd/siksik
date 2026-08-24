@@ -281,9 +281,11 @@ def _host_ocr_backend():
     return None
 
 def run_social_snapshot_ocr(image_path: Path, backend):
+    from app.services.inference_guard import run_guarded
     from app.services.ocr import run_ocr
 
-    return run_ocr(
+    return run_guarded(
+        run_ocr,
         image_path,
         backend=backend,
         max_edge_px=settings.android_social_ocr_max_edge_px,

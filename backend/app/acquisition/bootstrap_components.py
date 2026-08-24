@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from app.acquisition.adb import (
+    AccessibilityBindingState,
     AndroidDeviceCapabilities,
     AsyncAdbTransport,
     InstalledPackage,
@@ -23,6 +24,7 @@ from app.acquisition.bootstrap_contracts import (
     BootstrapWorkingState,
     InstallAction,
     MetadataInspector,
+    RuntimePermissionRequirement,
     Sleep,
     runtime_permissions_for_api,
 )
@@ -33,6 +35,16 @@ from app.acquisition.runtime import device_ref
 logger = logging.getLogger("siksik.acquisition.bootstrap")
 
 NOTIFICATION_GRANT_SETTLE_ATTEMPTS = 3
+MEDIA_RUNTIME_PERMISSIONS = frozenset({
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.READ_MEDIA_IMAGES",
+    "android.permission.READ_MEDIA_VIDEO",
+    "android.permission.READ_MEDIA_AUDIO",
+})
+COMMUNICATION_RUNTIME_PERMISSIONS = frozenset({
+    "android.permission.READ_SMS",
+    "android.permission.READ_CONTACTS",
+})
 
 
 class AgentPackageCoordinator:
@@ -88,8 +100,6 @@ class AgentPackageCoordinator:
             )
         if not work.installed_package.installed:
             return InstallAction.INSTALL
-        if self._config.force_reinstall:
-            return InstallAction.UPDATE
         if work.installed_apk is None:
             raise acquisition_error(
                 ErrorCategory.AGENT_INSTALL_FAILED,
@@ -100,9 +110,6 @@ class AgentPackageCoordinator:
                 ErrorCategory.AGENT_VERSION_MISMATCH,
                 "Versi Android agent terpasang lebih baru dari artifact SIKSIK.",
             )
-        # Signature atau shared-user/UID berubah: reinstall lewat jalur
-        # uninstall-otomatis di install_apk (replace_package_on_uid_mismatch).
-        # Naikkan ke UPDATE agar install tetap dicoba, bukan gagal di sini.
         if (
             work.installed_apk.signer_sha256 != work.desired_apk.signer_sha256
             or not work.installed_apk.uses_shared_user_id
@@ -110,6 +117,8 @@ class AgentPackageCoordinator:
             return InstallAction.UPDATE
         if work.installed_apk.apk_sha256 == work.desired_apk.apk_sha256:
             return InstallAction.CURRENT
+        if self._config.force_reinstall:
+            return InstallAction.UPDATE
         return InstallAction.UPDATE
 
     async def install_if_needed(
@@ -251,8 +260,9 @@ class AgentAccessCoordinator:
         publish_awaiting: Callable[[], Awaitable[None]],
     ) -> None:
         user_id = await self._adb.current_user_id(serial)
-        required_pending = []
-        for requirement in runtime_permissions_for_api(capabilities.api_level):
+        requirements = runtime_permissions_for_api(capabilities.api_level)
+        required_pending: list[RuntimePermissionRequirement] = []
+        for requirement in requirements:
             state = await self._adb.grant_runtime_permission(
                 serial,
                 self._config.package_name,
@@ -270,14 +280,71 @@ class AgentAccessCoordinator:
                 )
             if requirement.required:
                 required_pending.append(requirement)
-        if not required_pending:
-            return
 
-        await self._adb.open_runtime_permission_settings(
-            serial,
-            self._config.package_name,
-            user_id=user_id,
-        )
+        media_pending = [
+            item
+            for item in required_pending
+            if item.permission in MEDIA_RUNTIME_PERMISSIONS
+        ]
+        if media_pending:
+            await self._await_runtime_permission_group(
+                session_id=session_id,
+                serial=serial,
+                request_id=request_id,
+                work=work,
+                publish_awaiting=publish_awaiting,
+                pending=media_pending,
+                user_id=user_id,
+                launch_dialog=self._relaunch_for_media_permission_dialog,
+                log_state="runtime_storage_in_app",
+                granted_log_state="runtime_storage",
+                timeout_message="Konfirmasi izin penyimpanan Android melewati batas waktu.",
+            )
+
+        comms_pending = [
+            item
+            for item in requirements
+            if item.required and item.permission in COMMUNICATION_RUNTIME_PERMISSIONS
+        ]
+        comms_pending = [
+            item
+            for item in comms_pending
+            if work.runtime_permissions.get(
+                item.permission.removeprefix("android.permission.").casefold(),
+            )
+            != PermissionState.GRANTED.value
+        ]
+        if comms_pending:
+            await self._await_runtime_permission_group(
+                session_id=session_id,
+                serial=serial,
+                request_id=request_id,
+                work=work,
+                publish_awaiting=publish_awaiting,
+                pending=comms_pending,
+                user_id=user_id,
+                launch_dialog=self._relaunch_for_communication_permission_dialog,
+                log_state="runtime_communication_in_app",
+                granted_log_state="runtime_communication",
+                timeout_message="Konfirmasi izin SMS/kontak Android melewati batas waktu.",
+            )
+
+    async def _await_runtime_permission_group(
+        self,
+        *,
+        session_id: str,
+        serial: str,
+        request_id: str | None,
+        work: BootstrapWorkingState,
+        publish_awaiting: Callable[[], Awaitable[None]],
+        pending: list[RuntimePermissionRequirement],
+        user_id: int,
+        launch_dialog: Callable[[str, str, BootstrapWorkingState], Awaitable[None]],
+        log_state: str,
+        granted_log_state: str,
+        timeout_message: str,
+    ) -> None:
+        await launch_dialog(serial, session_id, work)
         await publish_awaiting()
         logger.info(
             "agent_access_waiting",
@@ -285,17 +352,22 @@ class AgentAccessCoordinator:
                 "request_id": request_id,
                 "session_id": session_id,
                 "device_ref": device_ref(serial),
-                "state": "runtime_storage",
+                "state": log_state,
             },
         )
         deadline = (
             asyncio.get_running_loop().time()
             + self._config.special_access_timeout_seconds
         )
+        opened_app_info = False
+        mid_deadline = (
+            asyncio.get_running_loop().time()
+            + (self._config.special_access_timeout_seconds * 0.55)
+        )
         while asyncio.get_running_loop().time() < deadline:
             await self._sleep(self._config.special_access_poll_seconds)
             all_granted = True
-            for requirement in required_pending:
+            for requirement in pending:
                 state = await self._adb.runtime_permission_state(
                     serial,
                     self._config.package_name,
@@ -319,15 +391,95 @@ class AgentAccessCoordinator:
                         "request_id": request_id,
                         "session_id": session_id,
                         "device_ref": device_ref(serial),
-                        "state": "runtime_storage",
+                        "state": granted_log_state,
                     },
                 )
                 return
+            if (
+                not opened_app_info
+                and asyncio.get_running_loop().time() >= mid_deadline
+            ):
+                opened_app_info = True
+                logger.info(
+                    "agent_access_fallback_app_info",
+                    extra={
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "device_ref": device_ref(serial),
+                    },
+                )
+                await self._adb.open_runtime_permission_settings(
+                    serial,
+                    self._config.package_name,
+                    user_id=user_id,
+                )
         raise acquisition_error(
             ErrorCategory.ACCESS_TIMEOUT,
-            "Konfirmasi izin penyimpanan Android melewati batas waktu.",
+            timeout_message,
             retryable=True,
         )
+
+    async def _relaunch_for_media_permission_dialog(
+        self,
+        serial: str,
+        session_id: str,
+        work: BootstrapWorkingState,
+    ) -> None:
+        if work.token is None or work.token_expires_at is None:
+            return
+        try:
+            await self._adb.start_activity(
+                serial,
+                self._config.component,
+                {
+                    "session_id": session_id,
+                    "session_token": work.token,
+                    "token_expires_at_epoch_ms": int(
+                        work.token_expires_at.timestamp() * 1000
+                    ),
+                    "request_media_permissions": "1",
+                },
+            )
+        except AcquisitionError as exc:
+            logger.warning(
+                "agent_media_permission_relaunch_failed",
+                extra={
+                    "session_id": session_id,
+                    "device_ref": device_ref(serial),
+                    "error_category": exc.category.value,
+                },
+            )
+
+    async def _relaunch_for_communication_permission_dialog(
+        self,
+        serial: str,
+        session_id: str,
+        work: BootstrapWorkingState,
+    ) -> None:
+        if work.token is None or work.token_expires_at is None:
+            return
+        try:
+            await self._adb.start_activity(
+                serial,
+                self._config.component,
+                {
+                    "session_id": session_id,
+                    "session_token": work.token,
+                    "token_expires_at_epoch_ms": int(
+                        work.token_expires_at.timestamp() * 1000
+                    ),
+                    "request_communication_permissions": "1",
+                },
+            )
+        except AcquisitionError as exc:
+            logger.warning(
+                "agent_comm_permission_relaunch_failed",
+                extra={
+                    "session_id": session_id,
+                    "device_ref": device_ref(serial),
+                    "error_category": exc.category.value,
+                },
+            )
 
     async def verify_special_access(
         self,
@@ -361,6 +513,55 @@ class AgentAccessCoordinator:
                 user_id=user_id,
             )
             work.special_access[access.value] = state.value
+            if access == SpecialAccessKind.ACCESSIBILITY and component is not None:
+                ready: bool | None = None
+                if callable(
+                    ready_probe := getattr(
+                        self._adb,
+                        "accessibility_ready_for_text_only",
+                        None,
+                    )
+                ):
+                    ready = await ready_probe(serial, component)
+                elif callable(
+                    service_bound := getattr(
+                        self._adb,
+                        "accessibility_service_bound",
+                        None,
+                    )
+                ):
+                    ready = await service_bound(serial, component)
+                if state == SpecialAccessState.GRANTED and ready is False:
+                    binding = AccessibilityBindingState.UNBOUND
+                    if callable(
+                        binding_state := getattr(
+                            self._adb,
+                            "accessibility_binding_state",
+                            None,
+                        )
+                    ):
+                        binding = await binding_state(serial, component)
+                    master_enabled = True
+                    if callable(
+                        master_probe := getattr(
+                            self._adb,
+                            "accessibility_master_enabled",
+                            None,
+                        )
+                    ):
+                        master_enabled = await master_probe(serial, user_id=user_id)
+                    logger.warning(
+                        "agent_accessibility_not_ready",
+                        extra={
+                            "request_id": request_id,
+                            "session_id": session_id,
+                            "device_ref": device_ref(serial),
+                            "binding_state": binding.value,
+                            "master_enabled": master_enabled,
+                        },
+                    )
+                    state = SpecialAccessState.NOT_GRANTED
+                    work.special_access[access.value] = state.value
             if state == SpecialAccessState.GRANTED:
                 continue
             if (
@@ -393,6 +594,28 @@ class AgentAccessCoordinator:
                         },
                     )
                 work.special_access[access.value] = state.value
+                if state == SpecialAccessState.GRANTED:
+                    ready: bool | None = None
+                    if callable(
+                        ready_probe := getattr(
+                            self._adb,
+                            "accessibility_ready_for_text_only",
+                            None,
+                        )
+                    ):
+                        ready = await ready_probe(serial, component)
+                    elif callable(
+                        service_bound := getattr(
+                            self._adb,
+                            "accessibility_service_bound",
+                            None,
+                        )
+                    ):
+                        ready = await service_bound(serial, component)
+                    if ready is not False:
+                        continue
+                    state = SpecialAccessState.NOT_GRANTED
+                    work.special_access[access.value] = state.value
                 if state == SpecialAccessState.GRANTED:
                     continue
                 # Restore can return UNAVAILABLE (foreign a11y entries) or DENIED
@@ -438,26 +661,16 @@ class AgentAccessCoordinator:
                         },
                     )
                     continue
-                if is_required:
-                    category = (
-                        ErrorCategory.ACCESS_DENIED
-                        if state == SpecialAccessState.DENIED
-                        else ErrorCategory.DEVICE_UNSUPPORTED
-                    )
-                    raise acquisition_error(
-                        category,
-                        "Notification access wajib tidak dapat diaktifkan otomatis.",
-                    )
                 logger.info(
-                    "agent_optional_access_unavailable",
+                    "agent_notification_adb_grant_unavailable",
                     extra={
                         "request_id": request_id,
                         "session_id": session_id,
                         "device_ref": device_ref(serial),
                         "state": access.value,
+                        "access_state": state.value,
                     },
                 )
-                continue
             if state == SpecialAccessState.UNAVAILABLE:
                 if is_required:
                     raise acquisition_error(

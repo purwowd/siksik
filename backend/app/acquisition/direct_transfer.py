@@ -695,7 +695,11 @@ class DirectCrawlTransferService:
                     suffix = mimetypes.guess_extension(item.mime_type) or ".bin"
                 if not SAFE_SUFFIX.fullmatch(suffix):
                     suffix = ".bin"
-                filename = f"{item.record_id}__{item.artifact_id}{suffix.lower()}"
+                # A binary-bearing record is contractually limited to one
+                # source_binary artifact. Keep its host path stable per logical
+                # record; artifact UUIDs are transfer internals and previously
+                # leaked as duplicate-looking gallery paths.
+                filename = f"{item.record_id}{suffix.lower()}"
             target = (directory / filename).resolve()
             if not target.is_relative_to(data_root.resolve()):
                 raise acquisition_error(

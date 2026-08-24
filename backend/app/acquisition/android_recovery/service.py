@@ -382,7 +382,7 @@ class AndroidRecoveryService:
         known_hashes.add(digest)
         stats.payloads_captured += 1
         stats.bytes_captured += size
-        mime = _safe_mime_type(candidate.mime_type, destination.name)
+        mime = detect_recovery_mime_type(destination, candidate.mime_type)
         return RecoveryArtifactV1(
             candidate_id=candidate.candidate_id,
             relative_path=relative,
@@ -888,6 +888,38 @@ def _safe_mime_type(value: str | None, filename: str) -> str:
         return candidate
     guessed = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     return guessed if MIME_TYPE.fullmatch(guessed) else "application/octet-stream"
+
+
+def detect_recovery_mime_type(path: Path, declared: str | None = None) -> str:
+    """Resolve recovery payload MIME from bytes when provider metadata is generic.
+
+    Filesystem trash entries commonly have opaque names, so Android reports no
+    useful MIME and the payload is staged as ``.bin``.  The manifest must still
+    describe the captured bytes accurately; otherwise a valid image is dropped
+    by indexing and cannot be previewed.
+    """
+    candidate = _safe_mime_type(declared, path.name)
+    if candidate != "application/octet-stream":
+        return candidate
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(32)
+    except OSError:
+        return candidate
+    if header.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        return "image/webp"
+    if len(header) >= 12 and header[4:8] == b"ftyp":
+        brand = header[8:12]
+        if brand in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}:
+            return "image/heic"
+        return "video/mp4"
+    return candidate
 
 
 def _read_gallery_index(path: Path) -> tuple[dict[str, int], dict[int, list[int]]]:

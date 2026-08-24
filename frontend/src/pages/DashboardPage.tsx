@@ -19,6 +19,7 @@ type Props = {
   session: SessionSummary | null;
   sessionList: SessionSummary[];
   sessionsLoading: boolean;
+  sessionPickerLocked?: boolean;
   onPickSession: (id: string) => void;
   dash: DashboardStats | null;
   dashSessions: Paginated<SessionSummary> | null;
@@ -121,6 +122,7 @@ export function DashboardPage({
   session,
   sessionList,
   sessionsLoading,
+  sessionPickerLocked,
   onPickSession,
   dash,
   dashSessions,
@@ -160,6 +162,7 @@ export function DashboardPage({
         sessions={sessionList}
         value={session?.id ?? null}
         loading={sessionsLoading}
+        locked={sessionPickerLocked}
         onChange={onPickSession}
       />
       <p className="login-hint hint-spaced">

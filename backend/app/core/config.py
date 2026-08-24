@@ -4,6 +4,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = ROOT.parent
 DATA_DIR = ROOT / "data"
 STAGING_DIR = DATA_DIR / "staging"
 DB_PATH = DATA_DIR / "poc.db"
@@ -11,7 +12,14 @@ SYNTHETIC_DIR = DATA_DIR / "synthetic"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SADT_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="SADT_",
+        env_file=(
+            str(PROJECT_ROOT / ".env"),
+            str(ROOT / ".env"),
+        ),
+        extra="ignore",
+    )
 
     app_name: str = "Sistem Analisis Digital Terpadu — PoC"
     api_prefix: str = "/api/v1"
@@ -21,6 +29,13 @@ class Settings(BaseSettings):
         "http://localhost:4173",
         "http://127.0.0.1:4173",
     ]
+    # Lab LAN / WSL mirrored: allow private-network Origins (phone, other PCs)
+    cors_allow_origin_regex: str = (
+        r"https?://("
+        r"localhost|127\.0\.0\.1|"
+        r"(\d{1,3}\.){3}\d{1,3}"
+        r")(:\d+)?"
+    )
 
     data_dir: Path = DATA_DIR
     staging_dir: Path = STAGING_DIR
@@ -91,6 +106,7 @@ class Settings(BaseSettings):
     android_agent_component: str = "com.siksik.agent/.session.BootstrapActivity"
     android_agent_api_version: str = "1.0"
     android_agent_device_port: int = 38471
+    android_agent_forward_host: str | None = None
     android_agent_token_ttl_s: int = 3600
     android_agent_request_timeout_s: float = 60.0
     android_agent_request_attempts: int = 3
@@ -171,6 +187,8 @@ class Settings(BaseSettings):
     gmail_quick_max_messages: int = Field(default=0, ge=0, le=100_000)
     gmail_full_max_messages: int = Field(default=0, ge=0, le=100_000)
     gmail_request_timeout_s: float = Field(default=30.0, ge=5.0, le=120.0)
+    gmail_oauth_attempts: int = Field(default=5, ge=1, le=10)
+    gmail_oauth_request_timeout_s: float = Field(default=90.0, ge=15.0, le=180.0)
     gmail_scope: str = "oauth2:https://www.googleapis.com/auth/gmail.readonly"
 
     @property

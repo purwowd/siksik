@@ -6,10 +6,24 @@ import java.util.Locale
 
 object CommunicationPolicy {
     const val TEXT_ONLY_COVER_ACTION = "com.siksik.agent.action.TEXT_ONLY_CRAWL_COVER"
+    const val TEXT_ONLY_COVER_PROBE_ACTION = "com.siksik.agent.action.TEXT_ONLY_CRAWL_COVER_PROBE"
+    const val TEXT_ONLY_COVER_PROBE_PREFIX = "SIKSIK_COVER_V1"
     const val TEXT_ONLY_COVER_VISIBLE_EXTRA = "visible"
     const val A11Y_TAP_ACTION = "com.siksik.agent.action.A11Y_TAP"
     const val A11Y_TAP_X_EXTRA = "x"
     const val A11Y_TAP_Y_EXTRA = "y"
+    const val A11Y_SWIPE_ACTION = "com.siksik.agent.action.A11Y_SWIPE"
+    const val A11Y_SWIPE_X_FROM_EXTRA = "x_from"
+    const val A11Y_SWIPE_Y_FROM_EXTRA = "y_from"
+    const val A11Y_SWIPE_X_TO_EXTRA = "x_to"
+    const val A11Y_SWIPE_Y_TO_EXTRA = "y_to"
+    const val A11Y_SWIPE_DURATION_EXTRA = "duration_ms"
+    const val A11Y_BACK_ACTION = "com.siksik.agent.action.A11Y_BACK"
+    const val A11Y_GESTURE_RESULT_PREFIX = "SIKSIK_A11Y_GESTURE_V1"
+    const val ACCESSIBILITY_RECOVERY_ACTION = "com.siksik.agent.action.RECOVER_ACCESSIBILITY"
+    const val ACCESSIBILITY_SUSPEND_ACTION = "com.siksik.agent.action.SUSPEND_ACCESSIBILITY"
+    const val ACCESSIBILITY_PROBE_ACTION = "com.siksik.agent.action.PROBE_ACCESSIBILITY_BINDING"
+    const val ACCESSIBILITY_PROBE_PREFIX = "SIKSIK_A11Y_V1"
 
     val supportedSocialTargets = linkedSetOf(
         "com.twitter.android",

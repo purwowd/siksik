@@ -1,10 +1,84 @@
 # SIKSIK Flow Implementation Changelog
 
-- Work period: 2026-07-16 to 2026-08-20
+- Work period: 2026-07-16 to 2026-08-23
 - Status: Unreleased local changes
-- Git baseline: `ac8d1fc`
+- Git baseline: `74a11ff` (+ staged batch below)
 - Android agent: `0.7.0`, API `1.0`
-- Primary project: `/Users/macbook/Documents/Product1/siksik`
+- Primary project: `/home/me/siksik` (WSL lab); Mac mirror `/Users/macbook/Documents/Product1/siksik`
+
+## 2026-08-23: WSL lab host, dual .env loading, LAN CORS, ADB forward gateway
+
+- `start_poc.sh`: WSL2 CUDA path (`/usr/lib/wsl/lib`), Windows ADB gateway
+  (`ADB_SERVER_SOCKET`, `SADT_AGENT_FORWARD_HOST`), Java 17 + Android SDK PATH,
+  load repo-root `.env` then `backend/.env` without overriding caller exports,
+  API/UI bind `0.0.0.0`, nvm fallback for non-interactive shells, crash-restart
+  API watchdog unchanged.
+- `config.py`: pydantic reads `PROJECT_ROOT/.env` + `backend/.env`; optional
+  `cors_allow_origin_regex` for lab LAN/private IPs; `android_agent_forward_host`,
+  Gmail OAuth retry/timeouts.
+- `adb.py`: `resolve_agent_forward_host()` (WSL default gateway), accessibility
+  dumpsys parse/probe, suspend/recover/cover broadcast helpers, in-app recovery
+  via exported `AccessibilityRecoveryReceiver`.
+- Scripts: `expose_lan.ps1` / `.cmd`, `setup_android_sdk.sh`,
+  `trigger_gmail_oauth.py`.
+- `.gitignore`: keep agent Kotlin `staging/` sources under `**/staging/` ignore,
+  add `*.bak` and `:memory:*`; `ios-media-puller/.env.example` uses generic WDA
+  placeholders (no host-specific paths).
+
+## 2026-08-23: Accessibility recovery, VISUAL suspend, TEXT_ONLY cover probe
+
+- Agent: `AccessibilityRecovery` + exported `AccessibilityRecoveryReceiver`
+  rebind SIKSIK a11y via `WRITE_SECURE_SETTINGS`; `TextOnlyCrawlCoverState`
+  persists attach marker, cleared on service reconnect.
+- `TextOnlyCrawlCoverReceiver` exported; cover probe returns
+  `SIKSIK_COVER_V1;status=shown|hidden`; a11y tap/swipe/back gestures report
+  `SIKSIK_A11Y_GESTURE_V1` result prefix.
+- Host `automation.py`: suspend a11y before Instagram (VISUAL) instrumentation;
+  restore + wait bound before X/FB; hide cover best-effort after crawl; binding
+  probes distinguish master-off vs service crashed/unbound.
+- Contract: `social_crawl_contract.py` requires exported receivers,
+  recovery/suspend adb actions, cover hide after finished debug frame.
+
+## 2026-08-23: Automation APK lifecycle, bootstrap grants, Gmail OAuth broker
+
+- `AutomationPackageCoordinator`: separate instrumentation APK install phase
+  (`INSTALL_AUTOMATION` / `AWAITING_INSTALL_APPROVAL`) with metadata inspect and
+  `SADT_ANDROID_AGENT_FORCE_REINSTALL` policy.
+- Bootstrap starts agent before runtime-permission wait so `BootstrapActivity`
+  can show system dialogs; intent extras request media + communication grants;
+  host relaunch helpers when OEM blocks silent grant.
+- `gmail_oauth.py` + `ensure_gmail_oauth`: session-bound account/token resolve
+  (agent AccountRoutes → dumpsys fallback); wired into `Phase7AndroidAgentRunner`
+  after transfer ingest.
+- `.env.example`: Gmail OAuth client ID + debug APK SHA-1 note (template only;
+  live values stay in local `.env` files, gitignored).
+
+## 2026-08-23: On-device transfer staging, gallery policy, analysis cache, GPU guard
+
+- Agent `staging/`: `CrawlTransferManager`, `ManifestBuilder`, state stores —
+  package selected records to external transfer dir under app storage.
+- `gallery.py`: Instagram shows screenshot attachments only; X/Facebook
+  text-only never expose legacy screenshots; recovery/trash classification;
+  unindexed recovery rows; do not re-apply acquisition time scope on already
+  transferred records.
+- Frontend: gallery chips "10 paling sering/terbaru diakses";
+  `resolvePreferredSession` prefers active session; `?sesi=` exact UUID only
+  (8-char prefix match removed).
+- `inference_guard.py`: global GPU inference RLock serializes heavy models;
+  analysis hash cache keys combine binary SHA256 + canonical text for
+  `source_binary` crawl artifacts so context is not silently reused.
+- `main.py`: CORS accepts optional origin regex alongside fixed localhost list.
+
+## 2026-08-23: Facebook Activity Log and X timeline crawl hardening
+
+- Facebook: never tap Activity Log "Semua/All" Select All checkbox; reactions
+  hub navigation; stable Activity Log row button keeps summary + body together;
+  `cleanFacebookActivityText`; feed/reactions phase transitions; additive
+  fallback for builds without stable row resource.
+- X: `advanceXTimeline`, shell launch fallback when component launch fails,
+  a11y service swipe when UiDevice swipe reports success without viewport change.
+- UiAutomator: `safePressBack`, bounded `safeSwipe`, gesture result probes;
+  shell coordinate path no longer returns false success on failure.
 
 ## 2026-08-21: IG comments body text wired into analysis
 

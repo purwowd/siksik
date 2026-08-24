@@ -279,6 +279,8 @@ class AgentArtifactService:
         java_home = self._first_directory(
             self._config.java_home,
             Path(environment["JAVA_HOME"]) if environment.get("JAVA_HOME") else None,
+            Path("/usr/lib/jvm/java-17-openjdk-amd64"),
+            Path("/usr/lib/jvm/java-17-openjdk"),
             Path("/opt/homebrew/opt/openjdk@17"),
             Path("/usr/local/opt/openjdk@17"),
         )
@@ -288,6 +290,8 @@ class AgentArtifactService:
             Path(environment["ANDROID_SDK_ROOT"])
             if environment.get("ANDROID_SDK_ROOT")
             else None,
+            Path.home() / "Android" / "Sdk",
+            Path("/usr/lib/android-sdk"),
             Path("/opt/homebrew/share/android-commandlinetools"),
             Path("/usr/local/share/android-commandlinetools"),
             Path.home() / "Library/Android/sdk",

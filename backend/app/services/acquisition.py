@@ -904,68 +904,76 @@ async def acquire_dispatch(
         and (device_type == DeviceType.ANDROID or simulated)
         and not ((result.staging / "email").is_dir() and any((result.staging / "email").iterdir()))
     ):
+        from app.acquisition.gmail_oauth import (
+            ensure_gmail_oauth,
+            session_acquisition_reference,
+        )
         from app.acquisition.gmail_service import GmailAcquisitionService
+        from app.acquisition.runtime import AgentRuntimeSecrets, agent_runtime_registry
 
-        try:
-            token = None
-            account_name = None
-            if not simulated and agent_runner is not None:
-                from app.acquisition.runtime import agent_runtime_registry
+        token = None
+        account_name = None
+        if not simulated and agent_runner is not None:
+            from app.acquisition.runtime import agent_runtime_registry as registry
 
-                runtime = await agent_runtime_registry.get(session_id)
-                account_name = runtime.google_account
-                token = runtime.google_token
-                if not token:
-                    from app.acquisition.agent_client import AgentClient, AgentClientConfig
+            runtime = await registry.get(session_id)
+            account_name = runtime.google_account
+            token = runtime.google_token
+            from app.acquisition.agent_client import AgentClient, AgentClientConfig
 
-                    runtime_client = AgentClient(
-                        runtime.forward_host_port,
-                        runtime.token,
-                        config=AgentClientConfig(
-                            timeout_seconds=settings.android_agent_request_timeout_s,
-                            max_attempts=settings.android_agent_request_attempts,
-                            max_response_bytes=(
-                                settings.android_agent_max_response_mb * 1024 * 1024
-                            ),
-                        ),
-                    )
-                    if not account_name:
-                        accounts = await runtime_client.list_google_accounts(session_id)
-                        if accounts:
-                            account_name = accounts[0].name
-                    if account_name:
-                        token = await runtime_client.get_google_auth_token(
-                            session_id,
-                            account_name,
-                            scope=settings.resolved_gmail_scope,
-                        )
-                        if not token and settings.resolved_gmail_scope != settings.gmail_scope:
-                            token = await runtime_client.get_google_auth_token(
-                                session_id,
-                                account_name,
-                                scope=settings.gmail_scope,
-                            )
-            gmail_svc = GmailAcquisitionService()
-            gmail_count, _ = await gmail_svc.acquire(
+            runtime_client = AgentClient(
+                runtime.forward_host_port,
+                runtime.token,
+                config=AgentClientConfig(
+                    timeout_seconds=settings.android_agent_request_timeout_s,
+                    max_attempts=settings.android_agent_request_attempts,
+                    max_response_bytes=(
+                        settings.android_agent_max_response_mb * 1024 * 1024
+                    ),
+                ),
+            )
+            account_name, token = await ensure_gmail_oauth(
+                client=runtime_client,
                 session_id=session_id,
-                staging=result.staging,
-                mode=mode,
-                token=token,
-                account_name=account_name,
-                simulated=simulated,
+                serial=device_id,
+                adb=None,
                 on_progress=on_progress,
                 request_id=context.request_id,
+                existing_account=account_name,
+                existing_token=token,
             )
-            if gmail_count > 0:
-                result = AcquisitionResult(
-                    staging=result.staging,
-                    item_count=result.item_count + gmail_count,
-                    duration_ms=result.duration_ms,
-                    method=f"{result.method}+gmail_api",
-                    provider=result.provider,
+            await agent_runtime_registry.bind(
+                AgentRuntimeSecrets(
+                    session_id=runtime.session_id,
+                    serial=runtime.serial,
+                    token=runtime.token,
+                    forward_host_port=runtime.forward_host_port,
+                    token_expires_at=runtime.token_expires_at,
+                    google_token=token,
+                    google_account=account_name,
                 )
-        except Exception as exc:
-            logger.warning("gmail_acquisition_dispatch_skipped", extra={"error": str(exc)})
+            )
+        reference = await session_acquisition_reference(session_id)
+        gmail_svc = GmailAcquisitionService()
+        gmail_count, _ = await gmail_svc.acquire(
+            session_id=session_id,
+            staging=result.staging,
+            mode=mode,
+            token=token,
+            account_name=account_name,
+            simulated=simulated,
+            on_progress=on_progress,
+            request_id=context.request_id,
+            reference=reference,
+        )
+        if gmail_count > 0:
+            result = AcquisitionResult(
+                staging=result.staging,
+                item_count=result.item_count + gmail_count,
+                duration_ms=result.duration_ms,
+                method=f"{result.method}+gmail_api",
+                provider=result.provider,
+            )
 
     return result.as_legacy_tuple()
 
@@ -1013,29 +1021,35 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
     t0 = time.perf_counter()
     files: list[tuple] = []
     from app.acquisition.android_recovery.paths import is_recovery_namespace_path
-    from app.acquisition.android_recovery.service import recovery_metadata
+    from app.acquisition.android_recovery.service import (
+        detect_recovery_mime_type,
+        recovery_metadata,
+    )
     from app.acquisition.ios_afc import is_ios_library_path, ios_library_metadata
 
     recovered_artifacts = await asyncio.to_thread(recovery_metadata, staging)
     ios_library_artifacts = await asyncio.to_thread(ios_library_metadata, staging)
-    paths = [
-        p
-        for p in staging.rglob("*")
-        if p.is_file()
-        and not p.name.endswith(".risk")
-        and "_backup" not in p.parts
-        and not any(part.startswith("_") for part in p.parts)
-        and not _is_junk_media_path(str(p))
-        and (
-            not is_recovery_namespace_path(p.relative_to(staging).as_posix())
-            or p.relative_to(staging).as_posix() in recovered_artifacts
-        )
-        and (
-            not is_ios_library_path(p.relative_to(staging).as_posix())
-            or p.relative_to(staging).as_posix() in ios_library_artifacts
-        )
-    ]
-    total = len(paths)
+
+    def indexable_path(path: Path) -> bool:
+        if (
+            not path.is_file()
+            or path.name.endswith(".risk")
+            or "_backup" in path.parts
+            or any(part.startswith("_") for part in path.parts)
+        ):
+            return False
+        relative = path.relative_to(staging).as_posix()
+        is_verified_recovery = relative in recovered_artifacts
+        is_verified_ios = relative in ios_library_artifacts
+        if is_recovery_namespace_path(relative) and not is_verified_recovery:
+            return False
+        if is_ios_library_path(relative) and not is_verified_ios:
+            return False
+        # A validated recovery manifest is authoritative for opaque payload
+        # names such as trash/*.bin. Extension-based junk filtering is only for
+        # ordinary files discovered by walking staging.
+        return is_verified_recovery or is_verified_ios or not _is_junk_media_path(str(path))
+
     sem = asyncio.Semaphore(settings.worker_concurrency)
     crawl_artifact_rows = await db.fetchall(
         "SELECT a.record_id, a.source_kind, a.role, a.mime_type, a.relative_path, "
@@ -1046,10 +1060,59 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
         (session_id,),
     )
     crawl_artifacts = {row["relative_path"]: row for row in crawl_artifact_rows}
+    binary_record_ids = {
+        str(row["record_id"])
+        for row in crawl_artifact_rows
+        if str(row["role"] or "") == "source_binary"
+    }
+
+    def is_duplicate_canonical_companion(path: Path) -> bool:
+        relative = path.relative_to(staging).as_posix()
+        artifact = crawl_artifacts.get(relative)
+        return bool(
+            artifact is not None
+            and str(artifact["role"] or "") == "canonical_record"
+            and str(artifact["record_id"]) in binary_record_ids
+        )
+
+    paths = [
+        path
+        for path in staging.rglob("*")
+        if indexable_path(path) and not is_duplicate_canonical_companion(path)
+    ]
+    total = len(paths)
     existing_file_rows = await db.fetchall(
         "SELECT id, path FROM files WHERE session_id = ?",
         (session_id,),
     )
+    duplicate_canonical_paths = {
+        str(row["relative_path"])
+        for row in crawl_artifact_rows
+        if str(row["role"] or "") == "canonical_record"
+        and str(row["record_id"]) in binary_record_ids
+    }
+    # Older/live ingestion could already have indexed and analyzed the
+    # canonical JSON before its source binary arrived. It is a transfer
+    # companion, not another acquired file. Remove that technical row and its
+    # duplicate findings atomically; the binary below is then analyzed once
+    # with canonical metadata merged into its analysis context.
+    duplicate_file_rows = [
+        row for row in existing_file_rows if str(row["path"]) in duplicate_canonical_paths
+    ]
+    if duplicate_file_rows:
+        async with db.transaction() as conn:
+            await conn.executemany(
+                "DELETE FROM findings WHERE session_id = ? AND file_id = ?",
+                [(session_id, str(row["id"])) for row in duplicate_file_rows],
+            )
+            await conn.executemany(
+                "DELETE FROM files WHERE session_id = ? AND id = ?",
+                [(session_id, str(row["id"])) for row in duplicate_file_rows],
+            )
+        duplicate_ids = {str(row["id"]) for row in duplicate_file_rows}
+        existing_file_rows = [
+            row for row in existing_file_rows if str(row["id"]) not in duplicate_ids
+        ]
     existing_file_ids = {str(row["path"]): str(row["id"]) for row in existing_file_rows}
     crawl_capture_meta: dict[str, dict[str, object]] = {}
     for row in crawl_artifact_rows:
@@ -1079,6 +1142,11 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
             "captured_at": captured_at if isinstance(captured_at, str) else None,
             "captured_year": captured_year,
             "date_source": "android_agent_canonical",
+            "canonical_normalized_text": (
+                payload.get("normalized_text")
+                if isinstance(payload.get("normalized_text"), str)
+                else None
+            ),
             **gallery_meta,
         }
 
@@ -1107,7 +1175,11 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                 if artifact is not None
                 else ios_artifact.mime_type
                 if ios_artifact is not None
-                else recovered.mime_type if recovered is not None else guess_mime(p)
+                else (
+                    detect_recovery_mime_type(p, recovered.mime_type)
+                    if recovered is not None
+                    else guess_mime(p)
+                )
             )
             if recovered is not None and p.stat().st_size != recovered.size_bytes:
                 raise RuntimeError("artifact recovery Android gagal verifikasi")
@@ -1146,6 +1218,10 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         "album": capture_extra.get("album"),
                     }
                 )
+                if str(artifact["role"] or "") == "source_binary":
+                    meta["canonical_normalized_text"] = capture_extra.get(
+                        "canonical_normalized_text"
+                    )
             if recovered is not None:
                 meta.update(
                     {

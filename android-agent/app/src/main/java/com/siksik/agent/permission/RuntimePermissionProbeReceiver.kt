@@ -49,6 +49,7 @@ class RuntimePermissionProbeReceiver : BroadcastReceiver() {
             "android.permission.POST_NOTIFICATIONS",
             "android.permission.READ_SMS",
             "android.permission.READ_CONTACTS",
+            "android.permission.GET_ACCOUNTS",
         )
     }
 }

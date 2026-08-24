@@ -78,6 +78,7 @@ class SelectionScorer(
         val boundedScore = score.coerceIn(0, MAX_BASIS_POINTS)
         val thresholdMet = boundedScore >= policy.thresholdBasisPoints
         val autoSelected = thresholdMet || requiredSocialScope || inScopeData
+        val includeDuplicateInstances = policy.duplicateRepresentativePolicy == "include_all"
         val reasons = buildList {
             add(if (thresholdMet) "threshold_met" else "threshold_not_met")
             if (requiredSocialScope) add("required_social_scope")
@@ -96,7 +97,7 @@ class SelectionScorer(
             thresholdBasisPoints = policy.thresholdBasisPoints,
             autoSelected = autoSelected,
             eligibleForAutomaticSelection = autoSelected &&
-                (!isNonRepresentative || requiredSocialScope),
+                (!isNonRepresentative || requiredSocialScope || includeDuplicateInstances),
             matchedKeywords = matchedKeywords,
             matchedRules = matchedRules.sorted(),
             modelSignals = modelSignals.sortedBy(SelectionModelSignal::signal),

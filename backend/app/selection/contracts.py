@@ -72,7 +72,7 @@ class SelectionPolicyV1(StrictSelectionModel):
             "own_replies",
         ]
     ] = Field(max_length=6)
-    duplicate_representative_policy: Literal["representative_only"]
+    duplicate_representative_policy: Literal["representative_only", "include_all"]
     threshold_basis_points: int = Field(ge=0, le=10_000)
     maximum_candidates: int = Field(ge=1, le=1_000_000)
     maximum_bytes: int = Field(ge=1, le=4 * 1024 * 1024 * 1024 * 1024)

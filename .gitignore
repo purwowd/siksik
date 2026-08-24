@@ -50,6 +50,9 @@ backend/data/
 
 # Staging / reports / dumps
 **/staging/
+# Keep on-device agent staging Kotlin sources (ignored by **/staging/ above)
+!android-agent/app/src/main/java/com/siksik/agent/staging/
+!android-agent/app/src/main/java/com/siksik/agent/staging/**
 **/reports/
 **/synthetic/
 *.zip
@@ -102,6 +105,8 @@ Thumbs.db
 
 # --- Logs / temp ---
 *.log
+*.bak
+*memory*
 tmp/
 temp/
 temp_crawl/

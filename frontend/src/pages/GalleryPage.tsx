@@ -9,6 +9,7 @@ type Props = {
   session: SessionSummary | null;
   sessionList: SessionSummary[];
   sessionsLoading: boolean;
+  sessionPickerLocked?: boolean;
   loading: boolean;
   albums: GalleryAlbum[];
   album: string;
@@ -22,6 +23,7 @@ export function GalleryPage({
   session,
   sessionList,
   sessionsLoading,
+  sessionPickerLocked,
   loading,
   albums,
   album,
@@ -31,6 +33,7 @@ export function GalleryPage({
   onPage,
 }: Props) {
   const originAlbums = albums.filter((item) => item.kind === "album" && item.count > 0);
+  const classificationAlbums = albums.filter((item) => item.kind === "classification");
   const accessAlbums = ACCESS_FILTERS.map((id) => {
     const match = albums.find((item) => item.id === id);
     return {
@@ -50,16 +53,18 @@ export function GalleryPage({
             sessions={sessionList}
             value={session?.id ?? null}
             loading={sessionsLoading}
+            locked={sessionPickerLocked}
             onChange={onPickSession}
           />
         </div>
         <p className="review-progress compact" role="note">
-          Hasil crawl yang sudah masuk sesi, termasuk yang tidak terflag. Bukan seluruh isi HP.
+          Semua file berstatus pulled ditampilkan, termasuk metadata pendamping; flag tidak menyaring
+          data. Trash dan recovered image dihitung terpisah.
         </p>
       </div>
 
-      <div className="filter-row" role="group" aria-label="Album galeri">
-        <span className="filter-label">Galeri</span>
+      <div className="filter-row" role="group" aria-label="Filter akses galeri">
+        <span className="filter-label">Akses</span>
         {accessAlbums.map((item) => (
           <button
             key={item.id}
@@ -71,6 +76,25 @@ export function GalleryPage({
             {item.label} {item.count}
           </button>
         ))}
+      </div>
+
+      <div className="filter-row" role="group" aria-label="Status data galeri">
+        <span className="filter-label">Status data</span>
+        {classificationAlbums.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className={`chip ${album === item.id ? "active" : ""}`}
+            aria-pressed={album === item.id}
+            onClick={() => setAlbum(item.id)}
+          >
+            {item.label} {item.count}
+          </button>
+        ))}
+      </div>
+
+      <div className="filter-row" role="group" aria-label="Sumber dan album galeri">
+        <span className="filter-label">Sumber / album</span>
         {originAlbums.map((item) => (
           <button
             key={item.id}
@@ -89,7 +113,7 @@ export function GalleryPage({
       ) : loading && !data ? (
         <FindingsSkeleton />
       ) : !data || data.total === 0 ? (
-        <div className="empty">{loading ? "Memuat galeri…" : "Tidak ada media pada album ini"}</div>
+        <div className="empty">{loading ? "Memuat galeri…" : "Tidak ada data pada album ini"}</div>
       ) : (
         <div className={loading ? "list-refreshing" : undefined} aria-busy={loading}>
           <GalleryList sessionId={session.id} data={data} onPage={onPage} />

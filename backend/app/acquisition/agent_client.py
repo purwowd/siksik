@@ -18,7 +18,9 @@ from pydantic import (
     model_validator,
 )
 
+from app.acquisition.adb import resolve_agent_forward_host
 from app.acquisition.errors import AcquisitionError, ErrorCategory, acquisition_error
+from app.core.config import settings
 from app.selection.contracts import (
     SelectionCandidatePageV1,
     SelectionCandidateV1,
@@ -30,6 +32,10 @@ logger = logging.getLogger("siksik.acquisition.agent_client")
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
 SAFE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def _social_target_allowlist() -> frozenset[str]:
+    return frozenset(settings.android_agent_social_targets)
 
 
 def validate_utc_timestamp(value: str | None) -> str | None:
@@ -949,12 +955,16 @@ class AgentClient:
         *,
         config: AgentClientConfig | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        forward_host: str | None = None,
     ) -> None:
         if not 1 <= host_port <= 65535:
             raise acquisition_error(ErrorCategory.VALIDATION_ERROR, "Port agent tidak valid.")
         if not isinstance(token, str) or not 32 <= len(token) <= 512 or "\x00" in token:
             raise acquisition_error(ErrorCategory.VALIDATION_ERROR, "Token agent tidak valid.")
-        self._base_url = httpx.URL(f"http://127.0.0.1:{host_port}")
+        host = resolve_agent_forward_host(
+            forward_host or settings.android_agent_forward_host,
+        )
+        self._base_url = httpx.URL(f"http://{host}:{host_port}")
         self._token = token
         self._config = config or AgentClientConfig()
         self._transport = transport
@@ -1034,11 +1044,7 @@ class AgentClient:
         if document_grant_id is not None:
             self._validate_id(document_grant_id, "grant")
         targets = target_packages or []
-        allowed_targets = {
-            "com.twitter.android",
-            "com.facebook.katana",
-            "com.instagram.android",
-        }
+        allowed_targets = _social_target_allowlist()
         if len(targets) != len(set(targets)) or not set(targets) <= allowed_targets:
             raise acquisition_error(
                 ErrorCategory.VALIDATION_ERROR,
@@ -1498,14 +1504,20 @@ class AgentClient:
         scope: str = "oauth2:https://www.googleapis.com/auth/gmail.readonly",
         *,
         request_id: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> str | None:
         self._validate_id(session_id, "session")
+        json_body: dict[str, str] = {"account_name": account_name, "scope": scope}
+        client_id = settings.gmail_client_id.strip()
+        if client_id:
+            json_body["client_id"] = client_id
         res = await self.request(
             "POST",
             "/v1/accounts/google/token",
             GoogleTokenResponseV1,
-            json_body={"account_name": account_name, "scope": scope},
+            json_body=json_body,
             request_id=request_id,
+            timeout_seconds=timeout_seconds,
         )
         return res.body.token
 
@@ -1536,6 +1548,7 @@ class AgentClient:
         request_id: str | None = None,
         retry_auth_once: bool = False,
         idempotency_key: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> AgentResponse[ResponseT]:
         if method not in {"GET", "POST", "PATCH", "DELETE"}:
             raise acquisition_error(ErrorCategory.VALIDATION_ERROR, "Method agent tidak valid.")
@@ -1557,6 +1570,7 @@ class AgentClient:
                     json_body=json_body,
                     request_id=rid,
                     idempotency_key=idempotency_key,
+                    timeout_seconds=timeout_seconds,
                 )
             except AcquisitionError as exc:
                 transient = exc.category == ErrorCategory.AGENT_UNREACHABLE and exc.retryable
@@ -1592,11 +1606,12 @@ class AgentClient:
         json_body: dict[str, object] | None,
         request_id: str,
         idempotency_key: str | None,
+        timeout_seconds: float | None = None,
     ) -> AgentResponse[ResponseT]:
         try:
             async with httpx.AsyncClient(
                 base_url=self._base_url,
-                timeout=self._config.timeout_seconds,
+                timeout=timeout_seconds or self._config.timeout_seconds,
                 follow_redirects=False,
                 trust_env=False,
                 transport=self._transport,

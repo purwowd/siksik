@@ -7,12 +7,55 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# WSL2: libcuda hidup di /usr/lib/wsl/lib — tanpa ini torch/paddle tidak melihat GPU
+if [[ -d /usr/lib/wsl/lib ]]; then
+  export PATH="/usr/lib/wsl/lib:${PATH:-}"
+  export LD_LIBRARY_PATH="/usr/lib/wsl/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+# Prefer ~/bin adb wrapper (USB via Windows ADB server) + local Android SDK tools
+export PATH="${HOME}/bin:${HOME}/Android/Sdk/platform-tools:${HOME}/Android/Sdk/cmdline-tools/latest/bin:${PATH:-}"
+WSL_ADB_GATEWAY="$(ip route show default 2>/dev/null | awk '{print $3}')"
+if [[ -n "${WSL_ADB_GATEWAY:-}" ]]; then
+  export ADB_SERVER_SOCKET="tcp:${WSL_ADB_GATEWAY}:5037"
+  export SADT_AGENT_FORWARD_HOST="${SADT_AGENT_FORWARD_HOST:-$WSL_ADB_GATEWAY}"
+fi
+if [[ -d /usr/lib/jvm/java-17-openjdk-amd64 ]]; then
+  export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}"
+fi
+export ANDROID_HOME="${ANDROID_HOME:-${HOME}/Android/Sdk}"
+export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+
+# Load repo-root .env then backend/.env (only keys not already set by caller).
+# Without this, the lab defaults below would export 0 and override pydantic .env.
+load_env_file() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%$'\r'}"
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      val="${BASH_REMATCH[2]}"
+      val="${val#\"}"; val="${val%\"}"
+      val="${val#\'}"; val="${val%\'}"
+      if [[ -z "${!key+x}" ]]; then
+        export "$key=$val"
+      fi
+    fi
+  done < "$env_file"
+}
+load_env_file "$ROOT/.env"
+load_env_file "$ROOT/backend/.env"
+
 API_PORT="${SADT_API_PORT:-8000}"
 UI_PORT="${SADT_UI_PORT:-5173}"
-# Default loopback only; set SADT_API_HOST=0.0.0.0 untuk expose LAN (lab saja)
-API_HOST="${SADT_API_HOST:-127.0.0.1}"
+# Bind all interfaces so Windows host / LAN can reach the API (after WSL portproxy).
+API_HOST="${SADT_API_HOST:-0.0.0.0}"
+export SADT_API_HOST="$API_HOST"
+export SADT_API_PORT="$API_PORT"
+export SADT_UI_PORT="$UI_PORT"
 
-# ---- Lab-safe defaults (hanya jika belum di-set caller) ----
+# ---- Lab-safe defaults (hanya jika belum di-set caller / .env) ----
 : "${SADT_GPU_STACK_ENABLED:=0}"
 : "${SADT_GPU_WHISPER_ENABLED:=0}"
 : "${SADT_GPU_SAFEWATCH_ENABLED:=0}"
@@ -87,7 +130,14 @@ fi
 
 # Point Vite proxy to chosen API port
 export SADT_API_PORT
-npx vite --host 127.0.0.1 --port "$UI_PORT" &
+# Non-interactive shells (nohup/wsl -e) often miss nvm PATH
+if ! command -v npx >/dev/null 2>&1; then
+  if [[ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]]; then
+    # shellcheck disable=SC1090
+    source "${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+  fi
+fi
+npx vite --host 0.0.0.0 --port "$UI_PORT" &
 UI_PID=$!
 
 cleanup() {
@@ -106,9 +156,19 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+WSL_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo ""
 echo "SADT // OPS"
-echo "  API  http://127.0.0.1:$API_PORT/docs"
-echo "  UI   http://127.0.0.1:$UI_PORT"
+echo "  bind API $API_HOST:$API_PORT   UI 0.0.0.0:$UI_PORT"
+echo "  WSL   UI   http://127.0.0.1:$UI_PORT"
+echo "  WSL   API  http://127.0.0.1:$API_PORT/docs"
+if [[ -n "${WSL_IP:-}" ]]; then
+  echo "  WSL   direct http://$WSL_IP:$UI_PORT"
+fi
+echo ""
+echo "  Windows browser: http://127.0.0.1:$UI_PORT"
+echo "  (NAT localhostForwarding — jangan pakai portproxy/expose_lan lama)"
+echo "  Jika 127.0.0.1 gagal (Admin):"
+echo "    powershell -ExecutionPolicy Bypass -File C:\\siksik\\scripts\\expose_lan.ps1"
 echo "  Ctrl+C to stop"
 wait

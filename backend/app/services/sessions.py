@@ -187,6 +187,13 @@ class SessionManager:
         return [row_to_session(r) for r in rows], total
 
     async def cancel(self, session_id: str) -> dict[str, Any]:
+        current = await self.get(session_id)
+        if current["status"] in {
+            SessionStatus.COMPLETED.value,
+            SessionStatus.FAILED.value,
+            SessionStatus.CANCELLED.value,
+        }:
+            return current
         task = self._tasks.get(session_id)
         if task and not task.done():
             task.cancel()
@@ -194,11 +201,35 @@ class SessionManager:
                 await task
             except asyncio.CancelledError:
                 pass
+        # The task may have crossed its terminal commit immediately before the
+        # cancellation request won the race. Never relabel a genuinely finished
+        # session as cancelled.
+        current = await self.get(session_id)
+        if current["status"] in {
+            SessionStatus.COMPLETED.value,
+            SessionStatus.FAILED.value,
+        }:
+            return current
+        file_row = await db.fetchone(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(analyzed), 0) AS analyzed "
+            "FROM files WHERE session_id = ?",
+            (session_id,),
+        )
+        finding_row = await db.fetchone(
+            "SELECT COUNT(*) AS total FROM findings WHERE session_id = ?",
+            (session_id,),
+        )
+        file_total = int(file_row["total"]) if file_row else 0
+        analyzed_total = int(file_row["analyzed"]) if file_row else 0
+        finding_total = int(finding_row["total"]) if finding_row else 0
         await self._update(
             session_id,
             status=SessionStatus.CANCELLED,
             message="Dibatalkan operator",
             percent=100,
+            files_listed=file_total,
+            files_analyzed=min(analyzed_total, file_total),
+            findings_count=finding_total,
         )
         self._active_device = None
         return await self.get(session_id)
@@ -267,11 +298,24 @@ class SessionManager:
                 return
             progress = json.loads(row["progress_json"])
             timing = json.loads(row["timing_json"])
+            previous_phase = str(progress.get("phase") or "")
             if status:
                 progress["phase"] = status.value
             if percent is not None:
+                # Bootstrap has its own 0..100 scale. Once it reaches READY,
+                # acquisition must be allowed to enter the pipeline's range
+                # instead of inheriting a permanent 100%. Preserve monotonic
+                # progress for ordinary phase transitions.
+                phase_changed = status is not None and status.value != previous_phase
+                next_percent = float(percent)
+                current_percent = float(progress.get("percent", 0))
+                reset_completed_subphase = (
+                    phase_changed and current_percent >= 100.0 and next_percent < 100.0
+                )
                 progress["percent"] = round(
-                    max(float(progress.get("percent", 0)), percent),
+                    next_percent
+                    if reset_completed_subphase
+                    else max(current_percent, next_percent),
                     1,
                 )
             if message is not None:

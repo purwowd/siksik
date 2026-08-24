@@ -89,6 +89,7 @@ class GrantStore(private val context: Context) {
             "photo_picker", "directory" -> storedUris(grantId).isNotEmpty() &&
                 storedUris(grantId).all(::hasUriReadAccess)
             "media_library" -> hasLibraryAccess(record.effectiveScope)
+            "communication_runtime" -> hasCommunicationRuntimeAccess()
             else -> false
         }
         return if (stillGranted) record else finish(grantId, GrantState.REVOKED)
@@ -124,6 +125,12 @@ class GrantStore(private val context: Context) {
         )
         return result == PackageManager.PERMISSION_GRANTED
     }
+
+    private fun hasCommunicationRuntimeAccess(): Boolean =
+        context.checkSelfPermission(Manifest.permission.READ_SMS) ==
+            PackageManager.PERMISSION_GRANTED &&
+            context.checkSelfPermission(Manifest.permission.READ_CONTACTS) ==
+            PackageManager.PERMISSION_GRANTED
 
     private fun hasLibraryAccess(effectiveScope: String?): Boolean = when {
         Build.VERSION.SDK_INT >= 34 && "selected" in effectiveScope.orEmpty() ->
@@ -205,6 +212,6 @@ class GrantStore(private val context: Context) {
 
     companion object {
         private const val PREFERENCES_NAME = "siksik_grant_state"
-        val ALLOWED_SCOPES = setOf("photo_picker", "directory", "media_library")
+        val ALLOWED_SCOPES = setOf("photo_picker", "directory", "media_library", "communication_runtime")
     }
 }

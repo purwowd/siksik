@@ -248,28 +248,43 @@ class MediaStoreInventorySource(
         ) {
             return emptyList()
         }
-        val spec = favoriteQuerySpec()
         val out = mutableListOf<InventoryRecord>()
-        try {
-            resolver.query(spec.uri, spec.projection, spec.arguments, CancellationSignal())
-                ?.use { cursor ->
-                    while (cursor.moveToNext()) {
-                        if (isCancelled()) break
-                        mapRecord(cursor, spec)?.let { record ->
-                            if (timeScope.includes(record)) out.add(record)
+        for (spec in favoriteQuerySpecs()) {
+            if (isCancelled()) break
+            try {
+                resolver.query(spec.uri, spec.projection, spec.arguments, CancellationSignal())
+                    ?.use { cursor ->
+                        while (cursor.moveToNext()) {
+                            if (isCancelled()) break
+                            mapRecord(cursor, spec)?.let { record ->
+                                if (timeScope.includes(record)) out.add(record)
+                            }
                         }
                     }
-                }
-        } catch (_: SecurityException) {
-            return emptyList()
-        } catch (_: IllegalArgumentException) {
-            return emptyList()
+            } catch (_: SecurityException) {
+                continue
+            } catch (_: IllegalArgumentException) {
+                continue
+            }
+            // MATCH_ONLY is the platform-supported query. The SQL form below
+            // is retained solely as a compatibility fallback for OEM providers.
+            if (out.isNotEmpty()) break
         }
-        return out
+        return out.distinctBy(InventoryRecord::recordId)
     }
 
-    private fun favoriteQuerySpec(): QuerySpec {
-        val bundle = Bundle().apply {
+    private fun favoriteQuerySpecs(): List<QuerySpec> {
+        fun common(bundle: Bundle): Bundle = bundle.apply {
+            putString(
+                ContentResolver.QUERY_ARG_SQL_SORT_ORDER,
+                "${MediaStore.MediaColumns._ID} DESC",
+            )
+            putInt(ContentResolver.QUERY_ARG_LIMIT, BuildConfig.MAX_INVENTORY_PAGE_SIZE)
+        }
+        val matchOnly = common(Bundle().apply {
+            putInt(MediaStore.QUERY_ARG_MATCH_FAVORITE, MediaStore.MATCH_ONLY)
+        })
+        val sqlFallback = common(Bundle().apply {
             putString(
                 ContentResolver.QUERY_ARG_SQL_SELECTION,
                 "${MediaStore.MediaColumns.IS_FAVORITE} = ?",
@@ -278,13 +293,10 @@ class MediaStoreInventorySource(
                 ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
                 arrayOf("1"),
             )
-            putString(
-                ContentResolver.QUERY_ARG_SQL_SORT_ORDER,
-                "${MediaStore.MediaColumns._ID} DESC",
-            )
-            putInt(ContentResolver.QUERY_ARG_LIMIT, BuildConfig.MAX_INVENTORY_PAGE_SIZE)
+        })
+        return listOf(matchOnly, sqlFallback).map { bundle ->
+            QuerySpec(collectionUri(), projection(), bundle)
         }
-        return QuerySpec(collectionUri(), projection(), bundle)
     }
 
     private fun collectionUri(): Uri = when (adapter) {

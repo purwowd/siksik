@@ -50,6 +50,7 @@ class AgentBootstrapState(str, Enum):
     RESOLVE_OR_BUILD_AGENT = "resolve_or_build_agent"
     INSPECT_INSTALLED_PACKAGE = "inspect_installed_package"
     INSTALL_OR_UPDATE = "install_or_update"
+    INSTALL_AUTOMATION = "install_automation"
     AWAITING_INSTALL_APPROVAL = "awaiting_install_approval"
     APPLY_RUNTIME_PERMISSIONS = "apply_runtime_permissions"
     AWAITING_RUNTIME_PERMISSION = "awaiting_runtime_permission"
@@ -372,7 +373,7 @@ class PaginatedFindings(ResponseModel):
 class GalleryAlbumOut(ResponseModel):
     id: str = Field(min_length=1, max_length=64)
     label: str = Field(min_length=1, max_length=128)
-    kind: str = Field(pattern=r"^(access|album)$")
+    kind: str = Field(pattern=r"^(access|classification|album)$")
     count: int = Field(ge=0)
 
 
@@ -387,9 +388,22 @@ class GalleryItemOut(ResponseModel):
     label: str
     mime: str | None = None
     preview_path: str | None = Field(default=None, max_length=1024)
+    preview_mime: str | None = Field(default=None, max_length=255)
     preview_text: str | None = Field(default=None, max_length=2000)
+    source_path: str | None = Field(default=None, max_length=2048)
+    source_app: str | None = Field(default=None, max_length=255)
+    social_scope: str | None = Field(default=None, max_length=128)
+    presentation: str = Field(default="file", pattern=r"^(file|visual|text)$")
+    artifact_role: str | None = Field(default=None, max_length=64)
+    recovery_state: str = Field(
+        default="normal",
+        pattern=r"^(normal|trash|recovered_deleted)$",
+    )
     captured_at: str | None = None
+    accessed_at: str | None = None
+    access_count: int = Field(default=0, ge=0)
     favorite: bool = False
+    flagged: bool = False
 
 
 class PaginatedGallery(ResponseModel):

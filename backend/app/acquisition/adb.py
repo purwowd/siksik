@@ -47,7 +47,18 @@ RUNTIME_PERMISSION_NAMES = (
     "android.permission.POST_NOTIFICATIONS",
     "android.permission.READ_SMS",
     "android.permission.READ_CONTACTS",
+    "android.permission.GET_ACCOUNTS",
 )
+TEXT_ONLY_COVER_PROBE_ACTION = "com.siksik.agent.action.TEXT_ONLY_CRAWL_COVER_PROBE"
+TEXT_ONLY_COVER_ACTION = "com.siksik.agent.action.TEXT_ONLY_CRAWL_COVER"
+TEXT_ONLY_COVER_PROBE_PREFIX = "SIKSIK_COVER_V1"
+TEXT_ONLY_COVER_RECEIVER_CLASS = "accessibility.TextOnlyCrawlCoverReceiver"
+TEXT_ONLY_COVER_VISIBLE_EXTRA = "visible"
+ACCESSIBILITY_RECOVERY_ACTION = "com.siksik.agent.action.RECOVER_ACCESSIBILITY"
+ACCESSIBILITY_SUSPEND_ACTION = "com.siksik.agent.action.SUSPEND_ACCESSIBILITY"
+ACCESSIBILITY_PROBE_ACTION = "com.siksik.agent.action.PROBE_ACCESSIBILITY_BINDING"
+ACCESSIBILITY_PROBE_PREFIX = "SIKSIK_A11Y_V1"
+ACCESSIBILITY_RECOVERY_RECEIVER_CLASS = "accessibility.AccessibilityRecoveryReceiver"
 ProcessRunner = Callable[..., Awaitable[ProcessResult]]
 
 
@@ -154,6 +165,134 @@ def parse_runtime_permission_probe(output: str) -> dict[str, PermissionState] | 
             return None
         states[permission] = PermissionState(raw_state)
     return states if states else None
+
+
+def parse_text_only_cover_probe(output: str) -> str | None:
+    match = re.search(
+        rf"{TEXT_ONLY_COVER_PROBE_PREFIX};status=(shown|hidden)",
+        output,
+    )
+    return match.group(1) if match is not None else None
+
+
+def parse_accessibility_recovery_probe(output: str) -> str | None:
+    match = re.search(
+        rf"{ACCESSIBILITY_PROBE_PREFIX};status=(bound|crashed|unbound|denied)",
+        output,
+    )
+    return match.group(1) if match is not None else None
+
+
+ACCESSIBILITY_SERVICE_LABELS = {
+    "Enabled services": "enabled",
+    "Bound services": "bound",
+    "Binding services": "binding",
+    "Crashed services": "crashed",
+}
+ACCESSIBILITY_BINDING_SETTLE_SECONDS = 8.0
+ACCESSIBILITY_BINDING_POLL_SECONDS = 0.3
+ACCESSIBILITY_UNBIND_SETTLE_SECONDS = 2.0
+ACCESSIBILITY_REBIND_PAUSE_SECONDS = 0.5
+
+
+class AccessibilityBindingState(str, Enum):
+    BOUND = "bound"
+    CRASHED = "crashed"
+    UNBOUND = "unbound"
+    UNAVAILABLE = "unavailable"
+
+
+def _normalize_accessibility_component_token(raw: str) -> str | None:
+    token = raw.strip()
+    while token.startswith("{") and token.endswith("}"):
+        inner = token[1:-1].strip()
+        if not inner:
+            return None
+        token = inner
+    if not token:
+        return None
+    try:
+        return validate_component_name(token)
+    except AcquisitionError:
+        if token.count("/") != 1:
+            return None
+        package_name, raw_class = token.split("/", 1)
+        if not SAFE_PACKAGE.fullmatch(package_name):
+            return None
+        full_class = (
+            f"{package_name}{raw_class}" if raw_class.startswith(".") else raw_class
+        )
+        if not SAFE_CLASS.fullmatch(full_class):
+            return None
+        return token
+
+
+def _parse_accessibility_brace_body(body: str) -> set[str]:
+    fragment = body.strip()
+    if not fragment or fragment in {"{}", "{{}}"}:
+        return set()
+    while fragment.startswith("{") and fragment.endswith("}"):
+        inner = fragment[1:-1].strip()
+        if not inner:
+            return set()
+        fragment = inner
+    components: set[str] = set()
+    for part in fragment.split(","):
+        normalized = _normalize_accessibility_component_token(part)
+        if normalized is not None:
+            components.add(normalized)
+    return components
+
+
+def parse_accessibility_service_sets(text: str) -> dict[str, set[str]]:
+    sets: dict[str, set[str]] = {
+        "enabled": set(),
+        "bound": set(),
+        "bound_unknown": set(),
+        "binding": set(),
+        "crashed": set(),
+    }
+    for line in text.splitlines():
+        stripped = line.strip()
+        for label, key in ACCESSIBILITY_SERVICE_LABELS.items():
+            if label not in stripped:
+                continue
+            body = stripped.split(label, 1)[1].lstrip(":").strip()
+            parsed = _parse_accessibility_brace_body(body)
+            sets[key].update(parsed)
+            if (
+                key == "bound"
+                and not parsed
+                and body not in {"", "{}", "{{}}"}
+            ):
+                # MIUI 12 emits Service[label=…] without a component name.
+                # Retain the descriptor so a sole-enabled-service inference can
+                # be made without guessing when multiple services are enabled.
+                sets["bound_unknown"].add(body)
+            break
+    return sets
+
+
+def accessibility_binding_state_for_component(
+    service_sets: dict[str, set[str]],
+    component: str,
+) -> AccessibilityBindingState:
+    expected = validate_component_name(component)
+    # Android can retain a stale Crashed-services entry after the same service
+    # has rebound. A current positive binder entry must always win.
+    if expected in service_sets.get("bound", set()):
+        return AccessibilityBindingState.BOUND
+    if (
+        expected in service_sets.get("enabled", set())
+        and service_sets.get("enabled", set()) == {expected}
+        and service_sets.get("bound_unknown", set())
+    ):
+        return AccessibilityBindingState.BOUND
+    if expected in service_sets.get("crashed", set()):
+        return AccessibilityBindingState.CRASHED
+    # "Binding services" is a transitional set, not proof that the service is
+    # connected. The bounded waiter will keep polling until Bound appears.
+    return AccessibilityBindingState.UNBOUND
 
 
 def parse_package_dump(output: str) -> tuple[int | None, str | None]:
@@ -272,6 +411,55 @@ def resolve_adb(configured_path: str) -> Path:
         if resolved.is_file() and os.access(resolved, os.X_OK):
             return resolved
     raise acquisition_error(ErrorCategory.ADB_NOT_FOUND, "Executable ADB tidak ditemukan.")
+
+
+def _running_under_wsl() -> bool:
+    try:
+        return "microsoft" in Path("/proc/version").read_text(encoding="utf-8").casefold()
+    except OSError:
+        return False
+
+
+def _wsl_default_gateway() -> str | None:
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["ip", "route", "show", "default"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    parts = proc.stdout.split()
+    if len(parts) < 3:
+        return None
+    gateway = parts[2].strip()
+    if not gateway or gateway in {"127.0.0.1", "localhost", "::1"}:
+        return None
+    return gateway
+
+
+def resolve_agent_forward_host(explicit: str | None = None) -> str:
+    if explicit and explicit.strip():
+        return explicit.strip()
+    env_host = os.environ.get("SADT_AGENT_FORWARD_HOST", "").strip()
+    if env_host:
+        return env_host
+    adb_socket = os.environ.get("ADB_SERVER_SOCKET", "")
+    if adb_socket.startswith("tcp:"):
+        host = adb_socket[4:].rsplit(":", 1)[0].strip()
+        if host and host not in {"127.0.0.1", "localhost", "::1"}:
+            return host
+    if _running_under_wsl():
+        gateway = _wsl_default_gateway()
+        if gateway:
+            return gateway
+    return "127.0.0.1"
 
 
 def parse_devices(output: str) -> list[AdbDevice]:
@@ -633,19 +821,11 @@ class AsyncAdbTransport:
             and replace_package_on_uid_mismatch is not None
         ):
             remaining = self._install_time_remaining(deadline)
-            removed = await self.run(
+            await self._uninstall_package_for_reinstall(
                 serial,
-                ["uninstall", replace_package_on_uid_mismatch],
-                operation="incompatible_package_uninstall",
+                replace_package_on_uid_mismatch,
                 timeout=remaining,
-                check=False,
             )
-            removal_output = f"{removed.stdout}\n{removed.stderr}".casefold()
-            if removed.returncode != 0 and "unknown package" not in removal_output:
-                raise self._categorized_command_error(
-                    removed,
-                    "incompatible_package_uninstall",
-                )
             result, attempt, migration_attempts, failure = await self._run_install_attempts(
                 serial,
                 path,
@@ -800,6 +980,74 @@ class AsyncAdbTransport:
                 retryable=True,
             )
         return remaining
+
+    async def _uninstall_package_for_reinstall(
+        self,
+        serial: str,
+        package_name: str,
+        *,
+        timeout: float,
+    ) -> None:
+        """Remove a package before reinstalling across signature/UID mismatch.
+
+        OEM quirk (esp. MIUI): ``adb uninstall`` may return
+        ``DELETE_FAILED_INTERNAL_ERROR`` even when the package is already gone.
+        Treat removal as successful only after ``pm path`` confirms absence.
+        """
+        validate_package_name(package_name)
+        deadline = time.monotonic() + max(timeout, 1.0)
+        attempts: list[list[str]] = [
+            ["uninstall", package_name],
+            ["shell", "pm", "uninstall", "--user", "0", package_name],
+            ["shell", "cmd", "package", "uninstall", "--user", "0", package_name],
+        ]
+        last: ProcessResult | None = None
+        for argv in attempts:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            last = await self.run(
+                serial,
+                argv,
+                operation="incompatible_package_uninstall",
+                timeout=remaining,
+                check=False,
+            )
+            blob = f"{last.stdout}\n{last.stderr}".casefold()
+            if last.returncode == 0 or any(
+                marker in blob
+                for marker in (
+                    "success",
+                    "unknown package",
+                    "not installed",
+                )
+            ):
+                break
+            # MIUI often emits DELETE_FAILED_INTERNAL_ERROR for ghost/absent pkgs.
+            if "delete_failed_internal_error" in blob:
+                break
+
+        installed = await self.inspect_package(serial, package_name)
+        if not installed.installed:
+            logger.info(
+                "incompatible_package_uninstalled",
+                extra={"package": package_name},
+            )
+            return
+
+        detail = ""
+        if last is not None:
+            detail = (last.stdout or last.stderr or "").strip()[:240]
+        raise acquisition_error(
+            ErrorCategory.AGENT_SIGNATURE_MISMATCH,
+            (
+                f"Gagal menghapus package lama {package_name} sebelum reinstall "
+                f"(signature/UID tidak cocok). Hapus manual di Settings → Apps, "
+                f"atau samakan debug.keystore dengan mesin yang memasang APK sebelumnya."
+                + (f" Detail ADB: {detail}" if detail else "")
+            ),
+            dependency_exit_code=None if last is None else last.returncode,
+        )
 
     async def inspect_package(self, serial: str, package_name: str) -> InstalledPackage:
         validate_package_name(package_name)
@@ -1253,6 +1501,332 @@ class AsyncAdbTransport:
             return SpecialAccessState.UNAVAILABLE
         return SpecialAccessState.NOT_GRANTED
 
+    async def dumpsys_accessibility(self, serial: str) -> str:
+        result = await self.run(
+            serial,
+            ["shell", "dumpsys", "accessibility"],
+            operation="accessibility_dumpsys",
+            check=False,
+        )
+        if result.returncode != 0:
+            raise self._categorized_command_error(result, "accessibility_dumpsys")
+        return f"{result.stdout}\n{result.stderr}"
+
+    async def accessibility_service_sets(
+        self,
+        serial: str,
+    ) -> dict[str, set[str]] | None:
+        try:
+            blob = await self.dumpsys_accessibility(serial)
+        except AcquisitionError:
+            return None
+        return parse_accessibility_service_sets(blob)
+
+    async def accessibility_binding_state(
+        self,
+        serial: str,
+        component: str,
+    ) -> AccessibilityBindingState:
+        expected = validate_component_name(component)
+        package_name = expected.split("/", 1)[0]
+        direct_status = await self.probe_accessibility_recovery_status(
+            serial,
+            package_name,
+        )
+        if direct_status == "bound":
+            return AccessibilityBindingState.BOUND
+        service_sets = await self.accessibility_service_sets(serial)
+        if service_sets is None:
+            if direct_status in {"crashed", "unbound"}:
+                return AccessibilityBindingState(direct_status)
+            return AccessibilityBindingState.UNAVAILABLE
+        dumpsys_state = accessibility_binding_state_for_component(
+            service_sets,
+            expected,
+        )
+        # A live binder reported by Android is stronger than a stale status
+        # returned by the app process (or a stale Crashed-services entry).
+        if dumpsys_state == AccessibilityBindingState.BOUND:
+            return dumpsys_state
+        if direct_status == "crashed":
+            return AccessibilityBindingState.CRASHED
+        return dumpsys_state
+
+    async def accessibility_service_bound(
+        self,
+        serial: str,
+        component: str,
+    ) -> bool:
+        return (
+            await self.accessibility_binding_state(serial, component)
+            == AccessibilityBindingState.BOUND
+        )
+
+    async def wait_accessibility_service_bound(
+        self,
+        serial: str,
+        component: str,
+        *,
+        timeout_seconds: float = ACCESSIBILITY_BINDING_SETTLE_SECONDS,
+        poll_seconds: float = ACCESSIBILITY_BINDING_POLL_SECONDS,
+    ) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if await self.accessibility_service_bound(serial, component):
+                return True
+            await asyncio.sleep(poll_seconds)
+        return await self.accessibility_service_bound(serial, component)
+
+    async def wait_accessibility_service_unbound(
+        self,
+        serial: str,
+        component: str,
+        *,
+        timeout_seconds: float = ACCESSIBILITY_UNBIND_SETTLE_SECONDS,
+        poll_seconds: float = ACCESSIBILITY_BINDING_POLL_SECONDS,
+    ) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            state = await self.accessibility_binding_state(serial, component)
+            if state in {
+                AccessibilityBindingState.UNBOUND,
+                AccessibilityBindingState.CRASHED,
+            }:
+                return True
+            await asyncio.sleep(poll_seconds)
+        return await self.accessibility_binding_state(serial, component) in {
+            AccessibilityBindingState.UNBOUND,
+            AccessibilityBindingState.CRASHED,
+        }
+
+    async def secure_settings_writable(
+        self,
+        serial: str,
+        package_name: str,
+        *,
+        user_id: int | None = None,
+    ) -> bool:
+        validate_package_name(package_name)
+        active_user_id = await self.current_user_id(serial) if user_id is None else user_id
+        settings_prefix = ["shell", "settings", "--user", str(active_user_id)]
+        current = await self.run(
+            serial,
+            [*settings_prefix, "get", "secure", "accessibility_enabled"],
+            operation="secure_settings_write_probe_get",
+            check=False,
+        )
+        if current.returncode != 0:
+            return False
+        probe_value = current.stdout.strip() or "0"
+        await self._grant_write_secure_settings(serial, package_name, active_user_id)
+        probe = await self._put_secure_setting(
+            serial,
+            settings_prefix,
+            "accessibility_enabled",
+            probe_value,
+            operation="secure_settings_write_probe_put",
+        )
+        return probe.returncode == 0 and not self._secure_settings_denied(probe)
+
+    async def accessibility_master_enabled(
+        self,
+        serial: str,
+        *,
+        user_id: int | None = None,
+    ) -> bool:
+        active_user_id = await self.current_user_id(serial) if user_id is None else user_id
+        settings_prefix = ["shell", "settings", "--user", str(active_user_id)]
+        result = await self.run(
+            serial,
+            [*settings_prefix, "get", "secure", "accessibility_enabled"],
+            operation="accessibility_master_probe",
+            check=False,
+        )
+        if result.returncode != 0:
+            return False
+        return result.stdout.strip() == "1"
+
+    async def probe_accessibility_recovery_status(
+        self,
+        serial: str,
+        package_name: str,
+        *,
+        user_id: int | None = None,
+    ) -> str | None:
+        validate_package_name(package_name)
+        component = validate_component_name(
+            f"{package_name}/{package_name}.{ACCESSIBILITY_RECOVERY_RECEIVER_CLASS}",
+            package_name,
+        )
+        active_user_id = await self.current_user_id(serial) if user_id is None else user_id
+        result = await self.run(
+            serial,
+            [
+                "shell",
+                "am",
+                "broadcast",
+                "--user",
+                str(active_user_id),
+                "--include-stopped-packages",
+                "-a",
+                ACCESSIBILITY_PROBE_ACTION,
+                "-n",
+                component,
+            ],
+            operation="accessibility_recovery_probe",
+            check=False,
+        )
+        blob = f"{result.stdout}\n{result.stderr}"
+        if result.returncode != 0:
+            return None
+        return parse_accessibility_recovery_probe(blob)
+
+    async def suspend_accessibility_via_agent(
+        self,
+        serial: str,
+        package_name: str,
+        *,
+        user_id: int | None = None,
+    ) -> str | None:
+        validate_package_name(package_name)
+        active_user_id = await self.current_user_id(serial) if user_id is None else user_id
+        await self._grant_write_secure_settings(serial, package_name, active_user_id)
+        component = validate_component_name(
+            f"{package_name}/{package_name}.{ACCESSIBILITY_RECOVERY_RECEIVER_CLASS}",
+            package_name,
+        )
+        result = await self.run(
+            serial,
+            [
+                "shell",
+                "am",
+                "broadcast",
+                "--user",
+                str(active_user_id),
+                "--include-stopped-packages",
+                "-a",
+                ACCESSIBILITY_SUSPEND_ACTION,
+                "-n",
+                component,
+            ],
+            operation="accessibility_recovery_suspend",
+            check=False,
+        )
+        blob = f"{result.stdout}\n{result.stderr}"
+        if result.returncode != 0:
+            return None
+        return parse_accessibility_recovery_probe(blob)
+
+    async def suspend_accessibility_service(
+        self,
+        serial: str,
+        package_name: str,
+        component: str,
+        *,
+        user_id: int | None = None,
+    ) -> bool:
+        validate_package_name(package_name)
+        expected = validate_component_name(component, package_name)
+        active_user_id = await self.current_user_id(serial) if user_id is None else user_id
+        if not 0 <= active_user_id <= 100_000:
+            raise acquisition_error(ErrorCategory.VALIDATION_ERROR, "Android user tidak valid.")
+        binding = await self.accessibility_binding_state(serial, expected)
+        settings_granted = (
+            await self.special_access_state(
+                serial,
+                package_name,
+                SpecialAccessKind.ACCESSIBILITY,
+                component=expected,
+                user_id=active_user_id,
+            )
+            == SpecialAccessState.GRANTED
+        )
+        if (
+            binding == AccessibilityBindingState.UNBOUND
+            and not settings_granted
+            and not await self.accessibility_master_enabled(serial, user_id=active_user_id)
+        ):
+            return True
+        shell_writable = await self.secure_settings_writable(
+            serial,
+            package_name,
+            user_id=active_user_id,
+        )
+        if shell_writable:
+            disabled = await self._disable_accessibility_service(
+                serial,
+                package_name,
+                expected,
+                active_user_id,
+            )
+            if disabled in {SpecialAccessState.DENIED, SpecialAccessState.UNAVAILABLE}:
+                return False
+        else:
+            agent_status = await self.suspend_accessibility_via_agent(
+                serial,
+                package_name,
+                user_id=active_user_id,
+            )
+            logger.info(
+                "accessibility_service_agent_suspend",
+                extra={
+                    "serial_redacted": serial[:4] + "…" if serial else None,
+                    "agent_status": agent_status,
+                },
+            )
+            if agent_status == "bound":
+                return False
+            if agent_status == "denied":
+                return False
+        return await self.wait_accessibility_service_unbound(serial, expected)
+
+    async def restore_accessibility_via_agent(
+        self,
+        serial: str,
+        package_name: str,
+        *,
+        user_id: int | None = None,
+    ) -> str | None:
+        validate_package_name(package_name)
+        active_user_id = await self.current_user_id(serial) if user_id is None else user_id
+        await self._grant_write_secure_settings(serial, package_name, active_user_id)
+        component = validate_component_name(
+            f"{package_name}/{package_name}.{ACCESSIBILITY_RECOVERY_RECEIVER_CLASS}",
+            package_name,
+        )
+        result = await self.run(
+            serial,
+            [
+                "shell",
+                "am",
+                "broadcast",
+                "--user",
+                str(active_user_id),
+                "--include-stopped-packages",
+                "-a",
+                ACCESSIBILITY_RECOVERY_ACTION,
+                "-n",
+                component,
+            ],
+            operation="accessibility_recovery_recover",
+            check=False,
+        )
+        blob = f"{result.stdout}\n{result.stderr}"
+        if result.returncode != 0:
+            return None
+        return parse_accessibility_recovery_probe(blob)
+
+    async def accessibility_ready_for_text_only(
+        self,
+        serial: str,
+        component: str,
+    ) -> bool:
+        expected = validate_component_name(component)
+        return (
+            await self.accessibility_binding_state(serial, expected)
+            == AccessibilityBindingState.BOUND
+        )
+
     async def restore_accessibility_service(
         self,
         serial: str,
@@ -1266,16 +1840,96 @@ class AsyncAdbTransport:
         active_user_id = await self.current_user_id(serial) if user_id is None else user_id
         if not 0 <= active_user_id <= 100_000:
             raise acquisition_error(ErrorCategory.VALIDATION_ERROR, "Android user tidak valid.")
-        current = await self.special_access_state(
+        if await self.accessibility_service_bound(serial, expected):
+            return SpecialAccessState.GRANTED
+        settings_granted = (
+            await self.special_access_state(
+                serial,
+                package_name,
+                SpecialAccessKind.ACCESSIBILITY,
+                component=expected,
+                user_id=active_user_id,
+            )
+            == SpecialAccessState.GRANTED
+        )
+        service_settled = settings_granted and await self.wait_accessibility_service_bound(
+            serial,
+            expected,
+            timeout_seconds=min(2.0, ACCESSIBILITY_BINDING_SETTLE_SECONDS),
+        )
+        if not service_settled:
+            shell_writable = await self.secure_settings_writable(
+                serial,
+                package_name,
+                user_id=active_user_id,
+            )
+            if shell_writable:
+                if settings_granted:
+                    logger.warning(
+                        "accessibility_service_rebind_required",
+                        extra={
+                            "serial_redacted": serial[:4] + "…" if serial else None,
+                            "binding_state": (
+                                await self.accessibility_binding_state(serial, expected)
+                            ).value,
+                        },
+                    )
+                    rebind_state = await self._rebind_accessibility_service(
+                        serial,
+                        package_name,
+                        expected,
+                        active_user_id,
+                    )
+                    if rebind_state != SpecialAccessState.GRANTED:
+                        return rebind_state
+                else:
+                    enable_state = await self._enable_accessibility_service(
+                        serial,
+                        package_name,
+                        expected,
+                        active_user_id,
+                    )
+                    if enable_state != SpecialAccessState.GRANTED:
+                        return enable_state
+            else:
+                logger.warning(
+                    "accessibility_service_shell_restore_unavailable",
+                    extra={
+                        "serial_redacted": serial[:4] + "…" if serial else None,
+                        "binding_state": (
+                            await self.accessibility_binding_state(serial, expected)
+                        ).value,
+                    },
+                )
+                agent_status = await self.restore_accessibility_via_agent(
+                    serial,
+                    package_name,
+                    user_id=active_user_id,
+                )
+                logger.info(
+                    "accessibility_service_agent_recovery",
+                    extra={
+                        "serial_redacted": serial[:4] + "…" if serial else None,
+                        "agent_status": agent_status,
+                    },
+                )
+        if await self.wait_accessibility_service_bound(serial, expected):
+            return SpecialAccessState.GRANTED
+        if await self.accessibility_service_bound(serial, expected):
+            return SpecialAccessState.GRANTED
+        return await self.special_access_state(
             serial,
             package_name,
             SpecialAccessKind.ACCESSIBILITY,
             component=expected,
             user_id=active_user_id,
         )
-        if current == SpecialAccessState.GRANTED:
-            return current
-        settings_prefix = ["shell", "settings", "--user", str(active_user_id)]
+
+    async def _read_enabled_accessibility_components(
+        self,
+        serial: str,
+        settings_prefix: list[str],
+    ) -> list[str] | None:
         enabled = await self.run(
             serial,
             [*settings_prefix, "get", "secure", "enabled_accessibility_services"],
@@ -1283,7 +1937,7 @@ class AsyncAdbTransport:
             check=False,
         )
         if enabled.returncode != 0:
-            return self._unavailable_or_raise(enabled, "accessibility_restore_probe")
+            return None
         raw_components = enabled.stdout.strip()
         components: list[str] = []
         if raw_components.casefold() not in {"", "null", "none"}:
@@ -1293,39 +1947,24 @@ class AsyncAdbTransport:
                     continue
                 if preserved not in components:
                     components.append(preserved)
-        if expected not in components:
-            components.append(expected)
-        enabled_value = ":".join(components)
-        updated = await self._put_secure_setting(
-            serial,
-            settings_prefix,
-            "enabled_accessibility_services",
-            enabled_value,
-            operation="accessibility_access_restore",
-        )
-        if updated.returncode != 0 and self._secure_settings_denied(updated):
-            if await self._grant_write_secure_settings(
-                serial,
-                package_name,
-                active_user_id,
-            ):
-                updated = await self._put_secure_setting(
-                    serial,
-                    settings_prefix,
-                    "enabled_accessibility_services",
-                    enabled_value,
-                    operation="accessibility_access_restore_retry",
-                )
-        if updated.returncode != 0:
-            if self._secure_settings_denied(updated):
-                return SpecialAccessState.DENIED
-            return self._unavailable_or_raise(updated, "accessibility_access_restore")
+        return components
+
+    async def _write_accessibility_master(
+        self,
+        serial: str,
+        package_name: str,
+        settings_prefix: list[str],
+        active_user_id: int,
+        *,
+        enabled: bool,
+        operation: str,
+    ) -> SpecialAccessState | None:
         master = await self._put_secure_setting(
             serial,
             settings_prefix,
             "accessibility_enabled",
-            "1",
-            operation="accessibility_master_restore",
+            "1" if enabled else "0",
+            operation=operation,
         )
         if master.returncode != 0 and self._secure_settings_denied(master):
             if await self._grant_write_secure_settings(
@@ -1337,20 +1976,382 @@ class AsyncAdbTransport:
                     serial,
                     settings_prefix,
                     "accessibility_enabled",
-                    "1",
-                    operation="accessibility_master_restore_retry",
+                    "1" if enabled else "0",
+                    operation=f"{operation}_retry",
                 )
         if master.returncode != 0:
             if self._secure_settings_denied(master):
                 return SpecialAccessState.DENIED
-            return self._unavailable_or_raise(master, "accessibility_master_restore")
-        return await self.special_access_state(
+            return self._unavailable_or_raise(master, operation)
+        return None
+
+    async def _write_enabled_accessibility_components(
+        self,
+        serial: str,
+        package_name: str,
+        settings_prefix: list[str],
+        active_user_id: int,
+        components: list[str],
+        *,
+        operation: str,
+    ) -> SpecialAccessState | None:
+        if components:
+            enabled_value = ":".join(components)
+            updated = await self._put_secure_setting(
+                serial,
+                settings_prefix,
+                "enabled_accessibility_services",
+                enabled_value,
+                operation=operation,
+            )
+        else:
+            updated = await self.run(
+                serial,
+                [
+                    *settings_prefix,
+                    "delete",
+                    "secure",
+                    "enabled_accessibility_services",
+                ],
+                operation=f"{operation}_clear",
+                check=False,
+            )
+        if updated.returncode != 0 and self._secure_settings_denied(updated):
+            if await self._grant_write_secure_settings(
+                serial,
+                package_name,
+                active_user_id,
+            ):
+                if components:
+                    updated = await self._put_secure_setting(
+                        serial,
+                        settings_prefix,
+                        "enabled_accessibility_services",
+                        ":".join(components),
+                        operation=f"{operation}_retry",
+                    )
+                else:
+                    updated = await self.run(
+                        serial,
+                        [
+                            *settings_prefix,
+                            "delete",
+                            "secure",
+                            "enabled_accessibility_services",
+                        ],
+                        operation=f"{operation}_clear_retry",
+                        check=False,
+                    )
+        if updated.returncode != 0:
+            if self._secure_settings_denied(updated):
+                return SpecialAccessState.DENIED
+            return self._unavailable_or_raise(updated, operation)
+        return None
+
+    async def _rebind_accessibility_service(
+        self,
+        serial: str,
+        package_name: str,
+        expected: str,
+        active_user_id: int,
+    ) -> SpecialAccessState:
+        settings_prefix = ["shell", "settings", "--user", str(active_user_id)]
+        components = await self._read_enabled_accessibility_components(
+            serial,
+            settings_prefix,
+        )
+        if components is None:
+            return SpecialAccessState.UNAVAILABLE
+        without_target = [component for component in components if component != expected]
+        restored_components = list(components)
+        if expected not in restored_components:
+            restored_components.append(expected)
+        disabled = await self._write_enabled_accessibility_components(
             serial,
             package_name,
-            SpecialAccessKind.ACCESSIBILITY,
-            component=expected,
-            user_id=active_user_id,
+            settings_prefix,
+            active_user_id,
+            without_target,
+            operation="accessibility_rebind_disable",
         )
+        if isinstance(disabled, SpecialAccessState):
+            return disabled
+        await asyncio.sleep(ACCESSIBILITY_REBIND_PAUSE_SECONDS)
+        enabled = await self._write_enabled_accessibility_components(
+            serial,
+            package_name,
+            settings_prefix,
+            active_user_id,
+            restored_components,
+            operation="accessibility_rebind_enable",
+        )
+        if isinstance(enabled, SpecialAccessState):
+            # The component-only cycle already removed SIKSIK. Retry the exact
+            # original list before returning so a failed re-enable command does
+            # not strand the user's accessibility configuration half-written.
+            rollback = await self._write_enabled_accessibility_components(
+                serial,
+                package_name,
+                settings_prefix,
+                active_user_id,
+                restored_components,
+                operation="accessibility_rebind_component_rollback",
+            )
+            if isinstance(rollback, SpecialAccessState):
+                logger.error(
+                    "accessibility_service_component_rollback_failed",
+                    extra={
+                        "serial_redacted": serial[:4] + "…" if serial else None,
+                        "restore_state": rollback.value,
+                    },
+                )
+            return enabled
+        if not await self.accessibility_master_enabled(
+            serial,
+            user_id=active_user_id,
+        ):
+            enabled_master = await self._write_accessibility_master(
+                serial,
+                package_name,
+                settings_prefix,
+                active_user_id,
+                enabled=True,
+                operation="accessibility_rebind_master_on",
+            )
+            if isinstance(enabled_master, SpecialAccessState):
+                return enabled_master
+        if await self.wait_accessibility_service_bound(
+            serial,
+            expected,
+            timeout_seconds=min(2.0, ACCESSIBILITY_BINDING_SETTLE_SECONDS),
+        ):
+            return SpecialAccessState.GRANTED
+
+        # Some OEM accessibility managers only rebuild their binder registry
+        # after a master cycle. Do this only after component-only recovery has
+        # failed, while preserving every enabled component exactly.
+        logger.warning(
+            "accessibility_service_global_rebind_fallback",
+            extra={
+                "serial_redacted": serial[:4] + "…" if serial else None,
+                "preserved_service_count": len(restored_components),
+            },
+        )
+        disabled_master = await self._write_accessibility_master(
+            serial,
+            package_name,
+            settings_prefix,
+            active_user_id,
+            enabled=False,
+            operation="accessibility_rebind_master_off_fallback",
+        )
+        if isinstance(disabled_master, SpecialAccessState):
+            return disabled_master
+        await asyncio.sleep(ACCESSIBILITY_REBIND_PAUSE_SECONDS)
+        restored = await self._write_enabled_accessibility_components(
+            serial,
+            package_name,
+            settings_prefix,
+            active_user_id,
+            restored_components,
+            operation="accessibility_rebind_restore_fallback",
+        )
+        if isinstance(restored, SpecialAccessState):
+            await self._write_accessibility_master(
+                serial,
+                package_name,
+                settings_prefix,
+                active_user_id,
+                enabled=True,
+                operation="accessibility_rebind_master_rollback",
+            )
+            return restored
+        enabled_master = await self._write_accessibility_master(
+            serial,
+            package_name,
+            settings_prefix,
+            active_user_id,
+            enabled=True,
+            operation="accessibility_rebind_master_on_fallback",
+        )
+        if isinstance(enabled_master, SpecialAccessState):
+            # Best effort: never intentionally leave all accessibility services
+            # disabled after a failed recovery command.
+            await self._write_accessibility_master(
+                serial,
+                package_name,
+                settings_prefix,
+                active_user_id,
+                enabled=True,
+                operation="accessibility_rebind_master_rollback",
+            )
+            return enabled_master
+        return SpecialAccessState.GRANTED
+
+    async def _disable_accessibility_service(
+        self,
+        serial: str,
+        package_name: str,
+        expected: str,
+        active_user_id: int,
+    ) -> SpecialAccessState:
+        settings_prefix = ["shell", "settings", "--user", str(active_user_id)]
+        components = await self._read_enabled_accessibility_components(
+            serial,
+            settings_prefix,
+        )
+        if components is None:
+            return SpecialAccessState.UNAVAILABLE
+        without_target = [component for component in components if component != expected]
+        disabled = await self._write_enabled_accessibility_components(
+            serial,
+            package_name,
+            settings_prefix,
+            active_user_id,
+            without_target,
+            operation="accessibility_suspend_disable",
+        )
+        if isinstance(disabled, SpecialAccessState):
+            return disabled
+        if not without_target:
+            disabled_master = await self._write_accessibility_master(
+                serial,
+                package_name,
+                settings_prefix,
+                active_user_id,
+                enabled=False,
+                operation="accessibility_suspend_master_off",
+            )
+            if isinstance(disabled_master, SpecialAccessState):
+                return disabled_master
+        await asyncio.sleep(ACCESSIBILITY_REBIND_PAUSE_SECONDS)
+        return SpecialAccessState.GRANTED
+
+    async def _enable_accessibility_service(
+        self,
+        serial: str,
+        package_name: str,
+        expected: str,
+        active_user_id: int,
+    ) -> SpecialAccessState:
+        settings_prefix = ["shell", "settings", "--user", str(active_user_id)]
+        components = await self._read_enabled_accessibility_components(
+            serial,
+            settings_prefix,
+        )
+        if components is None:
+            return SpecialAccessState.UNAVAILABLE
+        if expected not in components:
+            components.append(expected)
+        updated = await self._write_enabled_accessibility_components(
+            serial,
+            package_name,
+            settings_prefix,
+            active_user_id,
+            components,
+            operation="accessibility_access_restore",
+        )
+        if isinstance(updated, SpecialAccessState):
+            return updated
+        master = await self._write_accessibility_master(
+            serial,
+            package_name,
+            settings_prefix,
+            active_user_id,
+            enabled=True,
+            operation="accessibility_master_restore",
+        )
+        if isinstance(master, SpecialAccessState):
+            return master
+        return SpecialAccessState.GRANTED
+
+    async def set_text_only_cover_visible(
+        self,
+        serial: str,
+        package_name: str,
+        *,
+        visible: bool,
+        user_id: int | None = None,
+    ) -> None:
+        validate_package_name(package_name)
+        component = validate_component_name(
+            f"{package_name}/{package_name}.{TEXT_ONLY_COVER_RECEIVER_CLASS}",
+            package_name,
+        )
+        active_user_id = await self.current_user_id(serial) if user_id is None else user_id
+        flag = "true" if visible else "false"
+        result = await self.run(
+            serial,
+            [
+                "shell",
+                "am",
+                "broadcast",
+                "--user",
+                str(active_user_id),
+                "--include-stopped-packages",
+                "-a",
+                TEXT_ONLY_COVER_ACTION,
+                "--ez",
+                TEXT_ONLY_COVER_VISIBLE_EXTRA,
+                flag,
+                "-n",
+                component,
+            ],
+            operation="text_only_cover_set",
+            check=False,
+        )
+        if result.returncode != 0:
+            raise self._categorized_command_error(result, "text_only_cover_set")
+
+    async def probe_text_only_cover(
+        self,
+        serial: str,
+        package_name: str,
+        *,
+        user_id: int | None = None,
+    ) -> bool:
+        return await self.probe_text_only_cover_status(
+            serial,
+            package_name,
+            user_id=user_id,
+        ) == "shown"
+
+    async def probe_text_only_cover_status(
+        self,
+        serial: str,
+        package_name: str,
+        *,
+        user_id: int | None = None,
+    ) -> str | None:
+        validate_package_name(package_name)
+        component = validate_component_name(
+            f"{package_name}/{package_name}.{TEXT_ONLY_COVER_RECEIVER_CLASS}",
+            package_name,
+        )
+        active_user_id = await self.current_user_id(serial) if user_id is None else user_id
+        result = await self.run(
+            serial,
+            [
+                "shell",
+                "am",
+                "broadcast",
+                "--user",
+                str(active_user_id),
+                "--include-stopped-packages",
+                "-a",
+                TEXT_ONLY_COVER_PROBE_ACTION,
+                "-n",
+                component,
+            ],
+            operation="text_only_cover_probe",
+            check=False,
+        )
+        blob = f"{result.stdout}\n{result.stderr}"
+        if "Permission Denial" in blob and "not exported" in blob:
+            return None
+        if result.returncode != 0:
+            return None
+        return parse_text_only_cover_probe(blob)
 
     async def grant_notification_listener(
         self,

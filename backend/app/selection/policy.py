@@ -8,7 +8,7 @@ from app.models.schemas import AcquisitionMode
 from app.selection.contracts import KeywordPolicyV1, SelectionPolicyV1
 from app.services.lexicon import category_for_keyword, keyword_match_terms, normalize_text
 
-POLICY_VERSION = "siksik-selection-v5"
+POLICY_VERSION = "siksik-selection-v6"
 
 
 def _keyword_corpus() -> list[str]:
@@ -81,7 +81,7 @@ def build_selection_policy(mode: AcquisitionMode) -> SelectionPolicyV1:
             "own_comments",
             "own_replies",
         ],
-        "duplicate_representative_policy": "representative_only",
+        "duplicate_representative_policy": "include_all",
         "threshold_basis_points": 5_500,
         "maximum_candidates": 100_000 if mode == AcquisitionMode.QUICK else 1_000_000,
         "maximum_bytes": (

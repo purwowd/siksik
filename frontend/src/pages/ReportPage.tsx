@@ -39,6 +39,7 @@ type Props = {
   session: SessionSummary | null;
   sessionList: SessionSummary[];
   sessionsLoading: boolean;
+  sessionPickerLocked?: boolean;
   reportFindings: Paginated<Finding> | null;
   reportData: SessionReport | null;
   reportLoading: boolean;
@@ -58,6 +59,7 @@ export function ReportPage({
   session,
   sessionList,
   sessionsLoading,
+  sessionPickerLocked,
   reportFindings,
   reportData,
   reportLoading,
@@ -84,6 +86,7 @@ export function ReportPage({
         sessions={sessionList}
         value={session?.id ?? null}
         loading={sessionsLoading}
+        locked={sessionPickerLocked}
         onChange={onPickSession}
       />
 

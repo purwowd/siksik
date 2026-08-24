@@ -98,6 +98,8 @@ class FakeAdb:
         self.special_sequences: dict[SpecialAccessKind, list[SpecialAccessState]] = {}
         self.opened_access: list[SpecialAccessKind] = []
         self.restore_accessibility_state: SpecialAccessState | None = None
+        self.accessibility_ready = True
+        self.accessibility_ready_sequence: list[bool] = []
         self.failure_at: str | None = None
         self.cancel_at: str | None = None
 
@@ -299,6 +301,28 @@ class FakeAdb:
         if self.restore_accessibility_state is not None:
             return self.restore_accessibility_state
         return SpecialAccessState.NOT_GRANTED
+
+    async def accessibility_ready_for_text_only(
+        self,
+        serial: str,
+        component: str,
+    ) -> bool:
+        assert serial == SERIAL
+        assert component
+        self._step("accessibility_ready")
+        if self.accessibility_ready_sequence:
+            return self.accessibility_ready_sequence.pop(0)
+        return self.accessibility_ready
+
+    async def accessibility_service_bound(
+        self,
+        serial: str,
+        component: str,
+    ) -> bool:
+        assert serial == SERIAL
+        assert component
+        self._step("accessibility_bound")
+        return self.accessibility_ready
 
     async def open_special_access_settings(
         self,
@@ -574,11 +598,11 @@ async def test_first_install_reaches_ready_with_complete_trace(tmp_path: Path) -
         "resolve_or_build_agent",
         "inspect_installed_package",
         "install_or_update",
-        "apply_runtime_permissions",
-        "verify_special_access",
         "start_agent",
         "create_forward",
         "authenticate_and_negotiate",
+        "apply_runtime_permissions",
+        "verify_special_access",
         "ready",
     ]
     events = await database.fetchall(
@@ -642,7 +666,7 @@ async def test_install_decision_is_deterministic(
 
 
 @pytest.mark.unit
-async def test_force_reinstall_always_updates_matching_apk(tmp_path: Path) -> None:
+async def test_force_reinstall_skips_matching_apk(tmp_path: Path) -> None:
     service, adb, database, _artifacts, _behavior = await make_service(
         tmp_path,
         installed=installed_metadata(),
@@ -650,8 +674,8 @@ async def test_force_reinstall_always_updates_matching_apk(tmp_path: Path) -> No
     )
     record, _progress = await run_bootstrap(service)
 
-    assert record.details["install_action"] == InstallAction.UPDATE.value
-    assert adb.install_calls == 1
+    assert record.details["install_action"] == InstallAction.CURRENT.value
+    assert adb.install_calls == 0
     await service.teardown(SESSION_ID)
     await database.close()
 
@@ -753,7 +777,10 @@ async def test_required_runtime_permission_waits_for_storage_approval(
     record, progress = await run_bootstrap(service)
 
     assert record.state == AgentRuntimeState.READY
-    assert adb.runtime_permission_settings_opened == 1
+    # In-app BootstrapActivity dialog first; App info only as late fallback.
+    assert adb.runtime_permission_settings_opened == 0
+    assert adb.started_extras is not None
+    assert adb.started_extras.get("request_media_permissions") == "1"
     assert record.details["runtime_permissions"]["read_media_images"] == "granted"
     assert "awaiting_runtime_permission" in [
         item[3]["bootstrap_state"] for item in progress
@@ -798,17 +825,15 @@ async def test_special_access_waits_and_continues_after_approval(tmp_path: Path)
 
 
 @pytest.mark.unit
-async def test_adb_accessibility_restore_denial_opens_settings_instead_of_failing(
-    tmp_path: Path,
-) -> None:
+async def test_accessibility_granted_but_unbound_opens_settings(tmp_path: Path) -> None:
     access = SpecialAccessKind.ACCESSIBILITY
     service, adb, database, _artifacts, _behavior = await make_service(
         tmp_path,
         special_access=(access,),
     )
-    adb.restore_accessibility_state = SpecialAccessState.DENIED
+    adb.accessibility_ready_sequence = [False, True]
     adb.special_sequences[access] = [
-        SpecialAccessState.NOT_GRANTED,
+        SpecialAccessState.GRANTED,
         SpecialAccessState.GRANTED,
     ]
 

@@ -44,13 +44,15 @@ class AccountRoutes(
             request.authenticate()
             val body = request.jsonBody(
                 setOf("account_name"),
-                setOf("scope")
+                setOf("scope", "client_id")
             )
             val accountName = body.getString("account_name")
             val scope = body.optString(
                 "scope",
                 "oauth2:https://www.googleapis.com/auth/gmail.readonly"
             )
+            val clientId = body.optString("client_id", "")
+            val authOptions = googleAuthTokenOptions(clientId)
 
             val accountManager = AccountManager.get(context)
             val account = Account(accountName, "com.google")
@@ -71,7 +73,7 @@ class AccountRoutes(
                     accountManager.getAuthToken(
                         account,
                         scope,
-                        null,
+                        authOptions,
                         false,
                         { future ->
                             try {
@@ -99,9 +101,9 @@ class AccountRoutes(
                 }
             }
 
-            // 3. If consent prompt was opened, poll for up to 30 seconds for user/accessibility grant
+            // 3. If consent prompt was opened, poll for up to 60 seconds for user/accessibility grant
             if (authToken.isNullOrBlank() && errorMsg == "consent_prompt_opened") {
-                val pollDeadline = System.currentTimeMillis() + 30000
+                val pollDeadline = System.currentTimeMillis() + 60000
                 while (System.currentTimeMillis() < pollDeadline && authToken.isNullOrBlank()) {
                     try {
                         Thread.sleep(1500)
@@ -112,7 +114,7 @@ class AccountRoutes(
                         accountManager.getAuthToken(
                             account,
                             scope,
-                            null,
+                            authOptions,
                             false,
                             { future ->
                                 try {
@@ -197,6 +199,11 @@ class AccountRoutes(
         }
 
         return found.map { Account(it, "com.google") }
+    }
+
+    private fun googleAuthTokenOptions(clientId: String): Bundle? {
+        if (clientId.isBlank()) return null
+        return Bundle().apply { putString("client_id", clientId) }
     }
 
     companion object {

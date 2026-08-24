@@ -19,6 +19,7 @@ type Props = {
   session: SessionSummary | null;
   sessionList: SessionSummary[];
   sessionsLoading: boolean;
+  sessionPickerLocked?: boolean;
   findingsLoading: boolean;
   reviewSummary: { pending: number; confirmed: number; rejected: number; total: number } | null;
   onPickSession: (id: string) => void;
@@ -42,6 +43,7 @@ export function FindingsPage({
   session,
   sessionList,
   sessionsLoading,
+  sessionPickerLocked,
   findingsLoading,
   reviewSummary,
   onPickSession,
@@ -127,6 +129,7 @@ export function FindingsPage({
             sessions={sessionList}
             value={session?.id ?? null}
             loading={sessionsLoading}
+            locked={sessionPickerLocked}
             onChange={onPickSession}
           />
         </div>

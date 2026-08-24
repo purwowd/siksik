@@ -353,6 +353,34 @@ def test_binary_source_rejects_two_binaries(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_source_binary_materializes_with_stable_record_path(tmp_path: Path) -> None:
+    canonical, downloaded = _write_canonical(tmp_path, media_record())
+    raw = b"jpeg-fixture"
+    binary_id = "artifact_6ca9ce03-33da-4905-b5c8-5b0735974bf2"
+    binary_source = tmp_path / binary_id
+    binary_source.write_bytes(raw)
+    downloaded[binary_id] = binary_source
+    binary = _artifact(
+        artifact_id=binary_id,
+        record_id="record-media-image-001",
+        source_kind="media_image",
+        role="source_binary",
+        relative_path=_relative(f"artifacts/{binary_id}.png"),
+        mime_type="image/png",
+        raw=raw,
+    )
+
+    materialized = DirectCrawlTransferService._materialize(
+        tmp_path / "materialized",
+        [canonical, binary],
+        downloaded,
+    )
+
+    assert materialized[binary_id].name == "record-media-image-001.png"
+    assert "__artifact_" not in materialized[binary_id].name
+
+
+@pytest.mark.unit
 def test_visible_ui_allows_missing_screenshot(tmp_path: Path) -> None:
     payload = visible_record("fixture")
     payload["attachment_ids"] = ["shot_fixture"]

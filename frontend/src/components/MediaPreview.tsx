@@ -102,11 +102,13 @@ export function MediaPreview({
   path,
   text,
   mime,
+  presentation = "file",
 }: {
   sessionId: string;
-  path: string;
+  path?: string | null;
   text?: string | null;
   mime?: string | null;
+  presentation?: "file" | "visual" | "text";
 }) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [contentUrl, setContentUrl] = useState<string | null>(null);
@@ -115,16 +117,19 @@ export function MediaPreview({
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
 
+  const mediaPath = path || "";
+  const forceText = presentation === "text";
+  const forceVisual = presentation === "visual";
   const mimeValue = (mime || "").toLowerCase();
-  const isImg = mimeValue.startsWith("image/") || IMG_EXT.test(path);
-  const isVid = mimeValue.startsWith("video/") || VID_EXT.test(path);
-  const isAudio = mimeValue.startsWith("audio/") || AUDIO_EXT.test(path);
-  const isHtml = mimeValue === "text/html" || HTML_EXT.test(path);
-  const isJson = mimeValue.includes("json") || JSON_EXT.test(path);
-  const isText = isJson || mimeValue.startsWith("text/") || TEXT_EXT.test(path);
-  const isPdf = mimeValue === "application/pdf" || PDF_EXT.test(path);
+  const isImg = !forceText && (mimeValue.startsWith("image/") || IMG_EXT.test(mediaPath));
+  const isVid = !forceText && (mimeValue.startsWith("video/") || VID_EXT.test(mediaPath));
+  const isAudio = !forceText && (mimeValue.startsWith("audio/") || AUDIO_EXT.test(mediaPath));
+  const isHtml = !forceText && (mimeValue === "text/html" || HTML_EXT.test(mediaPath));
+  const isJson = mimeValue.includes("json") || JSON_EXT.test(mediaPath);
+  const isText = forceText || isJson || mimeValue.startsWith("text/") || TEXT_EXT.test(mediaPath);
+  const isPdf = !forceText && (mimeValue === "application/pdf" || PDF_EXT.test(mediaPath));
   const previewText = compact(text || "", 320);
-  const fileName = path.split("/").pop() || "Berkas";
+  const fileName = mediaPath.split("/").pop() || "Berkas";
 
   useEffect(() => {
     let revoke: string | null = null;
@@ -135,9 +140,9 @@ export function MediaPreview({
     setFailed(false);
     setLoading(false);
     setModalOpen(false);
-    if (!sessionId || !path || !isImg) return;
+    if (!sessionId || !mediaPath || !isImg) return;
     setLoading(true);
-    enqueueMediaTask(() => fetchMediaBlobUrl(sessionId, path))
+    enqueueMediaTask(() => fetchMediaBlobUrl(sessionId, mediaPath))
       .then((url) => {
         if (cancelled) {
           URL.revokeObjectURL(url);
@@ -156,7 +161,7 @@ export function MediaPreview({
       cancelled = true;
       if (revoke) URL.revokeObjectURL(revoke);
     };
-  }, [sessionId, path, isImg]);
+  }, [sessionId, mediaPath, isImg]);
 
   useEffect(() => {
     if (!modalOpen) return;
@@ -168,15 +173,16 @@ export function MediaPreview({
   }, [modalOpen]);
 
   async function openPreview(): Promise<void> {
+    if (!mediaPath) return;
     setLoading(true);
     setFailed(false);
     try {
       if (isText && !isHtml) {
-        const raw = await fetchMediaText(sessionId, path);
+        const raw = await fetchMediaText(sessionId, mediaPath);
         setContentText(readableText(raw, isJson));
       } else {
-        const issued = await issueMediaTicket(sessionId, path);
-        setContentUrl(ticketedMediaUrl(sessionId, path, issued.ticket));
+        const issued = await issueMediaTicket(sessionId, mediaPath);
+        setContentUrl(ticketedMediaUrl(sessionId, mediaPath, issued.ticket));
       }
       setModalOpen(true);
     } catch {
@@ -184,6 +190,14 @@ export function MediaPreview({
     } finally {
       setLoading(false);
     }
+  }
+
+  if (forceVisual && !isImg) {
+    return (
+      <div className="media-preview muted-preview visual-missing-preview">
+        Snapshot visual Instagram tidak tersedia
+      </div>
+    );
   }
 
   if (isImg) {
@@ -225,9 +239,9 @@ export function MediaPreview({
     <>
       <button
         type="button"
-        className="media-preview media-preview-action"
+        className={`media-preview media-preview-action ${forceText ? "text-only-preview" : ""}`}
         onClick={() => void openPreview()}
-        disabled={loading}
+        disabled={loading || !mediaPath}
         title={`Buka ${fileName}`}
       >
         <span className="media-preview-kind">{loading ? "Memuat" : kind}</span>

@@ -208,6 +208,26 @@ def main() -> None:
         "android-agent/app/src/main/java/com/siksik/agent/accessibility/TextOnlyCrawlCover.kt"
     )
     require(text_only_cover, "setPinned", "TEXT_ONLY cover must stay pinned during FB/X crawl")
+    manifest = read("android-agent/app/src/main/AndroidManifest.xml")
+    require(
+        manifest,
+        'android:name=".accessibility.TextOnlyCrawlCoverReceiver"\n            android:exported="true"',
+        "TEXT_ONLY cover receiver must be exported for universal host/instrumentation broadcast",
+    )
+    require(
+        manifest,
+        'android:name=".accessibility.AccessibilityRecoveryReceiver"\n            android:exported="true"',
+        "accessibility recovery receiver must be exported for host recovery broadcast",
+    )
+    require(
+        manifest,
+        "android.permission.WRITE_SECURE_SETTINGS",
+        "agent must declare WRITE_SECURE_SETTINGS for in-app accessibility recovery",
+    )
+    require(adb, "ACCESSIBILITY_RECOVERY_ACTION", "host accessibility recovery action is missing")
+    require(adb, "ACCESSIBILITY_SUSPEND_ACTION", "host accessibility suspend action is missing")
+    require(adb, "restore_accessibility_via_agent", "host in-app accessibility recovery is missing")
+    require(adb, "suspend_accessibility_service", "host accessibility suspend for VISUAL crawl is missing")
     return_to_agent = driver.split("override fun returnToAgent", 1)[1].split("override fun close", 1)[0]
     if return_to_agent.find("target_automation_finished") > return_to_agent.find(
         "TextOnlyCrawlCoverClient.hide"

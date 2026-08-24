@@ -22,7 +22,7 @@ import { Breadcrumb } from "./components/Breadcrumb";
 import { LoginScreen } from "./components/LoginScreen";
 import { ToastStack, TOAST_MAX_VISIBLE, type ToastItem, type ToastTone } from "./components/Toast";
 import { TopLoadingBar } from "./components/TopLoadingBar";
-import { ACTIVE, preferredLandingTab, TAB_DEFS, TAB_PERMS } from "./constants";
+import { ACTIVE, preferredLandingTab, resolvePreferredSession, TAB_DEFS, TAB_PERMS } from "./constants";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 import { DashboardPage } from "./pages/DashboardPage";
@@ -172,6 +172,13 @@ export default function App() {
     [auth],
   );
 
+  const runningSession = useMemo(
+    () => sessionList.find((s) => ACTIVE.has(s.status)) ?? null,
+    [sessionList],
+  );
+
+  const sessionPickerLocked = runningSession != null;
+
   const landingTab = useMemo((): Tab => {
     if (!auth || allowedTabs.length === 0) return "operator";
     return preferredLandingTab(auth, allowedTabs) ?? allowedTabs[0].id;
@@ -314,11 +321,7 @@ export default function App() {
           }
         }
         const fromStorage = preferId ? items.find((s) => s.id === preferId) : null;
-        const preferred =
-          fromStorage ||
-          items.find((s) => s.status === "completed") ||
-          items.find((s) => s.recommendation) ||
-          items[0];
+        const preferred = resolvePreferredSession(items, fromStorage?.id ?? preferId);
         if (preferred) {
           try {
             await selectSessionById(preferred.id);
@@ -343,6 +346,12 @@ export default function App() {
       });
     }
   }, [auth, location.search, sessionList, session?.id, selectSessionById]);
+
+  useEffect(() => {
+    if (!runningSession) return;
+    if (session?.id === runningSession.id) return;
+    void selectSessionById(runningSession.id).catch(() => undefined);
+  }, [runningSession, session?.id, selectSessionById]);
 
   useEffect(() => {
     if (!session) {
@@ -384,6 +393,9 @@ export default function App() {
     let stopped = false;
     let inFlight = false;
 
+    let pollDelayMs = 500;
+    let timer: number | undefined;
+
     const applyPolled = (s: SessionSummary) => {
       setSession((curr) => {
         if (!curr || curr.id !== s.id) return curr;
@@ -398,6 +410,7 @@ export default function App() {
       try {
         const s = await api.session(sessionId);
         if (stopped || pollEpochRef.current !== epoch) return;
+        pollDelayMs = 500;
         const nextFindingsCount = s.progress?.findings_count ?? 0;
         const findingsChanged = nextFindingsCount > liveFindingsCountRef.current;
         const nextReportRecords = Math.max(
@@ -499,6 +512,7 @@ export default function App() {
           void refreshGlobalPending();
         }
       } catch {
+        pollDelayMs = Math.min(pollDelayMs * 2, 10_000);
         if (!stopped) {
           setError("Koneksi telemetri terputus — coba muat ulang atau pilih sesi ulang");
         }
@@ -507,10 +521,19 @@ export default function App() {
       }
     };
 
-    const t = window.setInterval(() => void tick(), 500);
+    const schedule = () => {
+      if (stopped) return;
+      timer = window.setTimeout(() => {
+        void tick().finally(() => {
+          if (!stopped) schedule();
+        });
+      }, pollDelayMs);
+    };
+
+    schedule();
     return () => {
       stopped = true;
-      window.clearInterval(t);
+      if (timer !== undefined) window.clearTimeout(timer);
       if (pollEpochRef.current === epoch) {
         pollEpochRef.current += 1;
       }
@@ -727,6 +750,7 @@ export default function App() {
   }, []);
 
   async function onPickSession(id: string) {
+    if (sessionPickerLocked && runningSession && id !== runningSession.id) return;
     try {
       setError(null);
       await selectSessionById(id);
@@ -736,6 +760,7 @@ export default function App() {
   }
 
   async function openSession(id: string, nextTab: Tab) {
+    if (sessionPickerLocked && runningSession && id !== runningSession.id) return;
     try {
       setError(null);
       await selectSessionById(id);
@@ -1108,6 +1133,7 @@ export default function App() {
                 session={session}
                 sessionList={sessionList}
                 sessionsLoading={sessionsLoading && sessionList.length === 0}
+                sessionPickerLocked={sessionPickerLocked}
                 onPickSession={(id) => void onPickSession(id)}
                 dash={dash}
                 dashSessions={dashSessions}
@@ -1129,6 +1155,7 @@ export default function App() {
                 session={session}
                 sessionList={sessionList}
                 sessionsLoading={sessionsLoading && sessionList.length === 0}
+                sessionPickerLocked={sessionPickerLocked}
                 findingsLoading={findingsLoading}
                 reviewSummary={reviewSummary}
                 onPickSession={(id) => void onPickSession(id)}
@@ -1158,6 +1185,7 @@ export default function App() {
                 session={session}
                 sessionList={sessionList}
                 sessionsLoading={sessionsLoading && sessionList.length === 0}
+                sessionPickerLocked={sessionPickerLocked}
                 loading={galleryLoading}
                 albums={galleryAlbums}
                 album={galleryAlbum}
@@ -1179,6 +1207,7 @@ export default function App() {
                 session={session}
                 sessionList={sessionList}
                 sessionsLoading={sessionsLoading && sessionList.length === 0}
+                sessionPickerLocked={sessionPickerLocked}
                 onPickSession={(id) => void onPickSession(id)}
                 reportFindings={reportFindings}
                 reportData={reportData}

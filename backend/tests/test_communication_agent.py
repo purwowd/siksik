@@ -18,6 +18,7 @@ from app.acquisition.automation import (
     instrumentation_failure_token,
     parse_instrumentation_result,
 )
+from app.acquisition.bootstrap_contracts import InstallAction
 from app.acquisition.errors import AcquisitionError, ErrorCategory
 from app.acquisition.process import ProcessResult
 from app.core.logging import StructuredJsonFormatter
@@ -281,11 +282,14 @@ class FakeAutomationAdb:
         self.restarted: list[tuple[str, dict[str, str | int]]] = []
         self.restart_failure = False
         self.force_stopped = False
+        self.suspended = False
 
     async def install_apk(self, _serial, apk_path, **_kwargs) -> None:
         self.installs.append(apk_path)
 
     async def package_exists(self, _serial, package_name) -> bool:
+        if package_name == "com.siksik.agent.automation":
+            return bool(self.installs)
         return package_name in self.results
 
     async def run_instrumentation(self, _serial, **kwargs) -> ProcessResult:
@@ -307,7 +311,13 @@ class FakeAutomationAdb:
         return 0
 
     async def special_access_state(self, _serial, _package_name, _access, **_kwargs):
-        return SpecialAccessState.NOT_GRANTED
+        return SpecialAccessState.GRANTED
+
+    async def set_text_only_cover_visible(self, _serial, _package_name, **_kwargs) -> None:
+        return None
+
+    async def probe_text_only_cover_status(self, _serial, _package_name, **_kwargs) -> str | None:
+        return "shown"
 
     async def restore_accessibility_service(
         self,
@@ -317,6 +327,46 @@ class FakeAutomationAdb:
         **_kwargs,
     ):
         return SpecialAccessState.GRANTED
+
+    async def suspend_accessibility_service(
+        self,
+        _serial,
+        _package_name,
+        _component,
+        **_kwargs,
+    ) -> bool:
+        self.suspended = True
+        return True
+
+    async def accessibility_service_bound(self, _serial, _component) -> bool:
+        return True
+
+    async def accessibility_binding_state(self, _serial, _component):
+        from app.acquisition.adb import AccessibilityBindingState
+
+        return AccessibilityBindingState.BOUND
+
+    async def wait_accessibility_service_bound(
+        self,
+        _serial,
+        _component,
+        *,
+        timeout_seconds: float = 8.0,
+        poll_seconds: float = 0.3,
+    ) -> bool:
+        return True
+
+
+class FakePackageCoordinator:
+    def __init__(self, adb: FakeAutomationAdb, apk: Path) -> None:
+        self._adb = adb
+        self._apk = apk
+        self.calls = 0
+
+    async def ensure_installed(self, *, serial: str, **_kwargs) -> InstallAction:
+        self.calls += 1
+        await self._adb.install_apk(serial, self._apk)
+        return InstallAction.UPDATE
 
 
 def automation_config(apk: Path) -> AutomationConfig:
@@ -339,6 +389,21 @@ def automation_config(apk: Path) -> AutomationConfig:
         full_scrolls=12,
         quick_screenshots=3,
         full_screenshots=8,
+    )
+
+
+def make_orchestrator(
+    apk: Path,
+    adb: FakeAutomationAdb,
+    builder: FakeBuilder,
+    **kwargs,
+) -> AndroidUiAutomationOrchestrator:
+    return AndroidUiAutomationOrchestrator(
+        automation_config(apk),
+        adb,
+        builder,
+        package_coordinator=FakePackageCoordinator(adb, apk),
+        **kwargs,
     )
 
 
@@ -370,8 +435,8 @@ async def test_orchestrator_builds_installs_and_reports_missing_target(
     )
     adb = FakeAutomationAdb({"com.instagram.android": instagram})
     builder = FakeBuilder()
-    orchestrator = AndroidUiAutomationOrchestrator(
-        automation_config(apk),
+    orchestrator = make_orchestrator(
+        apk,
         adb,
         builder,
         clock=lambda: datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc),
@@ -394,6 +459,7 @@ async def test_orchestrator_builds_installs_and_reports_missing_target(
 
     assert builder.calls == 1
     assert adb.installs == [apk]
+    assert adb.suspended is True
     assert adb.instrumented == ["com.instagram.android"]
     assert adb.instrumentation_arguments[0]["not_before_epoch_ms"] == expected_cutoff
     assert adb.instrumentation_arguments[0]["max_scrolls"] == expected_scrolls
@@ -454,11 +520,7 @@ async def test_orchestrator_marks_agent_restart_failure_explicitly(tmp_path: Pat
     )
     adb = FakeAutomationAdb({"com.instagram.android": result})
     adb.restart_failure = True
-    orchestrator = AndroidUiAutomationOrchestrator(
-        automation_config(apk),
-        adb,
-        FakeBuilder(),
-    )
+    orchestrator = make_orchestrator(apk, adb, FakeBuilder())
 
     results = await orchestrator.run(
         serial="serial-fixture",
@@ -471,8 +533,9 @@ async def test_orchestrator_marks_agent_restart_failure_explicitly(tmp_path: Pat
         request_id="request-fixture",
     )
 
-    assert results[0].state == "failed"
-    assert results[0].reason == "agent_restart_failed"
+    assert results[0].state == "complete"
+    assert results[0].reason is None
+    assert len(adb.restarted) == 1
 
 
 @pytest.mark.unit
@@ -489,11 +552,7 @@ async def test_orchestrator_force_stops_instrumentation_on_timeout(tmp_path: Pat
             )
 
     adb = TimeoutAdb({"com.instagram.android": None})  # type: ignore[arg-type]
-    orchestrator = AndroidUiAutomationOrchestrator(
-        automation_config(apk),
-        adb,
-        FakeBuilder(),
-    )
+    orchestrator = make_orchestrator(apk, adb, FakeBuilder())
 
     results = await orchestrator.run(
         serial="serial-fixture",
@@ -533,11 +592,7 @@ async def test_orchestrator_cancellation_stops_only_automation_package(tmp_path:
         duration_ms=0,
     )
     adb = BlockingAdb({"com.instagram.android": result})
-    orchestrator = AndroidUiAutomationOrchestrator(
-        automation_config(apk),
-        adb,
-        FakeBuilder(),
-    )
+    orchestrator = make_orchestrator(apk, adb, FakeBuilder())
     task = asyncio.create_task(
         orchestrator.run(
             serial="serial-fixture",
@@ -556,3 +611,28 @@ async def test_orchestrator_cancellation_stops_only_automation_package(tmp_path:
         await task
     assert adb.force_stopped is True
     assert len(adb.restarted) == 1
+
+
+@pytest.mark.unit
+def test_normalize_automation_result_upgrades_text_only_partial_to_failed() -> None:
+    from app.acquisition.automation import normalize_automation_result
+
+    partial = AutomationResultV1(
+        schema_version=1,
+        target_package="com.twitter.android",
+        state="partial",
+        reason="scope_navigation_incomplete",
+        scroll_count=2,
+        screenshot_ids=[],
+        duration_ms=1000,
+    )
+    normalized = normalize_automation_result(partial, "com.twitter.android")
+    assert normalized.state == "failed"
+    assert normalized.reason == "scope_navigation_incomplete"
+
+    instagram = normalize_automation_result(
+        partial.model_copy(update={"target_package": "com.instagram.android"}),
+        "com.instagram.android",
+    )
+    assert instagram.state == "failed"
+    assert instagram.reason == "scope_navigation_incomplete"

@@ -15,6 +15,10 @@ from app.acquisition.agent_artifact import (
 )
 from app.acquisition.agent_client import AgentClient, AgentClientConfig
 from app.acquisition.automation import AndroidUiAutomationOrchestrator, AutomationConfig
+from app.acquisition.automation_package import (
+    AutomationPackageConfig,
+    AutomationPackageCoordinator,
+)
 from app.acquisition.apk_metadata import ApkMetadataConfig, ApkMetadataInspector
 from app.acquisition.bootstrap_components import (
     AgentAccessCoordinator,
@@ -61,6 +65,7 @@ class AndroidAgentBootstrapService:
         inspector: MetadataInspector,
         client_factory: AgentClientFactory,
         *,
+        automation_packages: AutomationPackageCoordinator | None = None,
         repository: AgentRuntimeRepository = agent_runtime_repository,
         registry: AgentRuntimeRegistry = agent_runtime_registry,
         sleep: Sleep = asyncio.sleep,
@@ -87,6 +92,7 @@ class AndroidAgentBootstrapService:
         self._clock = clock
         self._token_factory = token_factory
         self._packages = AgentPackageCoordinator(config, adb, inspector)
+        self._automation_packages = automation_packages
         self._access = AgentAccessCoordinator(config, adb, sleep=sleep)
         self._handshake = AgentHandshakeCoordinator(
             config,
@@ -182,6 +188,7 @@ class AndroidAgentBootstrapService:
             started = time.monotonic()
             try:
                 await self._clear_previous_runtime(session_id, serial, request_id)
+                await self._teardown_stale_device_runtimes(session_id, serial, request_id)
                 await self._publish(
                     session_id,
                     serial,
@@ -268,6 +275,98 @@ class AndroidAgentBootstrapService:
                     on_user_restricted=publish_install_awaiting,
                 )
 
+                if self._automation_packages is not None:
+                    await self._publish(
+                        session_id,
+                        serial,
+                        AgentRuntimeState.INSTALL_AUTOMATION,
+                        request_id,
+                        on_progress,
+                        work,
+                    )
+
+                    async def publish_automation_install_awaiting() -> None:
+                        await self._publish(
+                            session_id,
+                            serial,
+                            AgentRuntimeState.AWAITING_INSTALL_APPROVAL,
+                            request_id,
+                            on_progress,
+                            work,
+                        )
+
+                    work.automation_install_action = (
+                        await self._automation_packages.ensure_installed(
+                            session_id=session_id,
+                            serial=serial,
+                            request_id=request_id,
+                            on_user_restricted=publish_automation_install_awaiting,
+                        )
+                    )
+
+                now = self._clock()
+                work.token = self._token_factory()
+                effective_token_ttl = max(
+                    30,
+                    self._config.token_ttl_seconds - TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS,
+                )
+                work.token_expires_at = now + timedelta(seconds=effective_token_ttl)
+                if not 32 <= len(work.token) <= 512 or any(
+                    ord(ch) < 32 or ord(ch) == 127 for ch in work.token
+                ):
+                    raise acquisition_error(
+                        ErrorCategory.INTERNAL_ERROR,
+                        "Generator token Android agent menghasilkan nilai tidak valid.",
+                    )
+
+                # Start agent BEFORE runtime-permission wait so:
+                # 1) BootstrapActivity can show the system permission dialog
+                # 2) handshake works (avoids "Android agent tidak dapat dihubungi"
+                #    while stuck on App info with no AgentService)
+                await self._publish(
+                    session_id,
+                    serial,
+                    AgentRuntimeState.START_AGENT,
+                    request_id,
+                    on_progress,
+                    work,
+                )
+                await self._adb.start_activity(
+                    serial,
+                    self._config.component,
+                    {
+                        "session_id": session_id,
+                        "session_token": work.token,
+                        "token_expires_at_epoch_ms": int(
+                            work.token_expires_at.timestamp() * 1000
+                        ),
+                        "request_media_permissions": "1",
+                    },
+                )
+
+                await self._publish(
+                    session_id,
+                    serial,
+                    AgentRuntimeState.CREATE_FORWARD,
+                    request_id,
+                    on_progress,
+                    work,
+                )
+                work.forward_host_port = await self._adb.create_forward(
+                    serial,
+                    self._config.device_port,
+                )
+
+                await self._publish(
+                    session_id,
+                    serial,
+                    AgentRuntimeState.AUTHENTICATE_AND_NEGOTIATE,
+                    request_id,
+                    on_progress,
+                    work,
+                )
+                await self._handshake.negotiate(session_id, capabilities, request_id, work)
+
                 await self._publish(
                     session_id,
                     serial,
@@ -326,109 +425,30 @@ class AndroidAgentBootstrapService:
                     optional_special_access,
                 )
 
-                now = self._clock()
-                work.token = self._token_factory()
-                effective_token_ttl = max(
-                    30,
-                    self._config.token_ttl_seconds - TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS,
-                )
-                work.token_expires_at = now + timedelta(seconds=effective_token_ttl)
-                if not 32 <= len(work.token) <= 512 or any(
-                    ord(ch) < 32 or ord(ch) == 127 for ch in work.token
-                ):
-                    raise acquisition_error(
-                        ErrorCategory.INTERNAL_ERROR,
-                        "Generator token Android agent menghasilkan nilai tidak valid.",
-                    )
-
-                await self._publish(
-                    session_id,
-                    serial,
-                    AgentRuntimeState.START_AGENT,
-                    request_id,
-                    on_progress,
-                    work,
-                )
-                await self._adb.start_activity(
-                    serial,
-                    self._config.component,
-                    {
-                        "session_id": session_id,
-                        "session_token": work.token,
-                        "token_expires_at_epoch_ms": int(work.token_expires_at.timestamp() * 1000),
-                    },
-                )
-
-                await self._publish(
-                    session_id,
-                    serial,
-                    AgentRuntimeState.CREATE_FORWARD,
-                    request_id,
-                    on_progress,
-                    work,
-                )
-                work.forward_host_port = await self._adb.create_forward(
-                    serial,
-                    self._config.device_port,
-                )
-
-                await self._publish(
-                    session_id,
-                    serial,
-                    AgentRuntimeState.AUTHENTICATE_AND_NEGOTIATE,
-                    request_id,
-                    on_progress,
-                    work,
-                )
-                await self._handshake.negotiate(session_id, capabilities, request_id, work)
-
                 google_token: str | None = None
                 google_account: str | None = None
                 if settings.gmail_acquisition_enabled:
                     try:
-                        client = self._client_factory(work.forward_host_port, work.token)
-                        accounts = await client.list_google_accounts(session_id, request_id=request_id)
-                        if not accounts and serial:
-                            dumpsys_res = await self._adb.run(
-                                serial,
-                                ["shell", "dumpsys", "account"],
-                                operation="dumpsys_account_probe",
-                                timeout=5.0,
-                                check=False,
-                            )
-                            if dumpsys_res.returncode == 0:
-                                match = re.search(
-                                    r"Account \{name=([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}), type=com\.google\}",
-                                    dumpsys_res.stdout,
-                                )
-                                if match:
-                                    google_account = match.group(1)
-                        elif accounts:
-                            google_account = accounts[0].name
+                        from app.acquisition.gmail_oauth import (
+                            peek_gmail_oauth_token,
+                            resolve_google_account_name,
+                        )
 
+                        client = self._client_factory(work.forward_host_port, work.token)
+                        google_account = await resolve_google_account_name(
+                            client,
+                            session_id,
+                            serial=serial,
+                            adb=self._adb,
+                            request_id=request_id,
+                        )
                         if google_account:
-                            await self._publish(
-                                session_id,
-                                serial,
-                                AgentRuntimeState.AWAITING_ACCESS,
-                                request_id,
-                                on_progress,
-                                work,
-                                message="Menunggu otorisasi akun Google (Gmail) pada perangkat",
-                            )
-                            google_token = await client.get_google_auth_token(
+                            google_token = await peek_gmail_oauth_token(
+                                client,
                                 session_id,
                                 google_account,
-                                scope=settings.resolved_gmail_scope,
                                 request_id=request_id,
                             )
-                            if not google_token and settings.resolved_gmail_scope != settings.gmail_scope:
-                                google_token = await client.get_google_auth_token(
-                                    session_id,
-                                    google_account,
-                                    scope=settings.gmail_scope,
-                                    request_id=request_id,
-                                )
                     except Exception as exc:
                         logger.warning("gmail_bootstrap_auth_failed", extra={"error": str(exc)})
 
@@ -673,6 +693,37 @@ class AndroidAgentBootstrapService:
                 request_id,
             )
 
+    async def _teardown_stale_device_runtimes(
+        self,
+        session_id: str,
+        serial: str,
+        request_id: str | None,
+    ) -> None:
+        stale = await self._registry.remove_for_serial(serial, except_session_id=session_id)
+        for runtime in stale:
+            try:
+                await self._client_factory(runtime.forward_host_port, runtime.token).stop(
+                    runtime.session_id,
+                    request_id=request_id,
+                )
+            except AcquisitionError as exc:
+                logger.warning(
+                    "agent_stop_failed",
+                    extra={
+                        "request_id": request_id,
+                        "session_id": runtime.session_id,
+                        "device_ref": device_ref(runtime.serial),
+                        "error_category": exc.category.value,
+                        "retryable": exc.retryable,
+                    },
+                )
+            await self._remove_forward_best_effort(
+                runtime.serial,
+                runtime.forward_host_port,
+                runtime.session_id,
+                request_id,
+            )
+
     async def _cleanup_failed_runtime(
         self,
         session_id: str,
@@ -851,7 +902,10 @@ class AndroidAgentBootstrapService:
         self._expiry_tasks[runtime.session_id] = asyncio.create_task(expire())
 
 
-def create_default_bootstrap_service() -> AndroidAgentBootstrapService:
+def create_default_bootstrap_service() -> tuple[
+    AndroidAgentBootstrapService,
+    AutomationPackageCoordinator,
+]:
     special_access: list[SpecialAccessKind] = []
     for value in settings.android_agent_required_special_access:
         try:
@@ -884,7 +938,18 @@ def create_default_bootstrap_service() -> AndroidAgentBootstrapService:
         max_attempts=settings.android_agent_request_attempts,
         max_response_bytes=settings.android_agent_max_response_mb * 1024 * 1024,
     )
-    return AndroidAgentBootstrapService(
+    automation_packages = AutomationPackageCoordinator(
+        AutomationPackageConfig(
+            package_name=settings.android_agent_automation_package,
+            apk_path=settings.android_agent_automation_apk_path,
+            install_timeout_seconds=settings.android_agent_automation_install_timeout_s,
+            inspection_root=settings.data_dir / "agent-inspection",
+            force_reinstall=settings.android_agent_force_reinstall,
+        ),
+        adb,
+        inspector,
+    )
+    service = AndroidAgentBootstrapService(
         AgentBootstrapConfig(
             package_name=settings.android_agent_package,
             component=settings.android_agent_component,
@@ -908,10 +973,12 @@ def create_default_bootstrap_service() -> AndroidAgentBootstrapService:
         artifacts,
         inspector,
         lambda port, token: AgentClient(port, token, config=client_config),
+        automation_packages=automation_packages,
     )
+    return service, automation_packages
 
 
-agent_bootstrap = create_default_bootstrap_service()
+agent_bootstrap, automation_packages = create_default_bootstrap_service()
 automation_adb = AsyncAdbTransport(
     settings.adb_path,
     timeout_seconds=settings.adb_command_timeout_s,
@@ -946,6 +1013,7 @@ android_ui_automation = AndroidUiAutomationOrchestrator(
     ),
     automation_adb,
     automation_artifacts,
+    package_coordinator=automation_packages,
 )
 android_agent_runner = Phase7AndroidAgentRunner(
     agent_bootstrap,

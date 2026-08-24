@@ -80,6 +80,7 @@ class BootstrapWorkingState:
     installed_package: InstalledPackage | None = None
     installed_apk: ApkMetadata | None = None
     install_action: InstallAction | None = None
+    automation_install_action: InstallAction | None = None
     install_strategy: str | None = None
     install_attempt_count: int = 0
     runtime_granted_during_install: bool | None = None
@@ -100,6 +101,8 @@ class BootstrapWorkingState:
         }
         if self.install_action is not None:
             result["install_action"] = self.install_action.value
+        if self.automation_install_action is not None:
+            result["automation_install_action"] = self.automation_install_action.value
         if self.install_strategy is not None:
             result["install_strategy"] = self.install_strategy
             result["install_attempt_count"] = self.install_attempt_count
@@ -125,14 +128,15 @@ STATE_PERCENT = {
     AgentRuntimeState.RESOLVE_OR_BUILD_AGENT: 20.0,
     AgentRuntimeState.INSPECT_INSTALLED_PACKAGE: 32.0,
     AgentRuntimeState.INSTALL_OR_UPDATE: 45.0,
+    AgentRuntimeState.INSTALL_AUTOMATION: 50.0,
     AgentRuntimeState.AWAITING_INSTALL_APPROVAL: 48.0,
-    AgentRuntimeState.APPLY_RUNTIME_PERMISSIONS: 56.0,
-    AgentRuntimeState.AWAITING_RUNTIME_PERMISSION: 60.0,
-    AgentRuntimeState.VERIFY_SPECIAL_ACCESS: 64.0,
-    AgentRuntimeState.AWAITING_ACCESS: 66.0,
-    AgentRuntimeState.START_AGENT: 74.0,
-    AgentRuntimeState.CREATE_FORWARD: 82.0,
-    AgentRuntimeState.AUTHENTICATE_AND_NEGOTIATE: 90.0,
+    AgentRuntimeState.START_AGENT: 55.0,
+    AgentRuntimeState.CREATE_FORWARD: 62.0,
+    AgentRuntimeState.AUTHENTICATE_AND_NEGOTIATE: 70.0,
+    AgentRuntimeState.APPLY_RUNTIME_PERMISSIONS: 78.0,
+    AgentRuntimeState.AWAITING_RUNTIME_PERMISSION: 82.0,
+    AgentRuntimeState.VERIFY_SPECIAL_ACCESS: 88.0,
+    AgentRuntimeState.AWAITING_ACCESS: 92.0,
     AgentRuntimeState.READY: 100.0,
     AgentRuntimeState.FAILED: 100.0,
     AgentRuntimeState.CANCELLED: 100.0,
@@ -145,21 +149,22 @@ STATE_MESSAGES = {
     AgentRuntimeState.RESOLVE_OR_BUILD_AGENT: "Build APK Android agent terbaru",
     AgentRuntimeState.INSPECT_INSTALLED_PACKAGE: "Memeriksa package Android agent",
     AgentRuntimeState.INSTALL_OR_UPDATE: "Memasang Android agent terbaru ke perangkat",
+    AgentRuntimeState.INSTALL_AUTOMATION: "Memasang paket UiAutomator ke perangkat",
     AgentRuntimeState.AWAITING_INSTALL_APPROVAL: (
         "Menunggu persetujuan instalasi USB pada perangkat"
     ),
-    AgentRuntimeState.APPLY_RUNTIME_PERMISSIONS: "Menerapkan izin runtime Android agent",
-    AgentRuntimeState.AWAITING_RUNTIME_PERMISSION: (
-        "Menunggu izin penyimpanan pada perangkat"
-    ),
-    AgentRuntimeState.VERIFY_SPECIAL_ACCESS: "Memverifikasi special access Android",
-    AgentRuntimeState.AWAITING_ACCESS: "Menunggu konfirmasi akses pada perangkat",
     AgentRuntimeState.START_AGENT: "Menjalankan Android agent",
     AgentRuntimeState.CREATE_FORWARD: "Membuat koneksi ADB lokal",
     AgentRuntimeState.AUTHENTICATE_AND_NEGOTIATE: "Memverifikasi sesi Android agent",
+    AgentRuntimeState.APPLY_RUNTIME_PERMISSIONS: "Menerapkan izin runtime Android agent",
+    AgentRuntimeState.AWAITING_RUNTIME_PERMISSION: (
+        "Izinkan akses media dan komunikasi pada popup di layar agent"
+    ),
+    AgentRuntimeState.VERIFY_SPECIAL_ACCESS: "Memverifikasi special access Android",
+    AgentRuntimeState.AWAITING_ACCESS: "Menunggu konfirmasi akses pada perangkat",
     AgentRuntimeState.READY: "Android agent siap",
-    AgentRuntimeState.FAILED: "Persiapan Android agent gagal",
-    AgentRuntimeState.CANCELLED: "Persiapan Android agent dibatalkan",
+    AgentRuntimeState.FAILED: "Bootstrap Android agent gagal",
+    AgentRuntimeState.CANCELLED: "Bootstrap Android agent dibatalkan",
     AgentRuntimeState.CLOSED: "Sesi Android agent ditutup",
 }
 
@@ -177,8 +182,8 @@ def runtime_permissions_for_api(api_level: int) -> tuple[RuntimePermissionRequir
             RuntimePermissionRequirement("android.permission.READ_MEDIA_AUDIO", True),
             RuntimePermissionRequirement("android.permission.ACCESS_MEDIA_LOCATION", False),
             RuntimePermissionRequirement("android.permission.POST_NOTIFICATIONS", False),
-            RuntimePermissionRequirement("android.permission.READ_SMS", False),
-            RuntimePermissionRequirement("android.permission.READ_CONTACTS", False),
+            RuntimePermissionRequirement("android.permission.READ_SMS", True),
+            RuntimePermissionRequirement("android.permission.READ_CONTACTS", True),
             RuntimePermissionRequirement("android.permission.GET_ACCOUNTS", False),
             RuntimePermissionRequirement("android.permission.USE_CREDENTIALS", False),
         )
@@ -186,15 +191,15 @@ def runtime_permissions_for_api(api_level: int) -> tuple[RuntimePermissionRequir
         return (
             RuntimePermissionRequirement("android.permission.READ_EXTERNAL_STORAGE", True),
             RuntimePermissionRequirement("android.permission.ACCESS_MEDIA_LOCATION", False),
-            RuntimePermissionRequirement("android.permission.READ_SMS", False),
-            RuntimePermissionRequirement("android.permission.READ_CONTACTS", False),
+            RuntimePermissionRequirement("android.permission.READ_SMS", True),
+            RuntimePermissionRequirement("android.permission.READ_CONTACTS", True),
             RuntimePermissionRequirement("android.permission.GET_ACCOUNTS", False),
             RuntimePermissionRequirement("android.permission.USE_CREDENTIALS", False),
         )
     return (
         RuntimePermissionRequirement("android.permission.READ_EXTERNAL_STORAGE", True),
-        RuntimePermissionRequirement("android.permission.READ_SMS", False),
-        RuntimePermissionRequirement("android.permission.READ_CONTACTS", False),
+        RuntimePermissionRequirement("android.permission.READ_SMS", True),
+        RuntimePermissionRequirement("android.permission.READ_CONTACTS", True),
         RuntimePermissionRequirement("android.permission.GET_ACCOUNTS", False),
         RuntimePermissionRequirement("android.permission.USE_CREDENTIALS", False),
     )

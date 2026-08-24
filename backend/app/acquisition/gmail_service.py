@@ -192,6 +192,7 @@ class GmailAcquisitionService:
         simulated: bool = False,
         on_progress=None,
         request_id: str | None = None,
+        reference: datetime | None = None,
     ) -> tuple[int, list[dict[str, Any]]]:
         t0 = time.perf_counter()
         email_dir = staging / "email"
@@ -207,7 +208,7 @@ class GmailAcquisitionService:
             )
 
         if not token:
-            logger.warning(
+            logger.error(
                 "gmail_live_token_not_available",
                 extra={
                     "session_id": session_id,
@@ -215,6 +216,13 @@ class GmailAcquisitionService:
                     "error": "Otorisasi Google belum aktif di perangkat",
                 },
             )
+            if on_progress:
+                await on_progress(
+                    SessionStatus.ACQUIRING,
+                    50.0,
+                    "Gmail tidak diambil: otorisasi Google belum tersedia pada perangkat",
+                    acquisition_method="gmail_api",
+                )
             return 0, []
 
         max_messages = (
@@ -223,9 +231,18 @@ class GmailAcquisitionService:
             else settings.gmail_full_max_messages
         )
 
-        time_scope = build_time_scope(mode)
+        time_scope = build_time_scope(mode, reference=reference)
         after_date = time_scope.not_before.strftime("%Y/%m/%d")
         query = f"after:{after_date}"
+        logger.info(
+            "gmail_time_scope",
+            extra={
+                "session_id": session_id,
+                "mode": mode.value,
+                "not_before": time_scope.not_before.isoformat(),
+                "reference": (reference or datetime.now(timezone.utc)).isoformat(),
+            },
+        )
 
         headers = {
             "Authorization": f"Bearer {token}",
@@ -441,11 +458,14 @@ class GmailAcquisitionService:
                 json.dumps(
                     {
                         "source_kind": "email",
+                        "source_created_at": iso_timestamp,
+                        "source_modified_at": iso_timestamp,
                         "observed_at": iso_timestamp,
                         "metadata": {
                             "display_name": f"[{subject[:40]}] {sender}",
                             "album": "Email",
                             "directory_hint": "Email",
+                            "date_header": date_str,
                             "capture_time": iso_timestamp,
                             "is_favorite": "STARRED" in labels or "IMPORTANT" in labels,
                         },

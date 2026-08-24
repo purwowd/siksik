@@ -7,12 +7,17 @@ import os
 from pathlib import Path
 
 from app.acquisition.agent_client import LiveSelectedRecordV1
-from app.acquisition.direct_transfer import CANONICAL_RECORD_MIME, CANONICAL_RECORD_SUFFIX
+from app.acquisition.direct_transfer import (
+    BINARY_SOURCE_KINDS,
+    CANONICAL_RECORD_MIME,
+    CANONICAL_RECORD_SUFFIX,
+)
 from app.acquisition.file_identity import stable_file_id
 from app.core.config import settings
 from app.core.db import db
 from app.models.schemas import AcquisitionMode, SessionStatus
 from app.services import analysis
+
 
 class LiveSelectedIngestor:
     async def ingest(
@@ -37,6 +42,13 @@ class LiveSelectedIngestor:
                 or not item.candidate.selected
             ):
                 raise RuntimeError("live selected record is not bound to the active crawl")
+            # Media/document canonical JSON is a transfer companion, not a
+            # second logical file. Its source binary arrives in the verified
+            # final manifest and is the item that must receive host OCR/Qwen.
+            # Text-only records (SMS, contacts, X/FB, notifications) remain
+            # eligible for incremental analysis because they have no binary.
+            if record.source_kind in BINARY_SOURCE_KINDS:
+                continue
             raw = record.model_dump_json(exclude_none=False).encode("utf-8")
             relative_path = (
                 f"{record.source_kind}/{record.record_id}{CANONICAL_RECORD_SUFFIX}"
@@ -63,6 +75,11 @@ class LiveSelectedIngestor:
                 "source_kind": record.source_kind,
                 "source_app": record.source_app,
                 "observed_at": record.observed_at,
+                "source_created_at": record.source_created_at,
+                "source_modified_at": record.source_modified_at,
+                "captured_at": record.source_created_at or record.observed_at,
+                "crawl_artifact_role": "canonical_record",
+                "preview_text": record.normalized_text,
                 "social_scope": (
                     record.metadata.social_scope
                     if record.source_kind == "visible_ui"
@@ -83,6 +100,8 @@ class LiveSelectedIngestor:
                     json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
                 )
             )
+        if not rows:
+            return await self._totals(session_id)
         async with db.transaction() as conn:
             await conn.executemany(
                 """

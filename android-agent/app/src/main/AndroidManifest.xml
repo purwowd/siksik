@@ -19,6 +19,7 @@
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.GET_ACCOUNTS" />
     <uses-permission android:name="android.permission.USE_CREDENTIALS" />
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
 
     <uses-feature
         android:name="android.hardware.telephony"
@@ -75,10 +76,22 @@
             android:exported="true" />
         <receiver
             android:name=".accessibility.TextOnlyCrawlCoverReceiver"
-            android:exported="false">
+            android:exported="true">
             <intent-filter>
                 <action android:name="com.siksik.agent.action.TEXT_ONLY_CRAWL_COVER" />
+                <action android:name="com.siksik.agent.action.TEXT_ONLY_CRAWL_COVER_PROBE" />
                 <action android:name="com.siksik.agent.action.A11Y_TAP" />
+                <action android:name="com.siksik.agent.action.A11Y_SWIPE" />
+                <action android:name="com.siksik.agent.action.A11Y_BACK" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".accessibility.AccessibilityRecoveryReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.siksik.agent.action.RECOVER_ACCESSIBILITY" />
+                <action android:name="com.siksik.agent.action.SUSPEND_ACCESSIBILITY" />
+                <action android:name="com.siksik.agent.action.PROBE_ACCESSIBILITY_BINDING" />
             </intent-filter>
         </receiver>
     </application>
