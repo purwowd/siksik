@@ -17,6 +17,7 @@ from app.services.acquisition import IMG_EXT, TEXT_EXT, VID_EXT
 from app.services import vision as vis
 
 CANONICAL_CRAWL_RECORD_MIME = "application/vnd.siksik.crawl-record+json"
+WHATSAPP_MESSAGE_MIME = "application/vnd.satria.whatsapp-message+json"
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,19 @@ async def read_preview(path: Path, mime: str, max_bytes: int = 200_000) -> str:
             return (record.normalized_text or "")[:max_bytes]
 
         return await asyncio.to_thread(_read_crawl_record)
+    if mime == WHATSAPP_MESSAGE_MIME:
+
+        def _read_whatsapp_message() -> str:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return ""
+            if not isinstance(payload, dict) or payload.get("kind") != "whatsapp_message":
+                return ""
+            normalized = payload.get("normalized_text")
+            return normalized[:max_bytes] if isinstance(normalized, str) else ""
+
+        return await asyncio.to_thread(_read_whatsapp_message)
     if ext in {".imgmeta", ".vidmeta"}:
 
         def _read_meta() -> str:
@@ -202,7 +216,7 @@ def analyze_content_result(
     origin_hint: str | None = None,
 ) -> ContentAnalysisResult:
     ext = path.suffix.lower()
-    if mime == CANONICAL_CRAWL_RECORD_MIME:
+    if mime in {CANONICAL_CRAWL_RECORD_MIME, WHATSAPP_MESSAGE_MIME}:
         from app.services import content_policy
 
         findings = analyze_text_l1_l2(text, keywords) if text.strip() else []
@@ -210,7 +224,11 @@ def analyze_content_result(
             findings.extend(
                 content_policy.findings_from_text(
                     text,
-                    backend="canonical_text",
+                    backend=(
+                        "whatsapp_message"
+                        if mime == WHATSAPP_MESSAGE_MIME
+                        else "canonical_text"
+                    ),
                     layer=Layer.L2.value,
                     image_context=False,
                 )
@@ -447,6 +465,7 @@ async def _analyze_session_body(
         ext = path.suffix.lower()
         if (
             mime == CANONICAL_CRAWL_RECORD_MIME
+            or mime == WHATSAPP_MESSAGE_MIME
             or path.name.endswith(".siksik-record.json")
             or (ext == ".json" and source in {"sms", "contacts", "contact", "visible_ui"})
             or source in {"sms", "contacts", "contact"}

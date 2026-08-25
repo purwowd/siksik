@@ -221,6 +221,14 @@ class Settings(BaseSettings):
     def resolved_gmail_scope(self) -> str:
         return self.gmail_scope
 
+    browser_history_enabled: bool = True
+    browser_history_timeout_s: float = Field(default=90.0, ge=15.0, le=300.0)
+    browser_history_chrome_package: str = "com.android.chrome"
+    browser_history_chrome_activity: str = (
+        "com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity"
+    )
+    browser_history_devtools_socket: str = "chrome_devtools_remote"
+
     ios_social_ui_enabled: bool = True
     ios_afc_media_enabled: bool = True
     ios_afc_docs_enabled: bool = True

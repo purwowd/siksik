@@ -4,6 +4,7 @@ pydantic>=2.11.0
 pydantic-settings>=2.8.0
 aiosqlite>=0.21.0
 python-multipart>=0.0.20
+pycryptodomex>=3.23.0
 easyocr>=1.7.0; platform_system=="Darwin"
 bcrypt>=4.2.0
 # Explicit image/video nudity detector. 320n ONNX model is bundled in the wheel.

@@ -45,6 +45,7 @@ def tmp_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(config.settings, "db_path", db_path)
     # Tes acceptance memakai perangkat simulator
     monkeypatch.setattr(config.settings, "lab_demo_mode", True)
+    monkeypatch.setattr(config.settings, "browser_history_enabled", False)
     return data
 
 

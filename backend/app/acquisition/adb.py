@@ -2676,6 +2676,26 @@ class AsyncAdbTransport:
             )
         return int(raw_port)
 
+    async def create_abstract_forward(self, serial: str, socket_name: str) -> int:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]{1,64}", socket_name):
+            raise acquisition_error(
+                ErrorCategory.VALIDATION_ERROR,
+                "Nama socket Android tidak valid.",
+            )
+        await self.select_device(serial)
+        result = await self.run(
+            serial,
+            ["forward", "tcp:0", f"localabstract:{socket_name}"],
+            operation="adb_forward_abstract",
+        )
+        raw_port = result.stdout.strip()
+        if not raw_port.isdigit() or not 1 <= int(raw_port) <= 65535:
+            raise acquisition_error(
+                ErrorCategory.ADB_COMMAND_FAILED,
+                "ADB mengembalikan port forward yang tidak valid.",
+            )
+        return int(raw_port)
+
     async def restore_forward(
         self,
         serial: str,

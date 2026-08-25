@@ -71,6 +71,15 @@ _JUNK_BASENAMES = frozenset(
 _MEDIA_EXT = IMG_EXT | VID_EXT | AUDIO_EXT | TEXT_EXT | DOC_EXT
 
 
+def _nonnegative_int(value: object) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def looks_favorite_path(path_str: str) -> bool:
     value = path_str.casefold()
     return any(token in value for token in ("favorite", "favourite", "favorit"))
@@ -689,6 +698,8 @@ def _zip_skip(name: str) -> bool:
 def _bucket_for_file(name: str) -> str:
     ext = Path(name).suffix.lower()
     low = name.lower()
+    if low.endswith(".whatsapp-message.json"):
+        return "whatsapp"
     if ext in {".eml", ".msg"} or "email" in low or "gmail" in low:
         return "email"
     if ext in VID_EXT:
@@ -742,7 +753,21 @@ async def acquire_from_zip(
             members = [m for m in zf.infolist() if not m.is_dir() and not _zip_skip(m.filename)]
             # Deteksi apakah ZIP sudah terstruktur (gallery/video/…)
             tops = {Path(m.filename).parts[0].lower() for m in members if Path(m.filename).parts}
-            structured = bool(tops & {"gallery", "video", "documents", "dcim", "pictures", "download", "movies", "email", "gmail"})
+            structured = bool(
+                tops
+                & {
+                    "gallery",
+                    "video",
+                    "documents",
+                    "dcim",
+                    "pictures",
+                    "download",
+                    "movies",
+                    "email",
+                    "gmail",
+                    "whatsapp",
+                }
+            )
 
             for i, member in enumerate(members):
                 raw_name = member.filename.replace("\\", "/")
@@ -903,6 +928,29 @@ async def acquire_dispatch(
                 provider=result.provider,
             )
 
+    if device_type == DeviceType.ANDROID and not simulated:
+        from app.acquisition.whatsapp_backup import WhatsAppBackupAcquisitionService
+
+        whatsapp = await WhatsAppBackupAcquisitionService().acquire(
+            serial=device_id,
+            staging=result.staging,
+            mode=mode,
+            on_progress=on_progress,
+        )
+        if whatsapp is not None:
+            method_suffix = (
+                "whatsapp_crypt15"
+                if whatsapp.state == "complete"
+                else "whatsapp_crypt15_parse_unavailable"
+            )
+            result = AcquisitionResult(
+                staging=result.staging,
+                item_count=result.item_count + whatsapp.item_count,
+                duration_ms=result.duration_ms + whatsapp.duration_ms,
+                method=f"{result.method}+{method_suffix}",
+                provider=result.provider,
+            )
+
     if (
         settings.gmail_acquisition_enabled
         and (device_type == DeviceType.ANDROID or simulated)
@@ -984,6 +1032,30 @@ async def acquire_dispatch(
                     method=f"{result.method}+gmail_api",
                     provider=result.provider,
                 )
+
+    if settings.browser_history_enabled and device_type == DeviceType.ANDROID:
+        from app.acquisition.browser_history import BrowserHistoryAcquisitionService
+        from app.acquisition.gmail_oauth import session_acquisition_reference
+
+        reference = await session_acquisition_reference(session_id)
+        browser_count = await BrowserHistoryAcquisitionService().acquire(
+            session_id=session_id,
+            serial=device_id,
+            staging=result.staging,
+            mode=mode,
+            simulated=simulated,
+            on_progress=on_progress,
+            request_id=context.request_id,
+            reference=reference,
+        )
+        if browser_count > 0:
+            result = AcquisitionResult(
+                staging=result.staging,
+                item_count=result.item_count + browser_count,
+                duration_ms=result.duration_ms,
+                method=f"{result.method}+chrome_cdp",
+                provider=result.provider,
+            )
 
     return result.as_legacy_tuple()
 
@@ -1210,6 +1282,98 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
 
                 capture = capture_meta(p)
             meta = {"ext": p.suffix.lower(), **capture}
+            if str(source).casefold() == "whatsapp" and p.suffix.lower() == ".json":
+                try:
+                    whatsapp_payload = json.loads(p.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    whatsapp_payload = {}
+                if (
+                    isinstance(whatsapp_payload, dict)
+                    and whatsapp_payload.get("kind") == "whatsapp_message"
+                ):
+                    from app.acquisition.whatsapp_backup import WHATSAPP_MESSAGE_MIME
+
+                    mime = WHATSAPP_MESSAGE_MIME
+                    conversation = whatsapp_payload.get("conversation")
+                    message = whatsapp_payload.get("message")
+                    conversation = conversation if isinstance(conversation, dict) else {}
+                    message = message if isinstance(message, dict) else {}
+                    quote = message.get("quote")
+                    quote = quote if isinstance(quote, dict) else {}
+                    media = message.get("media")
+                    media = media if isinstance(media, dict) else {}
+                    message_text = message.get("text")
+                    if not isinstance(message_text, str) or not message_text.strip():
+                        message_text = media.get("caption")
+                    if not isinstance(message_text, str) or not message_text.strip():
+                        message_text = whatsapp_payload.get("preview_text")
+                    if isinstance(message_text, str):
+                        message_text = message_text[:131_072]
+                    else:
+                        message_text = None
+                    for key in (
+                        "album",
+                        "display_name",
+                        "captured_at",
+                        "source_created_at",
+                        "preview_text",
+                        "normalized_text",
+                    ):
+                        value = whatsapp_payload.get(key)
+                        if value not in {None, ""}:
+                            meta[key] = value
+                    meta.update(
+                        {
+                            "acquisition_method": "whatsapp_crypt15",
+                            "artifact_role": "canonical_message",
+                            "conversation_id": conversation.get("id"),
+                            "conversation_name": conversation.get("name"),
+                            "conversation_address": conversation.get("address"),
+                            "conversation_type": conversation.get("type"),
+                            "message_id": message.get("id"),
+                            "message_direction": message.get("direction"),
+                            "message_sender": message.get("sender"),
+                            "message_type": message.get("type"),
+                            "message_text": message_text,
+                            "message_timestamp": message.get("timestamp"),
+                            "message_starred": bool(message.get("starred")),
+                            "message_revoked": bool(message.get("revoked")),
+                            "message_forward_score": _nonnegative_int(
+                                message.get("forward_score")
+                            ),
+                            "message_edited_at": message.get("edited_at"),
+                            "quoted_text": quote.get("text"),
+                        }
+                    )
+                    captured_at = meta.get("captured_at")
+                    if isinstance(captured_at, str) and len(captured_at) >= 4:
+                        try:
+                            captured_year = int(captured_at[:4])
+                        except ValueError:
+                            captured_year = 0
+                        if 1970 <= captured_year <= 9999:
+                            meta["captured_year"] = captured_year
+                    meta["date_source"] = "whatsapp_database"
+            if str(source).startswith("browser_history") and p.suffix.lower() == ".json":
+                try:
+                    browser_payload = json.loads(p.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    browser_payload = {}
+                if isinstance(browser_payload, dict):
+                    for key in (
+                        "album",
+                        "display_name",
+                        "captured_at",
+                        "access_count",
+                        "preview_text",
+                        "observed_at",
+                    ):
+                        value = browser_payload.get(key)
+                        if value not in {None, ""}:
+                            meta[key] = value
+                    if meta.get("observed_at") and not meta.get("captured_at"):
+                        meta["captured_at"] = meta["observed_at"]
+                    meta["acquisition_method"] = "chrome_cdp"
             if artifact is not None:
                 capture_extra = crawl_capture_meta.get(str(artifact["record_id"]), {})
                 meta.update(
@@ -1300,7 +1464,12 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                 existing_file_ids.get(rel)
                 or (
                     stable_file_id(session_id, rel)
-                    if artifact is not None or recovered is not None or ios_artifact is not None
+                    if (
+                        artifact is not None
+                        or recovered is not None
+                        or ios_artifact is not None
+                        or str(source).casefold() == "whatsapp"
+                    )
                     else str(uuid.uuid4())
                 )
             )

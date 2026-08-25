@@ -614,6 +614,17 @@ async def test_acquire_dispatch_adds_recovery_without_replacing_provider_result(
     monkeypatch.setattr("app.acquisition.providers.registry.AcquisitionProviderRegistry.acquire", fake_acquire)
     monkeypatch.setattr(AndroidRecoveryService, "recover", fake_recover)
     monkeypatch.setattr(config.settings, "android_recovery_enabled", True)
+    monkeypatch.setattr(config.settings, "browser_history_enabled", False)
+    monkeypatch.setattr(config.settings, "gmail_acquisition_enabled", False)
+
+    async def skip_whatsapp(self, **_kwargs):
+        del self
+        return None
+
+    monkeypatch.setattr(
+        "app.acquisition.whatsapp_backup.WhatsAppBackupAcquisitionService.acquire",
+        skip_whatsapp,
+    )
 
     async def on_progress(*_args, **_kwargs):
         return None
@@ -710,6 +721,17 @@ async def test_recovery_failure_keeps_primary_acquisition_and_cleans_owned_files
     monkeypatch.setattr("app.acquisition.providers.registry.AcquisitionProviderRegistry.acquire", fake_acquire)
     monkeypatch.setattr(AndroidRecoveryService, "recover", fake_recover)
     monkeypatch.setattr(config.settings, "android_recovery_enabled", True)
+    monkeypatch.setattr(config.settings, "browser_history_enabled", False)
+    monkeypatch.setattr(config.settings, "gmail_acquisition_enabled", False)
+
+    async def skip_whatsapp(self, **_kwargs):
+        del self
+        return None
+
+    monkeypatch.setattr(
+        "app.acquisition.whatsapp_backup.WhatsAppBackupAcquisitionService.acquire",
+        skip_whatsapp,
+    )
     events: list[dict] = []
 
     async def on_progress(*_args, **fields):
@@ -753,6 +775,17 @@ async def test_recovery_cancellation_cleans_owned_files_and_propagates(
     monkeypatch.setattr("app.acquisition.providers.registry.AcquisitionProviderRegistry.acquire", fake_acquire)
     monkeypatch.setattr(AndroidRecoveryService, "recover", fake_recover)
     monkeypatch.setattr(config.settings, "android_recovery_enabled", True)
+    monkeypatch.setattr(config.settings, "browser_history_enabled", False)
+    monkeypatch.setattr(config.settings, "gmail_acquisition_enabled", False)
+
+    async def skip_whatsapp(self, **_kwargs):
+        del self
+        return None
+
+    monkeypatch.setattr(
+        "app.acquisition.whatsapp_backup.WhatsAppBackupAcquisitionService.acquire",
+        skip_whatsapp,
+    )
 
     async def on_progress(*_args, **_kwargs):
         return None

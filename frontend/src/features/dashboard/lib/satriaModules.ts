@@ -43,6 +43,11 @@ const SOCIAL_SOURCES = new Set([
 ]);
 
 const EMAIL_SOURCES = new Set(["gmail", "email", "mail"]);
+const BROWSER_SOURCES = new Set([
+  "browser_history_full",
+  "browser_history_partial",
+  "browser_history",
+]);
 
 const WA_SOURCES = new Set(["whatsapp", "wa", "msgstore"]);
 
@@ -210,10 +215,22 @@ export function buildAnalysisModules(args: {
   const emailFromDash = countBySource(bySource, (n) => /gmail|email|mail/.test(n));
   const emailCount = Math.max(emailFindings.length, emailFromDash);
 
+  const browserFindings = findingsMatching(
+    findings,
+    (f) =>
+      BROWSER_SOURCES.has(f.source.toLowerCase()) || /browser_history/i.test(f.path || ""),
+  );
+  const browserFromDash = countBySource(bySource, (n) => /browser_history|chrome_cdp/.test(n));
+  const browserCount = Math.max(browserFindings.length, browserFromDash);
+
   const waFindings = findingsMatching(
     findings,
     (f) => WA_SOURCES.has(f.source.toLowerCase()) || /whatsapp|msgstore/i.test(f.path || ""),
   );
+  const waState = progress?.whatsapp_state;
+  const waMessages = progress?.whatsapp_messages ?? 0;
+  const waConversations = progress?.whatsapp_conversations ?? 0;
+  const waLive = waState === "complete";
 
   return [
     {
@@ -255,18 +272,25 @@ export function buildAnalysisModules(args: {
       id: "whatsapp",
       title: "WhatsApp & Grup",
       subtitle: "Obrolan / grup · indikasi kontestasi",
-      availability: waFindings.length > 0 ? "live" : "unavailable",
+      availability: waLive || waFindings.length > 0 ? "live" : waState === "parse_unavailable" ? "unavailable" : "empty",
       availabilityLabel:
         waFindings.length > 0
-          ? "Sinyal terkait chat terdeteksi"
-          : "Modul belum aktif di runtime ini",
+          ? "Temuan pesan siap direview"
+          : waLive
+            ? "Akuisisi & parsing selesai"
+            : waState === "parse_unavailable"
+              ? "Backup diperoleh · parser belum cocok"
+              : waState === "not_installed"
+                ? "WhatsApp tidak terpasang"
+                : "Belum ada data WhatsApp",
       metrics: [
-        { label: "Temuan terkait", value: waFindings.length > 0 ? String(waFindings.length) : "—" },
-        { label: "msgstore.db", value: "Di luar cakupan" },
+        { label: "Pesan", value: String(waMessages) },
+        { label: "Percakapan", value: String(waConversations) },
+        { label: "Temuan terkait", value: String(waFindings.length) },
       ],
       notes: [
-        "PoC: hanya sinyal dari path/chat hint — bukan parsing msgstore.db penuh.",
-        "Modul belum aktif di runtime; jangan anggap angka kosong sebagai hasil bersih.",
+        "Native SATRIA: UI backup WhatsApp → Crypt15 → canonical pesan → analisis/review.",
+        `UI automator: ${progress?.whatsapp_ui_attempt ?? 0}/${progress?.whatsapp_ui_attempts ?? 4} percobaan.`,
       ],
       drillDown: waFindings.length > 0,
     },
@@ -305,6 +329,26 @@ export function buildAnalysisModules(args: {
           ? ["Gunakan tab Temuan untuk meninjau item email."]
           : ["Akuisisi Gmail/email aktif bila dikonfigurasi pada sesi."],
       drillDown: emailCount > 0,
+    },
+    {
+      id: "browser",
+      title: "Riwayat Browser",
+      subtitle: "Chrome · URL lengkap · jejak sebagian",
+      availability: browserCount > 0 ? "live" : session ? "empty" : "empty",
+      availabilityLabel:
+        browserCount > 0 ? "Temuan riwayat browser" : "Belum ada temuan riwayat browser",
+      metrics: [
+        { label: "Temuan browser", value: String(browserCount) },
+        {
+          label: "Periode",
+          value: session?.mode === "full" ? "FULL (~6 bln)" : "QUICK (~3 bln)",
+        },
+      ],
+      notes:
+        browserCount > 0
+          ? ["Galeri memisahkan URL lengkap dan jejak sebagian."]
+          : ["CDP Chrome aktif pada akuisisi Android bila DevTools tersedia."],
+      drillDown: browserCount > 0,
     },
     {
       id: "tiktok",

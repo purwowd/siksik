@@ -30,6 +30,7 @@ SOCIAL_SCOPES = {
 }
 MAX_SOCIAL_REPORT_ITEMS = 500
 MAX_SOCIAL_PREVIEW_CHARS = 2_000
+MAX_WHATSAPP_REPORT_MESSAGES = 500
 REPORT_CATEGORY_LABELS = {
     "ketelanjangan": "Ketelanjangan / konten eksplisit",
     "konten_visual": "Konten visual berisiko",
@@ -66,6 +67,7 @@ REPORT_SOURCE_LABELS = {
     "ios_recently_deleted": "Baru Dihapus (iOS)",
     "ios_recovered_cache": "Cache / preview Photos (iOS)",
     "ios_deleted_metadata": "Jejak hapus permanen Photos (iOS)",
+    "whatsapp": "WhatsApp",
 }
 REPORT_METHOD_LABELS = {
     "adb": "USB Android (ADB)",
@@ -85,6 +87,11 @@ REPORT_METHOD_LABELS = {
     "ios_photo_library_recovery": "Hidden/deleted/cache Photos iOS",
     "zip_upload": "Unggah ZIP",
     "simulated": "Simulasi lab",
+    "chrome_cdp": "Riwayat browser Chrome (CDP)",
+    "whatsapp_crypt15": "Backup WhatsApp terenkripsi (Crypt15)",
+    "whatsapp_crypt15_parse_unavailable": (
+        "Backup WhatsApp Crypt15 (format database belum terbaca)"
+    ),
     "unknown": "Tidak diketahui",
 }
 RECOVERY_STATE_LABELS = {
@@ -326,6 +333,15 @@ def _fmt_bytes(value: object) -> str:
     if n < 1024 * 1024:
         return f"{n / 1024:.1f} KB"
     return f"{n / (1024 * 1024):.1f} MB"
+
+
+def _nonnegative_int(value: object) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def _esc(value: object) -> str:
@@ -1130,6 +1146,119 @@ async def _social_report_data(session_id: str) -> tuple[list[dict], int, bool]:
     return ordered_accounts, total, total > MAX_SOCIAL_REPORT_ITEMS
 
 
+async def _whatsapp_report_data(
+    session_id: str,
+    findings: list,
+) -> tuple[list[dict], int, int, bool]:
+    rows = await db.fetchall(
+        "SELECT id, meta_json FROM files "
+        "WHERE session_id = ? AND lower(source) = 'whatsapp'",
+        (session_id,),
+    )
+    findings_by_file: dict[str, list] = {}
+    for finding in findings:
+        findings_by_file.setdefault(str(finding["file_id"]), []).append(finding)
+
+    messages: list[dict] = []
+    conversation_ids: set[str] = set()
+    for row in rows:
+        try:
+            metadata = json.loads(row["meta_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        conversation_id = str(metadata.get("conversation_id") or "").strip()
+        message_id = str(metadata.get("message_id") or "").strip()
+        direction = str(metadata.get("message_direction") or "").strip()
+        if not conversation_id or not message_id or direction not in {"IN", "OUT"}:
+            continue
+        conversation_ids.add(conversation_id)
+        linked_findings = findings_by_file.get(str(row["id"]), [])
+        messages.append(
+            {
+                "conversation_id": conversation_id,
+                "conversation_name": str(
+                    metadata.get("conversation_name")
+                    or metadata.get("display_name")
+                    or "Percakapan WhatsApp"
+                )[:512],
+                "conversation_address": str(
+                    metadata.get("conversation_address") or ""
+                )[:1024]
+                or None,
+                "conversation_type": (
+                    "group" if metadata.get("conversation_type") == "group" else "chat"
+                ),
+                "message_id": message_id,
+                "direction": direction,
+                "sender": str(metadata.get("message_sender") or "")[:1024] or None,
+                "message_type": str(metadata.get("message_type") or "text")[:64],
+                "timestamp": metadata.get("message_timestamp")
+                or metadata.get("captured_at"),
+                "preview_text": str(
+                    metadata.get("message_text") or metadata.get("preview_text") or ""
+                )[:131_072]
+                or "—",
+                "quoted_text": str(metadata.get("quoted_text") or "")[:2_000]
+                or None,
+                "starred": bool(metadata.get("message_starred")),
+                "revoked": bool(metadata.get("message_revoked")),
+                "forwarded": _nonnegative_int(
+                    metadata.get("message_forward_score")
+                )
+                > 0,
+                "edited_at": metadata.get("message_edited_at"),
+                "flagged": bool(linked_findings),
+                "finding_labels": sorted(
+                    {
+                        str(finding["label"])
+                        for finding in linked_findings
+                        if str(finding["label"] or "").strip()
+                    }
+                ),
+                "review_statuses": sorted(
+                    {
+                        str(finding["review_status"])
+                        for finding in linked_findings
+                        if str(finding["review_status"] or "").strip()
+                    }
+                ),
+            }
+        )
+
+    messages.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
+    total = len(messages)
+    selected = messages[:MAX_WHATSAPP_REPORT_MESSAGES]
+    rooms_by_id: dict[str, dict] = {}
+    for message in selected:
+        room = rooms_by_id.setdefault(
+            message["conversation_id"],
+            {
+                "conversation_id": message["conversation_id"],
+                "name": message["conversation_name"],
+                "address": message["conversation_address"],
+                "type": message["conversation_type"],
+                "messages": [],
+            },
+        )
+        room["messages"].append(message)
+    rooms = list(rooms_by_id.values())
+    for room in rooms:
+        room["messages"].sort(key=lambda item: str(item.get("timestamp") or ""))
+        room["finding_count"] = sum(
+            bool(message.get("flagged")) for message in room["messages"]
+        )
+    rooms.sort(
+        key=lambda room: max(
+            (str(message.get("timestamp") or "") for message in room["messages"]),
+            default="",
+        ),
+        reverse=True,
+    )
+    return rooms, total, len(conversation_ids), total > MAX_WHATSAPP_REPORT_MESSAGES
+
+
 async def build_session_report(session_id: str) -> dict:
     row = await db.fetchone("SELECT * FROM sessions WHERE id = ?", (session_id,))
     if not row:
@@ -1146,6 +1275,9 @@ async def build_session_report(session_id: str) -> dict:
     progress = json.loads(row["progress_json"])
     timing = json.loads(row["timing_json"])
     social_accounts, social_total, social_truncated = await _social_report_data(session_id)
+    whatsapp_rooms, whatsapp_total, whatsapp_conversations, whatsapp_truncated = (
+        await _whatsapp_report_data(session_id, list(findings))
+    )
     participant = None
     try:
         raw_participant = row["participant_json"]
@@ -1200,6 +1332,8 @@ async def build_session_report(session_id: str) -> dict:
             "bytes": files["bytes"] if files else 0,
             "findings": len(findings),
             "social_records": social_total,
+            "whatsapp_messages": whatsapp_total,
+            "whatsapp_conversations": whatsapp_conversations,
             "timing": timing,
             "progress": progress,
         },
@@ -1213,6 +1347,13 @@ async def build_session_report(session_id: str) -> dict:
             "total_items": social_total,
             "truncated": social_truncated,
             "maximum_items": MAX_SOCIAL_REPORT_ITEMS,
+        },
+        "whatsapp_rooms": whatsapp_rooms,
+        "whatsapp_data": {
+            "total_messages": whatsapp_total,
+            "total_conversations": whatsapp_conversations,
+            "truncated": whatsapp_truncated,
+            "maximum_messages": MAX_WHATSAPP_REPORT_MESSAGES,
         },
         "findings": [
             {
@@ -1408,6 +1549,7 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
     timing = m.get("timing") if isinstance(m.get("timing"), dict) else {}
     findings = list(report.get("findings") or [])
     social_accounts = list(report.get("social_accounts") or [])
+    whatsapp_rooms = list(report.get("whatsapp_rooms") or [])
 
     pending = sum(1 for f in findings if f.get("review_status") == "pending")
     confirmed = sum(1 for f in findings if f.get("review_status") == "confirmed")
@@ -1497,6 +1639,25 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
             f"cache {_esc(progress.get('ios_cache_captured', 0))} · "
             f"jejak purge {_esc(progress.get('ios_deleted_metadata_captured', 0))} · "
             f"{_esc(progress.get('ios_library_warning_count', 0))} peringatan</li>"
+        )
+
+    whatsapp_metric = ""
+    if progress.get("whatsapp_state"):
+        whatsapp_state_labels = {
+            "not_installed": "tidak terpasang",
+            "ui_automation": "otomasi UI",
+            "parsing": "parsing",
+            "parse_unavailable": "backup diperoleh, parser tidak tersedia",
+            "complete": "selesai",
+        }
+        state = str(progress.get("whatsapp_state") or "")
+        whatsapp_metric = (
+            "<li>WhatsApp: "
+            f"{_esc(progress.get('whatsapp_messages', 0))} pesan · "
+            f"{_esc(progress.get('whatsapp_conversations', 0))} percakapan · "
+            f"UI {_esc(progress.get('whatsapp_ui_attempt', 0))}/"
+            f"{_esc(progress.get('whatsapp_ui_attempts', 4))} · "
+            f"{_esc(whatsapp_state_labels.get(state, state))}</li>"
         )
 
     rec = recommendation or "—"
@@ -1618,6 +1779,56 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
   <table class="data">
     <thead><tr><th>Platform</th><th>Jenis</th><th>Waktu</th><th>Preview</th></tr></thead>
     <tbody>{social_rows or '<tr><td colspan="4">Tidak ada aktivitas sosial yang dikoleksi.</td></tr>'}</tbody>
+  </table>
+</section>
+"""
+
+    whatsapp_row_parts: list[str] = []
+    for room in whatsapp_rooms:
+        for message in room.get("messages", []):
+            direction = "Keluar" if message.get("direction") == "OUT" else "Masuk"
+            sender = message.get("sender") or (
+                "Anda" if message.get("direction") == "OUT" else "—"
+            )
+            finding_badge = (
+                '<span class="pill bad">Temuan</span>'
+                if message.get("flagged")
+                else "—"
+            )
+            whatsapp_row_parts.append(
+                "<tr>"
+                f"<td>{_esc(room.get('name') or 'Percakapan WhatsApp')}</td>"
+                f"<td>{_esc(direction)}</td>"
+                f"<td>{_esc(sender)}</td>"
+                f"<td>{_esc(_format_generated_at(message.get('timestamp')))}</td>"
+                f"<td class=\"preview\">"
+                f"{_esc(_short_text(message.get('preview_text'), 180))}</td>"
+                f"<td>{finding_badge}</td>"
+                "</tr>"
+            )
+    whatsapp_rows = "".join(whatsapp_row_parts)
+    whatsapp_data = (
+        report.get("whatsapp_data")
+        if isinstance(report.get("whatsapp_data"), dict)
+        else {}
+    )
+    whatsapp_section = ""
+    if whatsapp_rooms:
+        truncated_note = (
+            "<p class=\"muted\">Tampilan dibatasi "
+            f"{_esc(whatsapp_data.get('maximum_messages'))} dari "
+            f"{_esc(whatsapp_data.get('total_messages'))} pesan.</p>"
+            if whatsapp_data.get("truncated")
+            else ""
+        )
+        whatsapp_section = f"""
+<section class="panel">
+  <h2>Percakapan WhatsApp</h2>
+  <p class="muted">{_esc(whatsapp_data.get('total_messages', 0))} pesan dari {_esc(whatsapp_data.get('total_conversations', 0))} percakapan. Penanda Temuan mengikuti hasil analisis dan review pesan yang sama.</p>
+  {truncated_note}
+  <table class="data">
+    <thead><tr><th>Ruang chat</th><th>Arah</th><th>Pengirim</th><th>Waktu</th><th>Pesan</th><th>Status</th></tr></thead>
+    <tbody>{whatsapp_rows}</tbody>
   </table>
 </section>
 """
@@ -2060,12 +2271,15 @@ footer {{
 
 {social_section}
 
+{whatsapp_section}
+
 <section class="panel">
   <h2>Ringkasan bukti</h2>
   <ul class="stats">
     {evidence_stats}
     {recovery_metric}
     {ios_library_metric}
+    {whatsapp_metric}
   </ul>
   <h2 style="margin-top:16px">Per kategori</h2>
   <ul class="stats">{cat_items}</ul>

@@ -5,6 +5,24 @@ export interface GalleryAlbum {
   count: number;
 }
 
+export interface WhatsAppChatMeta {
+  conversation_id: string;
+  conversation_name: string;
+  conversation_address?: string | null;
+  conversation_type: "chat" | "group";
+  message_id: string;
+  direction: "IN" | "OUT";
+  sender?: string | null;
+  message_type: string;
+  text?: string | null;
+  timestamp?: string | null;
+  quoted_text?: string | null;
+  starred?: boolean;
+  revoked?: boolean;
+  forwarded?: boolean;
+  edited_at?: string | null;
+}
+
 export interface GalleryItem {
   id: string;
   session_id: string;
@@ -21,7 +39,8 @@ export interface GalleryItem {
   source_path?: string | null;
   source_app?: string | null;
   social_scope?: string | null;
-  presentation?: "file" | "visual" | "text";
+  presentation?: "file" | "visual" | "text" | "chat";
+  chat?: WhatsAppChatMeta | null;
   artifact_role?: string | null;
   recovery_state?: "normal" | "trash" | "recovered_deleted";
   captured_at?: string | null;

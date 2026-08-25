@@ -206,6 +206,12 @@ class SessionProgress(ResponseModel):
     hits_l4: int = Field(default=0, ge=0)
     hits_ocr: int = Field(default=0, ge=0)
     hits_asr: int = Field(default=0, ge=0)
+    whatsapp_state: str | None = None
+    whatsapp_ui_attempt: int = Field(default=0, ge=0, le=4)
+    whatsapp_ui_attempts: int = Field(default=0, ge=0, le=4)
+    whatsapp_messages: int = Field(default=0, ge=0)
+    whatsapp_conversations: int = Field(default=0, ge=0)
+    whatsapp_parse_skipped: int = Field(default=0, ge=0)
     authorized_by: str | None = None
     authorized_at: str | None = None
     authorize_note: str | None = None
@@ -403,6 +409,24 @@ class GalleryAlbumOut(ResponseModel):
     count: int = Field(ge=0)
 
 
+class WhatsAppChatMetaOut(ResponseModel):
+    conversation_id: str = Field(min_length=1, max_length=128)
+    conversation_name: str = Field(min_length=1, max_length=512)
+    conversation_address: str | None = Field(default=None, max_length=1024)
+    conversation_type: str = Field(default="chat", pattern=r"^(chat|group)$")
+    message_id: str = Field(min_length=1, max_length=128)
+    direction: str = Field(pattern=r"^(IN|OUT)$")
+    sender: str | None = Field(default=None, max_length=1024)
+    message_type: str = Field(default="text", max_length=64)
+    text: str | None = Field(default=None, max_length=131072)
+    timestamp: str | None = None
+    quoted_text: str | None = Field(default=None, max_length=2000)
+    starred: bool = False
+    revoked: bool = False
+    forwarded: bool = False
+    edited_at: str | None = None
+
+
 class GalleryItemOut(ResponseModel):
     id: str
     session_id: str
@@ -419,7 +443,8 @@ class GalleryItemOut(ResponseModel):
     source_path: str | None = Field(default=None, max_length=2048)
     source_app: str | None = Field(default=None, max_length=255)
     social_scope: str | None = Field(default=None, max_length=128)
-    presentation: str = Field(default="file", pattern=r"^(file|visual|text)$")
+    presentation: str = Field(default="file", pattern=r"^(file|visual|text|chat)$")
+    chat: WhatsAppChatMetaOut | None = None
     artifact_role: str | None = Field(default=None, max_length=64)
     recovery_state: str = Field(
         default="normal",

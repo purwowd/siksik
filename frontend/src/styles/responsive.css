@@ -167,6 +167,29 @@
     justify-content: center;
   }
 
+  .wa-room-header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .wa-room-counts {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+    margin-left: 50px;
+  }
+
+  .wa-thread {
+    padding: 10px;
+  }
+
+  .wa-message {
+    max-width: 92%;
+  }
+
+  .wa-message-bubble {
+    min-width: min(210px, 100%);
+  }
+
   .dash-session-strip {
     flex-direction: column;
     align-items: stretch;

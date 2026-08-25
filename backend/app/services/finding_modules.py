@@ -43,6 +43,15 @@ MODULE_SOURCE_SQL: dict[str, tuple[str, tuple]] = {
         """,
         (),
     ),
+    "browser": (
+        """
+        AND (
+            LOWER(f.source) IN ('browser_history_full','browser_history_partial','browser_history')
+            OR LOWER(f.path) LIKE '%browser_history%'
+        )
+        """,
+        (),
+    ),
     "whatsapp": (
         """
         AND (

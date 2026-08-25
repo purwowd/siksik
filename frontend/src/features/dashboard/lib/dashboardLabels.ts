@@ -45,6 +45,7 @@ const SOURCE_LABELS: Record<string, string> = {
   ios_recently_deleted: "Baru Dihapus (iOS)",
   ios_recovered_cache: "Cache / preview Photos (iOS)",
   ios_deleted_metadata: "Jejak hapus permanen Photos (iOS)",
+  whatsapp: "WhatsApp",
 };
 
 const METHOD_LABELS: Record<string, string> = {
@@ -62,6 +63,8 @@ const METHOD_LABELS: Record<string, string> = {
   android_recovery_quick_partial: "Recovery sampah Android (Cepat, sebagian)",
   android_recovery_full_complete: "Recovery sampah Android (Penuh)",
   android_recovery_full_partial: "Recovery sampah Android (Penuh, sebagian)",
+  whatsapp_crypt15: "Backup WhatsApp terenkripsi (Crypt15)",
+  whatsapp_crypt15_parse_unavailable: "Backup WhatsApp Crypt15 (parser belum cocok)",
   zip_upload: "Unggah ZIP",
   simulated: "Simulasi lab",
   idevice: "USB iPhone",

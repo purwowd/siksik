@@ -23,6 +23,36 @@ export interface SocialReportAccount {
   items: SocialReportItem[];
 }
 
+export interface WhatsAppReportMessage {
+  conversation_id: string;
+  conversation_name: string;
+  conversation_address?: string | null;
+  conversation_type: "chat" | "group";
+  message_id: string;
+  direction: "IN" | "OUT";
+  sender?: string | null;
+  message_type: string;
+  timestamp?: string | null;
+  preview_text: string;
+  quoted_text?: string | null;
+  starred: boolean;
+  revoked: boolean;
+  forwarded: boolean;
+  edited_at?: string | null;
+  flagged: boolean;
+  finding_labels: string[];
+  review_statuses: string[];
+}
+
+export interface WhatsAppReportRoom {
+  conversation_id: string;
+  name: string;
+  address?: string | null;
+  type: "chat" | "group";
+  finding_count: number;
+  messages: WhatsAppReportMessage[];
+}
+
 export interface SessionReport {
   generated_at: string;
   product?: string;
@@ -46,5 +76,12 @@ export interface SessionReport {
     total_items: number;
     truncated: boolean;
     maximum_items: number;
+  };
+  whatsapp_rooms: WhatsAppReportRoom[];
+  whatsapp_data: {
+    total_messages: number;
+    total_conversations: number;
+    truncated: boolean;
+    maximum_messages: number;
   };
 }

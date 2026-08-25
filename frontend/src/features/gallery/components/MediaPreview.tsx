@@ -108,7 +108,7 @@ export function MediaPreview({
   path?: string | null;
   text?: string | null;
   mime?: string | null;
-  presentation?: "file" | "visual" | "text";
+  presentation?: "file" | "visual" | "text" | "chat";
 }) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [contentUrl, setContentUrl] = useState<string | null>(null);
@@ -118,7 +118,7 @@ export function MediaPreview({
   const [modalOpen, setModalOpen] = useState(false);
 
   const mediaPath = path || "";
-  const forceText = presentation === "text";
+  const forceText = presentation === "text" || presentation === "chat";
   const forceVisual = presentation === "visual";
   const mimeValue = (mime || "").toLowerCase();
   const isImg = !forceText && (mimeValue.startsWith("image/") || IMG_EXT.test(mediaPath));

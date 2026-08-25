@@ -2,6 +2,7 @@ import type { GalleryItem, Paginated } from "@/shared/api/client";
 import { Pagination } from "@/shared/ui/Pagination";
 import { humanLabel } from "@/features/dashboard/lib/dashboardLabels";
 import { MediaPreview } from "./MediaPreview";
+import { WhatsAppChatRooms } from "./WhatsAppChatRooms";
 
 type Props = {
   sessionId: string;
@@ -38,6 +39,7 @@ const ROLE_LABELS: Record<string, string> = {
   email_body: "Isi email",
   email_attachment: "Lampiran email",
   email_metadata: "Metadata email",
+  canonical_message: "Pesan WhatsApp terstruktur",
 };
 
 const RECOVERY_LABELS = {
@@ -104,82 +106,94 @@ function ItemMeta({ item }: { item: GalleryItem }) {
 }
 
 export function GalleryList({ sessionId, data, onPage }: Props) {
+  const chatItems = data.items.filter((item) => item.presentation === "chat" && item.chat);
+  const regularItems = data.items.filter(
+    (item) => item.presentation !== "chat" || !item.chat,
+  );
   return (
     <>
-      <div className="findings-desktop">
-        <table className="table findings-table">
-          <thead>
-            <tr>
-              <th>Pratinjau</th>
-              <th>Nama</th>
-              <th>Album</th>
-              <th>Sumber</th>
-              <th>Waktu data / akses</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.items.map((item) => (
-              <tr key={item.id} className="hit-row">
-                <td>
-                  <MediaPreview
-                    sessionId={sessionId}
-                    path={item.preview_path}
-                    text={item.preview_text || item.label}
-                    mime={item.preview_mime || item.mime}
-                    presentation={item.presentation}
-                  />
-                </td>
-                <td>
-                  <strong className="finding-label">{item.label}</strong>
-                  <ItemMeta item={item} />
-                </td>
-                <td>
-                  <span className="finding-source">{item.album}</span>
-                </td>
-                <td>
-                  <span className="finding-source">{sourceLabel(item)}</span>
-                  <div className="finding-path">{sourcePath(item)}</div>
-                </td>
-                <td>
-                  <AccessMeta item={item} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {chatItems.length > 0 ? <WhatsAppChatRooms items={chatItems} /> : null}
 
-      <div className="findings-cards" aria-label="Daftar galeri">
-        {data.items.map((item) => (
-          <article
-            key={item.id}
-            className={`finding-card ${item.presentation === "text" ? "gallery-text-card" : ""}`}
-          >
-            <div className="finding-card-media">
-              <MediaPreview
-                sessionId={sessionId}
-                path={item.preview_path}
-                text={item.preview_text || item.label}
-                mime={item.preview_mime || item.mime}
-                presentation={item.presentation}
-              />
-            </div>
-            <div className="finding-card-body">
-              <strong className="finding-label">{item.label}</strong>
-              <ItemMeta item={item} />
-              <div className="finding-meta">
-                <span>{item.album}</span>
-                <span>·</span>
-                <span>{sourceLabel(item)}</span>
+      {regularItems.length > 0 ? (
+        <div className="findings-desktop">
+          <table className="table findings-table">
+            <thead>
+              <tr>
+                <th>Pratinjau</th>
+                <th>Nama</th>
+                <th>Album</th>
+                <th>Sumber</th>
+                <th>Waktu data / akses</th>
+              </tr>
+            </thead>
+            <tbody>
+              {regularItems.map((item) => (
+                <tr key={item.id} className="hit-row">
+                  <td>
+                    <MediaPreview
+                      sessionId={sessionId}
+                      path={item.preview_path}
+                      text={item.preview_text || item.label}
+                      mime={item.preview_mime || item.mime}
+                      presentation={item.presentation}
+                    />
+                  </td>
+                  <td>
+                    <strong className="finding-label">{item.label}</strong>
+                    <ItemMeta item={item} />
+                  </td>
+                  <td>
+                    <span className="finding-source">{item.album}</span>
+                  </td>
+                  <td>
+                    <span className="finding-source">{sourceLabel(item)}</span>
+                    <div className="finding-path">{sourcePath(item)}</div>
+                  </td>
+                  <td>
+                    <AccessMeta item={item} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+
+      {regularItems.length > 0 ? (
+        <div className="findings-cards" aria-label="Daftar galeri">
+          {regularItems.map((item) => (
+            <article
+              key={item.id}
+              className={`finding-card ${
+                item.presentation === "text" ? "gallery-text-card" : ""
+              }`}
+            >
+              <div className="finding-card-media">
+                <MediaPreview
+                  sessionId={sessionId}
+                  path={item.preview_path}
+                  text={item.preview_text || item.label}
+                  mime={item.preview_mime || item.mime}
+                  presentation={item.presentation}
+                />
               </div>
-              <div className="finding-path">{sourcePath(item)}</div>
-              <div className="evidence-body">
-                <AccessMeta item={item} />
+              <div className="finding-card-body">
+                <strong className="finding-label">{item.label}</strong>
+                <ItemMeta item={item} />
+                <div className="finding-meta">
+                  <span>{item.album}</span>
+                  <span>·</span>
+                  <span>{sourceLabel(item)}</span>
+                </div>
+                <div className="finding-path">{sourcePath(item)}</div>
+                <div className="evidence-body">
+                  <AccessMeta item={item} />
+                </div>
               </div>
-            </div>
-          </article>
-        ))}
-      </div>
+            </article>
+          ))}
+        </div>
+      ) : null}
 
       <Pagination
         page={data.page}

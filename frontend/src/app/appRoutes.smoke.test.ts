@@ -23,6 +23,9 @@ describe("console routes", () => {
     expect(url).toContain("sesi=abc123");
     expect(url).toContain("filter=pending");
     expect(url).toContain("modul=gallery");
+    expect(
+      buildTabUrl("findings", { sesi: "abc123", modul: "browser" }),
+    ).toContain("modul=browser");
   });
 });
 

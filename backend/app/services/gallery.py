@@ -63,6 +63,7 @@ STRUCTURED_SOURCES = {
     "accessibility_visible_ui",
     "notification",
     "notification_listener",
+    "whatsapp",
 }
 PATH_MAPPED_SOURCES = {
     "gallery",
@@ -122,6 +123,8 @@ ALBUM_ALIASES = {
     "emails": "Email",
     "gmail": "Email",
     "mail": "Email",
+    "browser history": "Riwayat Browser (lengkap)",
+    "riwayat browser": "Riwayat Browser (lengkap)",
 }
 FAVORITE_TOKENS = (
     "favorite",
@@ -169,6 +172,9 @@ SOURCE_ALBUMS = {
     "document": "Documents",
     "email": "Email",
     "gmail": "Email",
+    "whatsapp": "WhatsApp",
+    "browser_history_full": "Riwayat Browser (lengkap)",
+    "browser_history_partial": "Riwayat Browser (sebagian)",
     "recovered_trash": "Recovered image",
     "ios_hidden": "Photos tersembunyi",
     "ios_recently_deleted": "Baru dihapus",
@@ -178,6 +184,8 @@ SOURCE_ALBUMS = {
 SOURCE_FIRST_ALBUMS = STRUCTURED_SOURCES | {
     "email",
     "gmail",
+    "browser_history_full",
+    "browser_history_partial",
     "recovered_trash",
     "ios_hidden",
     "ios_recently_deleted",
@@ -191,6 +199,12 @@ SOCIAL_PACKAGES = {
 }
 SOCIAL_TEXT_ONLY = {"com.twitter.android", "com.facebook.katana"}
 INSTAGRAM_PACKAGE = "com.instagram.android"
+BROWSER_HISTORY_SOURCES = frozenset({"browser_history_full", "browser_history_partial"})
+BROWSER_ALBUM_ORDER = (
+    ("browser_history_full", "Riwayat Browser (lengkap)", "riwayat-browser-lengkap"),
+    ("browser_history_partial", "Riwayat Browser (sebagian)", "riwayat-browser-sebagian"),
+)
+BROWSER_ALBUM_KEYS = tuple(item[2] for item in BROWSER_ALBUM_ORDER)
 SOCIAL_SCOPE_LABELS = {
     "own_profile": "Profil akun",
     "own_posts": "Postingan akun",
@@ -252,6 +266,7 @@ class GalleryRecord:
     source_app: str | None
     social_scope: str | None
     presentation: str
+    chat: dict[str, Any] | None
     artifact_role: str | None
     recovery_state: str
 
@@ -485,16 +500,22 @@ def _resolved_album(
     if platform:
         resolved = platform
     else:
-        semantic = _semantic_album(directory_hint, path)
         source_l = source.casefold()
-        if semantic:
-            resolved = semantic
-        elif source_l in SOURCE_FIRST_ALBUMS and source_l in SOURCE_ALBUMS:
+        # Browser history must stay in its dedicated albums even if a path
+        # fragment looks like Download/Camera. Other SOURCE_FIRST types keep
+        # the previous semantic-first order so iOS/email grouping is unchanged.
+        if source_l in BROWSER_HISTORY_SOURCES and source_l in SOURCE_ALBUMS:
             resolved = SOURCE_ALBUMS[source_l]
-        elif isinstance(metadata_album, str) and metadata_album.strip():
-            resolved = album_label(metadata_album)
         else:
-            resolved = album_leaf(directory_hint, path, source)
+            semantic = _semantic_album(directory_hint, path)
+            if semantic:
+                resolved = semantic
+            elif source_l in SOURCE_FIRST_ALBUMS and source_l in SOURCE_ALBUMS:
+                resolved = SOURCE_ALBUMS[source_l]
+            elif isinstance(metadata_album, str) and metadata_album.strip():
+                resolved = album_label(metadata_album)
+            else:
+                resolved = album_leaf(directory_hint, path, source)
     special_keys = {album_key(value) for value in RECOVERY_ALBUMS.values()}
     if album_key(resolved) in special_keys:
         return f"Folder {resolved} (normal)"
@@ -598,7 +619,12 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
     path = str(_row_get(row, "path", "") or "")
     source = str(_row_get(row, "source", "") or "")
     mime = str(_row_get(row, "mime", "") or "")
-    role = str(_row_get(row, "resolved_role") or meta.get("crawl_artifact_role") or "")
+    role = str(
+        _row_get(row, "resolved_role")
+        or meta.get("crawl_artifact_role")
+        or meta.get("artifact_role")
+        or ""
+    )
     source_app = _optional_text(_row_get(row, "crawl_source_app")) or _optional_text(
         meta.get("source_app")
     )
@@ -635,7 +661,7 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
     preview_text = _compact_preview(_row_get(row, "preview_text")) or _compact_preview(
         meta.get("preview_text") or meta.get("normalized_text")
     )
-    if preview_text is None and source.casefold() in {"email", "gmail"}:
+    if preview_text is None and source.casefold() in {"email", "gmail"} | BROWSER_HISTORY_SOURCES:
         preview_text = _compact_preview(display_name)
     recovery_state = _recovery_state(meta, source, path)
     label = _resolved_album(
@@ -654,16 +680,24 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
     touch = max(modified, added, recency)
     access_count, explicit_access = _access_metrics(meta, path)
     access_ts = explicit_access
-    favorite = bool(meta.get("is_favorite")) or looks_favorite(
+    favorite = bool(meta.get("is_favorite") or meta.get("message_starred")) or looks_favorite(
         directory_hint,
         str(display_name),
         path,
         label,
     )
     source_app_l = (source_app or "").casefold()
+    source_l = source.casefold()
+    is_whatsapp_message = bool(
+        source_l == "whatsapp"
+        and _optional_text(meta.get("conversation_id"))
+        and _optional_text(meta.get("message_id"))
+    )
     presentation = (
-        "text"
-        if source_app_l in SOCIAL_TEXT_ONLY
+        "chat"
+        if is_whatsapp_message
+        else "text"
+        if source_app_l in SOCIAL_TEXT_ONLY or source_l in BROWSER_HISTORY_SOURCES
         else "visual"
         if source_app_l == INSTAGRAM_PACKAGE
         else "file"
@@ -674,6 +708,12 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
             social_scope,
             preview_text,
             str(display_name),
+        )
+    elif is_whatsapp_message:
+        display_name = (
+            _optional_text(meta.get("conversation_name"))
+            or _optional_text(meta.get("display_name"))
+            or "Percakapan WhatsApp"
         )
     source_locator = _optional_text(_row_get(row, "source_locator"))
     preview_path = path
@@ -694,6 +734,8 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
     origin_path = _origin_path(directory_hint, str(display_name), path)
     if source_app:
         source_path = source_locator or origin_path
+    elif is_whatsapp_message:
+        source_path = f"WhatsApp/{display_name}"
     elif directory_hint:
         source_path = origin_path
     elif recovery_state != RECOVERY_NORMAL:
@@ -702,6 +744,33 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         source_path = f"{label}/{Path(str(display_name)).name}"
     else:
         source_path = source_locator or origin_path
+    chat = None
+    if is_whatsapp_message:
+        conversation_id = _optional_text(meta.get("conversation_id"))
+        message_id = _optional_text(meta.get("message_id"))
+        direction = _optional_text(meta.get("message_direction"))
+        if conversation_id and message_id and direction in {"IN", "OUT"}:
+            chat = {
+                "conversation_id": conversation_id,
+                "conversation_name": str(display_name),
+                "conversation_address": _optional_text(
+                    meta.get("conversation_address")
+                ),
+                "conversation_type": (
+                    "group" if meta.get("conversation_type") == "group" else "chat"
+                ),
+                "message_id": message_id,
+                "direction": direction,
+                "sender": _optional_text(meta.get("message_sender")),
+                "message_type": _optional_text(meta.get("message_type")) or "text",
+                "text": _optional_text(meta.get("message_text")) or preview_text,
+                "timestamp": _optional_text(meta.get("message_timestamp")),
+                "quoted_text": _compact_preview(meta.get("quoted_text")),
+                "starred": bool(meta.get("message_starred")),
+                "revoked": bool(meta.get("message_revoked")),
+                "forwarded": _nonnegative_int(meta.get("message_forward_score")) > 0,
+                "edited_at": _optional_text(meta.get("message_edited_at")),
+            }
     return GalleryRecord(
         file_id=identity,
         path=path,
@@ -727,6 +796,7 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         source_app=source_app,
         social_scope=social_scope,
         presentation=presentation,
+        chat=chat,
         artifact_role=role or None,
         recovery_state=recovery_state,
     )
@@ -749,6 +819,7 @@ def _to_item(session_id: str, record: GalleryRecord) -> GalleryItemOut:
         source_app=record.source_app,
         social_scope=record.social_scope,
         presentation=record.presentation,
+        chat=record.chat,
         artifact_role=record.artifact_role,
         recovery_state=record.recovery_state,
         captured_at=(
@@ -1098,13 +1169,19 @@ async def list_albums(session_id: str, mode: AcquisitionMode) -> list[GalleryAlb
             origin_counts[record.album_key] = (record.album_label, 1)
         else:
             origin_counts[record.album_key] = (current[0], current[1] + 1)
+    for _source, label, key in BROWSER_ALBUM_ORDER:
+        count = origin_counts.get(key, (label, 0))[1]
+        if count <= 0:
+            continue
+        albums.append(GalleryAlbumOut(id=key, label=label, kind="album", count=count))
+    reserved_origin = set(RESERVED_ALBUMS) | {
+        album_key(value) for value in RECOVERY_ALBUMS.values()
+    } | set(BROWSER_ALBUM_KEYS)
     for key, (label, count) in sorted(
         origin_counts.items(),
         key=lambda item: (-item[1][1], item[1][0].casefold()),
     ):
-        if key in RESERVED_ALBUMS or key in {
-            album_key(value) for value in RECOVERY_ALBUMS.values()
-        }:
+        if key in reserved_origin:
             continue
         albums.append(
             GalleryAlbumOut(id=key, label=label, kind="album", count=count)

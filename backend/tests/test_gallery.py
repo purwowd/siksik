@@ -1102,3 +1102,53 @@ async def test_gallery_maps_social_sources_and_enforces_presentation_rules(galle
     assert facebook.items[0].source_path == (
         "social:com.facebook.katana:own_comments:fb-record"
     )
+
+
+@pytest.mark.asyncio
+async def test_browser_history_albums_are_split_and_ordered_full_then_partial(
+    gallery_db,
+) -> None:
+    session_id = "session-browser-gallery"
+    await _insert_session(session_id)
+    await _insert_file(
+        file_id="bh-full",
+        session_id=session_id,
+        path="browser_history_full/search.json",
+        sha256="b" * 64,
+        source="browser_history_full",
+        mime="application/json",
+        album="Riwayat Browser (lengkap)",
+        display_name="https://example.test/q",
+    )
+    await _insert_file(
+        file_id="bh-partial",
+        session_id=session_id,
+        path="browser_history_partial/origin.json",
+        sha256="c" * 64,
+        source="browser_history_partial",
+        mime="application/json",
+        album="Riwayat Browser (sebagian)",
+        display_name="https://example.test/",
+    )
+    await _insert_file(
+        file_id="cam-1",
+        session_id=session_id,
+        path="media_image/a.jpg",
+        sha256="d" * 64,
+        album="Camera",
+    )
+    albums = await list_albums(session_id, AcquisitionMode.QUICK)
+    origin = [item for item in albums if item.kind == "album"]
+    keys = [item.id for item in origin]
+    assert keys.index("riwayat-browser-lengkap") < keys.index("riwayat-browser-sebagian")
+    assert keys.index("riwayat-browser-sebagian") < keys.index("camera")
+    full = await list_items(
+        session_id, AcquisitionMode.QUICK, "riwayat-browser-lengkap", 1, 10
+    )
+    partial = await list_items(
+        session_id, AcquisitionMode.QUICK, "riwayat-browser-sebagian", 1, 10
+    )
+    assert full.total == 1
+    assert partial.total == 1
+    assert full.items[0].presentation == "text"
+    assert partial.items[0].presentation == "text"

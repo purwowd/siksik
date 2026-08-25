@@ -18,6 +18,12 @@ export interface SessionProgress {
   hits_l4?: number;
   hits_ocr?: number;
   hits_asr?: number;
+  whatsapp_state?: string | null;
+  whatsapp_ui_attempt?: number;
+  whatsapp_ui_attempts?: number;
+  whatsapp_messages?: number;
+  whatsapp_conversations?: number;
+  whatsapp_parse_skipped?: number;
   authorized_by?: string | null;
   authorized_at?: string | null;
   authorize_note?: string | null;

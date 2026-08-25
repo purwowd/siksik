@@ -369,6 +369,105 @@ export function ReportPage({
               </div>
             )}
 
+            {(reportData?.whatsapp_rooms?.length ?? 0) > 0 || progress?.whatsapp_state ? (
+              <>
+                <h3 className="dash-section-title dash-section-spaced">Percakapan WhatsApp</h3>
+                <p className="dash-section-copy">
+                  Pesan canonical hasil backup Crypt15. Penanda temuan mengikuti hasil analisis dan
+                  review pada pesan yang sama.
+                </p>
+                {!reportData || reportData.whatsapp_rooms.length === 0 ? (
+                  <p className="report-muted-note">
+                    {progress?.whatsapp_state === "parse_unavailable"
+                      ? "Backup diperoleh, tetapi format database belum dapat diparse."
+                      : "Tidak ada pesan WhatsApp pada rentang waktu sesi ini."}
+                  </p>
+                ) : (
+                  <div className="wa-room-list report-wa-rooms">
+                    {reportData.whatsapp_rooms.map((room) => (
+                      <section className="wa-room" key={room.conversation_id}>
+                        <header className="wa-room-header">
+                          <div className="wa-room-avatar" aria-hidden>
+                            WA
+                          </div>
+                          <div className="wa-room-identity">
+                            <strong>{room.name}</strong>
+                            <span>
+                              {room.type === "group" ? "Grup WhatsApp" : "Chat WhatsApp"}
+                              {room.address && room.address !== room.name
+                                ? ` · ${room.address}`
+                                : ""}
+                            </span>
+                          </div>
+                          <div className="wa-room-counts">
+                            <span>{room.messages.length} pesan</span>
+                            {room.finding_count > 0 ? (
+                              <span className="wa-room-findings">
+                                {room.finding_count} temuan
+                              </span>
+                            ) : null}
+                          </div>
+                        </header>
+                        <div className="wa-thread">
+                          {room.messages.map((message) => (
+                            <article
+                              className={`wa-message wa-message-${message.direction.toLowerCase()} ${
+                                message.flagged ? "wa-message-finding" : ""
+                              }`}
+                              key={message.message_id}
+                            >
+                              <div className="wa-message-bubble">
+                                <div className="wa-message-head">
+                                  <span>
+                                    {message.direction === "OUT"
+                                      ? "Anda"
+                                      : message.sender || room.name}
+                                  </span>
+                                  {message.flagged ? (
+                                    <strong className="wa-finding-marker">Temuan</strong>
+                                  ) : null}
+                                </div>
+                                {message.quoted_text ? (
+                                  <blockquote className="wa-quote">
+                                    {message.quoted_text}
+                                  </blockquote>
+                                ) : null}
+                                <p className={message.revoked ? "wa-message-revoked" : undefined}>
+                                  {message.preview_text}
+                                </p>
+                                {message.finding_labels.length > 0 ? (
+                                  <div className="wa-finding-badges">
+                                    {message.finding_labels.map((label) => (
+                                      <span key={label}>{label}</span>
+                                    ))}
+                                  </div>
+                                ) : null}
+                                <footer className="wa-message-foot">
+                                  <span>{message.message_type.replace(/_/g, " ")}</span>
+                                  {message.forwarded ? <span>Diteruskan</span> : null}
+                                  {message.edited_at ? <span>Diedit</span> : null}
+                                  {message.starred ? <span>★</span> : null}
+                                  <time dateTime={message.timestamp || undefined}>
+                                    {message.timestamp || "Waktu tidak tersedia"}
+                                  </time>
+                                </footer>
+                              </div>
+                            </article>
+                          ))}
+                        </div>
+                      </section>
+                    ))}
+                    {reportData.whatsapp_data.truncated ? (
+                      <div className="empty">
+                        Tampilan dibatasi {reportData.whatsapp_data.maximum_messages} pesan dari{" "}
+                        {reportData.whatsapp_data.total_messages} pesan.
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+              </>
+            ) : null}
+
             <h3 className="dash-section-title dash-section-spaced">Data akun &amp; sosial</h3>
             <p className="dash-section-copy">
               Profil dan aktivitas sosial yang dikoleksi — bukan temuan.
