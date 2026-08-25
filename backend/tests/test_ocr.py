@@ -97,6 +97,32 @@ def test_vision_pipelines_ocr_when_injected(tmp_path: Path, monkeypatch: pytest.
     assert any(f["label"].startswith("OCR:") for f in findings)
 
 
+@pytest.mark.unit
+def test_paddle_v3_result_contract(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    class FakePaddleV3:
+        def predict(self, _path: str):
+            return [
+                {
+                    "rec_texts": ["Bendera LGBT", "Demo mahasiswa"],
+                    "rec_scores": [0.95, 0.88],
+                    "rec_boxes": [[1, 2, 101, 22], [3, 30, 140, 52]],
+                }
+            ]
+
+    monkeypatch.setattr(ocr_mod, "version", lambda _name: "3.7.0")
+    backend = ocr_mod.PaddleOCRBackend()
+    backend._ocr = FakePaddleV3()
+    image = tmp_path / "fake.png"
+    image.write_bytes(b"unused")
+
+    result = backend.extract(image)
+
+    assert result.text == "Bendera LGBT Demo mahasiswa"
+    assert result.confidence == pytest.approx(0.915)
+    assert len(result.regions) == 2
+    assert result.regions[0].left == 1
+
+
 @pytest.mark.gpu
 @pytest.mark.acceptance
 def test_real_ocr_backend_on_gpu_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

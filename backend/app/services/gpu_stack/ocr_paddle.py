@@ -32,12 +32,12 @@ def status() -> dict:
 
 
 def _get_ocr():
+    """Compatibility wrapper around the process-wide OCR backend."""
     global _ocr
     if _ocr is None:
-        from paddleocr import PaddleOCR
+        from app.services import ocr as ocr_mod
 
-        langs = settings.ocr_langs.split(",")[0].strip() or "en"
-        _ocr = PaddleOCR(use_angle_cls=True, lang=langs, use_gpu=bool(settings.ocr_gpu), show_log=False)
+        _ocr = ocr_mod.get_shared_backend("paddleocr")
     return _ocr
 
 
@@ -45,18 +45,13 @@ def extract_text(image_path: Path) -> str:
     if not status()["available"]:
         return ""
     try:
-        ocr = _get_ocr()
-        result = ocr.ocr(str(image_path), cls=True)
-        texts: list[str] = []
-        if not result:
+        from app.services import ocr as ocr_mod
+
+        backend = _get_ocr()
+        if backend is None:
             return ""
-        for block in result:
-            if not block:
-                continue
-            for line in block:
-                if line and len(line) >= 2 and line[1]:
-                    texts.append(str(line[1][0]))
-        return " ".join(texts)
+        result = ocr_mod.run_ocr(image_path, backend=backend)
+        return result.text if result else ""
     except Exception as exc:
         log.warning("PaddleOCR failed: %s", exc)
         return ""

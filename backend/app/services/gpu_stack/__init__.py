@@ -64,7 +64,7 @@ def get_stack_status() -> StackStatus:
     )
 
 
-def analyze_image_gpu(path: Path) -> list[dict]:
+def analyze_image_gpu(path: Path, *, include_ocr: bool = True) -> list[dict]:
     """ICM-Assistant + PaddleOCR (+ optional Qwen VL synthesis)."""
     if not stack_enabled():
         return []
@@ -72,16 +72,27 @@ def analyze_image_gpu(path: Path) -> list[dict]:
 
     hits: list[ModerationHit] = []
     hits.extend(image_icm.moderate(path))
-    hits.extend(ocr_paddle.moderate_image(path))
+    if include_ocr:
+        hits.extend(ocr_paddle.moderate_image(path))
     # reasoning over image if available
     hits.extend(reason_qwen.moderate_image(path))
     return [h.as_finding() for h in hits]
+
+
+def analyze_image_reasoning(path: Path) -> list[dict]:
+    """Run only visual reasoning; never construct a second OCR backend."""
+    if not stack_enabled():
+        return []
+    from app.services.gpu_stack import reason_qwen
+
+    return [hit.as_finding() for hit in reason_qwen.moderate_image(path)]
 
 
 def analyze_video_gpu(path: Path) -> list[dict]:
     """SafeWatch + Whisper audio + OCR/ICM on keyframes + optional Qwen."""
     if not stack_enabled():
         return []
+    from app.services import content_visual
     from app.services.gpu_stack import audio_whisper, image_icm, ocr_paddle, reason_qwen, video_safewatch
     from app.services.vision import extract_video_keyframes
 
@@ -92,6 +103,17 @@ def analyze_video_gpu(path: Path) -> list[dict]:
     frames = extract_video_keyframes(path, max_frames=settings.gpu_video_keyframes)
     try:
         for fr in frames:
+            for finding in content_visual.analyze_image(fr):
+                hits.append(
+                    ModerationHit(
+                        category=str(finding["category"]),
+                        label=str(finding["label"]),
+                        confidence=float(finding["confidence"]),
+                        layer_origin=Layer.L4.value,
+                        evidence=str(finding["evidence"]),
+                        backend="content-visual-keyframe",
+                    )
+                )
             for h in image_icm.moderate(fr):
                 h.layer_origin = Layer.L4.value
                 h.label = f"Video keyframe ICM: {h.label}"

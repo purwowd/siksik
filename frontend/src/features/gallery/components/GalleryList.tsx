@@ -87,6 +87,15 @@ function ItemMeta({ item }: { item: GalleryItem }) {
       ) : null}
       {item.favorite ? <div className="finding-meta">Favorit perangkat</div> : null}
       {item.flagged ? <div className="finding-meta gallery-flagged">Terflag</div> : null}
+      {(item.finding_badges ?? []).length > 0 ? (
+        <div className="gallery-finding-badges" aria-label="Kategori temuan">
+          {(item.finding_badges ?? []).map((badge) => (
+            <span key={badge} className="gallery-finding-badge">
+              {badge}
+            </span>
+          ))}
+        </div>
+      ) : null}
       {item.social_scope ? (
         <div className="finding-meta">{SCOPE_LABELS[item.social_scope] || item.social_scope}</div>
       ) : null}

@@ -203,9 +203,15 @@ def analyze_video_enrichment(path: Path) -> list[dict]:
         do_frame_ocr = bool(settings.media_text_enabled) or (
             bool(settings.ocr_enabled) and get_analysis_mode() != AcquisitionMode.QUICK
         )
+        from app.services import content_visual
+
         for fr in frames:
             for f in _analyze_pil_image(fr):
                 f["label"] = f"Video keyframe: {f['label']}"
+                f["layer_origin"] = Layer.L4.value
+                findings.append(f)
+
+            for f in content_visual.analyze_image(fr):
                 f["layer_origin"] = Layer.L4.value
                 findings.append(f)
 

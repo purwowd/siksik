@@ -9,6 +9,7 @@ import pytest
 from app.core import config
 from app.services.gpu_stack import types
 from app.services.gpu_stack import audio_whisper, get_stack_status, clear_stack_cache
+from app.services.gpu_stack import reason_qwen
 
 
 @pytest.mark.unit
@@ -84,3 +85,117 @@ def test_safewatch_bridge_on_path_keyword(monkeypatch: pytest.MonkeyPatch, tmp_p
     hits = video_safewatch.moderate(vid)
     assert hits
     assert "makar" in hits[0].label.lower() or "makar" in hits[0].evidence.lower()
+
+
+@pytest.mark.unit
+def test_qwen_parser_ignores_prompt_when_assistant_says_aman():
+    transcript = (
+        "system\nKebijakan: cari makar, provokasi, dan radikal.\n"
+        "user\nPeriksa gambar ini.\n"
+        "assistant\nAMAN"
+    )
+
+    hits = reason_qwen._hits_from_text(transcript, layer="L3", backend="test")
+
+    assert hits == []
+
+
+@pytest.mark.unit
+def test_qwen_aman_is_always_zero_findings():
+    hits = reason_qwen._hits_from_text(
+        "**AMAN**. Tidak ada makar, provokasi, atau radikal.",
+        layer="L3",
+        backend="test",
+    )
+
+    assert hits == []
+
+
+@pytest.mark.unit
+def test_qwen_parser_reads_only_assistant_answer():
+    transcript = (
+        "<|im_start|>system\nCari makar dan radikal.<|im_end|>\n"
+        "<|im_start|>user\nPeriksa gambar.<|im_end|>\n"
+        "<|im_start|>assistant\nTerlihat ajakan provokasi.<|im_end|>"
+    )
+
+    hits = reason_qwen._hits_from_text(transcript, layer="L3", backend="test")
+
+    assert [hit.label for hit in hits] == ["VL reasoning: provokasi"]
+    assert all("makar" not in hit.evidence.lower() for hit in hits)
+    assert all("radikal" not in hit.evidence.lower() for hit in hits)
+
+
+@pytest.mark.unit
+def test_qwen_structured_parser_emits_requested_categories_once():
+    answer = (
+        '{"status":"FLAGGED","detections":['
+        '{"category":"political_meme","confidence":0.91,"evidence":"meme presiden"},'
+        '{"category":"meme_politik","confidence":0.82,"evidence":"deteksi kedua"},'
+        '{"category":"hate_speech","confidence":0.88,"evidence":"ujaran kebencian"}'
+        "]}"
+    )
+
+    hits = reason_qwen._hits_from_text(answer, layer="L3", backend="test")
+
+    assert [hit.category for hit in hits] == ["political_meme", "hate_speech"]
+    assert hits[0].label == "Meme politik"
+
+
+@pytest.mark.unit
+def test_qwen_structured_aman_is_zero_findings():
+    hits = reason_qwen._hits_from_text(
+        '{"status":"AMAN","detections":[{"category":"extremism","confidence":0.9}]}',
+        layer="L3",
+        backend="test",
+    )
+
+    assert hits == []
+
+
+@pytest.mark.unit
+def test_qwen_malformed_structured_answer_is_not_reinterpreted():
+    hits = reason_qwen._hits_from_text(
+        '{"status":"FLAGGED","detections":[{"category":"extremism"}',
+        layer="L3",
+        backend="test",
+    )
+
+    assert hits == []
+
+
+@pytest.mark.unit
+def test_qwen_plain_answer_can_still_flag_new_taxonomy():
+    hits = reason_qwen._hits_from_text(
+        "Terlihat jelas bendera LGBT Pride Month.",
+        layer="L3",
+        backend="test",
+    )
+
+    assert [hit.category for hit in hits] == ["lgbt_content"]
+
+
+@pytest.mark.unit
+def test_qwen_decoder_removes_input_tokens():
+    class FakeProcessor:
+        decoded_ids = None
+        decode_kwargs = None
+
+        def batch_decode(self, ids, **kwargs):
+            self.decoded_ids = ids
+            self.decode_kwargs = kwargs
+            return [" AMAN "]
+
+    processor = FakeProcessor()
+    answer = reason_qwen._decode_generated_answer(
+        processor,
+        generated_ids=[[10, 11, 12, 90, 91]],
+        input_ids=[[10, 11, 12]],
+    )
+
+    assert processor.decoded_ids == [[90, 91]]
+    assert processor.decode_kwargs == {
+        "skip_special_tokens": True,
+        "clean_up_tokenization_spaces": False,
+    }
+    assert answer == "AMAN"

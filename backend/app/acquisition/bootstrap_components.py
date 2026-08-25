@@ -821,8 +821,21 @@ class AgentHandshakeCoordinator:
         last_exc = None
         for attempt in range(20):
             try:
-                health_run = (await client.health(request_id=request_id)).body
+                health_run = (
+                    await asyncio.wait_for(
+                        client.health(request_id=request_id),
+                        timeout=self._config.health_probe_timeout_seconds,
+                    )
+                ).body
                 break
+            except TimeoutError:
+                last_exc = acquisition_error(
+                    ErrorCategory.AGENT_UNREACHABLE,
+                    "Verifikasi Android agent melewati batas waktu.",
+                    retryable=True,
+                )
+                await asyncio.sleep(0.5)
+                continue
             except AcquisitionError as exc:
                 if exc.category == ErrorCategory.AGENT_UNREACHABLE:
                     last_exc = exc

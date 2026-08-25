@@ -71,6 +71,10 @@ class AgentBootstrapConfig:
     inspection_root: Path
     # Every bootstrap always adb install -r (lab UX: JALANKAN AKUISISI = latest APK).
     force_reinstall: bool = True
+    # Bound a complete health call (including AgentClient retries).  Without
+    # this guard a black-holed forward host can multiply 20 readiness probes by
+    # the client's own request timeout/retries and appear frozen for an hour.
+    health_probe_timeout_seconds: float = 3.0
 
 
 @dataclass(slots=True)

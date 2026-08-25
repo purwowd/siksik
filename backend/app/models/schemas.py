@@ -430,6 +430,7 @@ class GalleryItemOut(ResponseModel):
     access_count: int = Field(default=0, ge=0)
     favorite: bool = False
     flagged: bool = False
+    finding_badges: list[str] = Field(default_factory=list)
 
 
 class PaginatedGallery(ResponseModel):

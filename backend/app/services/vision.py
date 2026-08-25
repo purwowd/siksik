@@ -145,6 +145,8 @@ def analyze_image_file(
     origin_hint: str | None = None,
 ) -> list[dict]:
     from app.services import clip_tokoh
+    from app.services import content_policy
+    from app.services import content_visual
     from app.services import gpu_stack
     from app.services import media_text
     from app.services import ocr as ocr_mod
@@ -179,6 +181,7 @@ def analyze_image_file(
                     ocr_backend = "media_text"
 
     tokoh_findings = clip_tokoh.analyze_image_tokoh(path)
+    findings.extend(content_visual.analyze_image(path))
     findings.extend(
         ocr_mod.consolidate_image_findings(
             ocr_mod.fuse_tokoh_and_text(
@@ -191,11 +194,43 @@ def analyze_image_file(
         )
     )
 
-    findings.extend(gpu_stack.analyze_image_gpu(path))
+    # OCR has already run above and its text is shared with the legacy lexicon
+    # and content policy.  Do not invoke the GPU OCR adapter a second time.
+    findings.extend(gpu_stack.analyze_image_gpu(path, include_ocr=False))
     if findings and gpu_device_name():
         for f in findings:
             f["evidence"] = (f["evidence"] + f" | gpu={gpu_device_name()}")[:320]
-    return _dedupe_findings(findings)
+    return _dedupe_findings(content_policy.merge_content_findings(findings))
+
+
+def analyze_lightweight_image_file(
+    path: Path,
+    *,
+    precomputed_ocr_text: str | None = None,
+    precomputed_ocr_backend: str | None = None,
+    include_reasoning: bool = False,
+) -> list[dict]:
+    """Visual/content pass without starting another OCR engine.
+
+    Used for social snapshots with host OCR and QUICK gallery images.  It keeps
+    the anti-stall OCR policy while still detecting flags, campaigns, protests,
+    political memes, and (for social screenshots) Qwen contextual categories.
+    """
+    from app.services import content_policy, content_visual, gpu_stack
+    from app.services import ocr as ocr_mod
+
+    findings = _analyze_pil_image(path)
+    text = (precomputed_ocr_text or "").strip()
+    backend = precomputed_ocr_backend or "host_ocr"
+    if text:
+        findings.extend(ocr_mod.ocr_findings_from_text(text, backend=backend))
+    visual_content = content_visual.analyze_image(path)
+    findings.extend(visual_content)
+    if include_reasoning and (
+        visual_content or content_policy.should_adjudicate_text(text)
+    ):
+        findings.extend(gpu_stack.analyze_image_reasoning(path))
+    return _dedupe_findings(content_policy.merge_content_findings(findings))
 
 
 def _dedupe_findings(findings: list[dict]) -> list[dict]:
@@ -308,11 +343,15 @@ def analyze_video_file(path: Path) -> list[dict]:
 
     if gpu_stack.stack_enabled():
         findings.extend(gpu_stack.analyze_video_gpu(path))
-        return _dedupe_findings(findings)
+        from app.services import content_policy
+
+        return _dedupe_findings(content_policy.merge_content_findings(findings))
 
     # ASR (Whisper) + keyframe visual + on-screen OCR — satu pass
     findings.extend(media_text.analyze_video_enrichment(path))
-    return _dedupe_findings(findings)
+    from app.services import content_policy
+
+    return _dedupe_findings(content_policy.merge_content_findings(findings))
 
 
 def vision_status() -> dict:
@@ -357,6 +396,17 @@ def vision_status() -> dict:
         info["clip_tokoh"] = clip_tokoh.status()
     except Exception:
         info["clip_tokoh"] = {"available": False}
+    try:
+        from app.services import content_text, content_visual
+
+        info["content_detection"] = {
+            "enabled": bool(cfg.content_detection_enabled),
+            "visual": content_visual.status(),
+            "text": content_text.status(),
+            "qwen_structured": bool(cfg.content_qwen_structured),
+        }
+    except Exception:
+        info["content_detection"] = {"configured": False}
     st = gpu_stack.get_stack_status()
     info["gpu_stack"] = {
         "enabled": st.enabled,

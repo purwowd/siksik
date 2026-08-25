@@ -968,6 +968,7 @@ def create_default_bootstrap_service() -> tuple[
             notification_component=settings.android_agent_notification_component,
             inspection_root=settings.data_dir / "agent-inspection",
             force_reinstall=settings.android_agent_force_reinstall,
+            health_probe_timeout_seconds=settings.android_agent_health_probe_timeout_s,
         ),
         adb,
         artifacts,

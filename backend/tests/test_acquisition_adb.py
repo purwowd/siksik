@@ -21,6 +21,7 @@ from app.acquisition.adb import (
     parse_package_dump,
     parse_runtime_permission_dump,
     parse_text_only_cover_probe,
+    resolve_adb,
     resolve_agent_forward_host,
     select_device,
     validate_serial,
@@ -30,10 +31,39 @@ from app.acquisition.process import ProcessResult, run_process
 
 
 def executable(tmp_path: Path) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "adb"
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     path.chmod(0o700)
     return path
+
+
+@pytest.mark.unit
+def test_resolve_adb_non_wsl_preserves_path_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_adb = executable(tmp_path / "path")
+    sdk_adb = executable(tmp_path / "sdk" / "platform-tools")
+    monkeypatch.setenv("ANDROID_HOME", str(sdk_adb.parents[1]))
+    monkeypatch.setattr("app.acquisition.adb._running_under_wsl", lambda: False)
+    monkeypatch.setattr("app.acquisition.adb.shutil.which", lambda _name: str(path_adb))
+
+    assert resolve_adb("adb") == path_adb.resolve()
+
+
+@pytest.mark.unit
+def test_resolve_adb_wsl_prefers_configured_native_sdk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_adb = executable(tmp_path / "path")
+    sdk_adb = executable(tmp_path / "sdk" / "platform-tools")
+    monkeypatch.setenv("ANDROID_HOME", str(sdk_adb.parents[1]))
+    monkeypatch.setattr("app.acquisition.adb._running_under_wsl", lambda: True)
+    monkeypatch.setattr("app.acquisition.adb.shutil.which", lambda _name: str(path_adb))
+
+    assert resolve_adb("adb") == sdk_adb.resolve()
 
 
 @pytest.mark.unit
@@ -114,6 +144,16 @@ def test_resolve_agent_forward_host_defaults_to_loopback(
     monkeypatch.delenv("SADT_AGENT_FORWARD_HOST", raising=False)
     monkeypatch.delenv("ADB_SERVER_SOCKET", raising=False)
     monkeypatch.setattr("app.acquisition.adb._running_under_wsl", lambda: False)
+    assert resolve_agent_forward_host() == "127.0.0.1"
+
+
+@pytest.mark.unit
+def test_resolve_agent_forward_host_defaults_to_wsl_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SADT_AGENT_FORWARD_HOST", raising=False)
+    monkeypatch.delenv("ADB_SERVER_SOCKET", raising=False)
+    monkeypatch.setattr("app.acquisition.adb._running_under_wsl", lambda: True)
     assert resolve_agent_forward_host() == "127.0.0.1"
 
 

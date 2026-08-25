@@ -501,6 +501,7 @@ async def _insert_finding(
     label: str = "indikasi",
     review_status: str = "pending",
     confidence: float = 0.9,
+    category: str = "konten_visual",
 ) -> None:
     await db.execute(
         """
@@ -515,7 +516,7 @@ async def _insert_finding(
             file_id,
             "media_image",
             path,
-            "konten_visual",
+            category,
             label,
             confidence,
             "L3",
@@ -582,6 +583,64 @@ async def test_gallery_includes_flagged_unflagged_and_duplicate_paths(gallery_db
     favorite = await list_items(session_id, AcquisitionMode.QUICK, ACCESS_FAVORITE, 1, 10)
     assert favorite.total == 1
     assert favorite.items[0].file_id == "file-b"
+
+
+@pytest.mark.asyncio
+async def test_gallery_exposes_unique_content_finding_badges(gallery_db) -> None:
+    session_id = "session-gallery-content-badges"
+    await _insert_session(session_id)
+    await _insert_file(
+        file_id="file-badges",
+        session_id=session_id,
+        path="media_image/political-meme.jpg",
+        sha256="9" * 64,
+        crawl_record_id="badge-record",
+    )
+    await _insert_file(
+        file_id="file-badges-companion",
+        session_id=session_id,
+        path="media_image/political-meme-companion.jpg",
+        sha256="8" * 64,
+        crawl_record_id="badge-record",
+    )
+    await _insert_finding(
+        finding_id="finding-meme-a",
+        session_id=session_id,
+        file_id="file-badges",
+        path="media_image/political-meme.jpg",
+        category="political_meme",
+        label="Meme politik",
+    )
+    await _insert_finding(
+        finding_id="finding-meme-b",
+        session_id=session_id,
+        file_id="file-badges",
+        path="media_image/political-meme.jpg",
+        category="political_meme",
+        label="Meme politik",
+        confidence=0.8,
+    )
+    await _insert_finding(
+        finding_id="finding-insult",
+        session_id=session_id,
+        file_id="file-badges",
+        path="media_image/political-meme.jpg",
+        category="political_insult",
+        label="Penghinaan negara/politikus",
+    )
+
+    result = await list_items(session_id, AcquisitionMode.QUICK, ACCESS_ALL, 1, 10)
+
+    by_id = {item.file_id: item for item in result.items}
+    assert by_id["file-badges"].flagged is True
+    assert by_id["file-badges"].finding_badges == [
+        "Meme politik",
+        "Penghinaan negara/politikus",
+    ]
+    # Existing record-level flag propagation remains intact, while badges use
+    # the exact session_id + file_id finding join requested by the UI contract.
+    assert by_id["file-badges-companion"].flagged is True
+    assert by_id["file-badges-companion"].finding_badges == []
 
 
 @pytest.mark.asyncio

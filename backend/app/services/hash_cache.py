@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from contextvars import ContextVar
+from hashlib import sha256
 
 from app.core.config import settings
 from app.core.db import db, utcnow
@@ -26,12 +27,27 @@ def get_analysis_mode() -> AcquisitionMode | None:
     return _analysis_mode.get()
 
 
+def _config_digest(value: str | None) -> str:
+    """Fingerprint config values without persisting machine-specific paths."""
+    normalized = (value or "").strip()
+    return sha256(normalized.encode("utf-8")).hexdigest()[:12] if normalized else "none"
+
+
 def engine_fingerprint() -> str:
     """Bump semantics when enrichment knobs change so stale lean results miss."""
+    from app.services.content_policy import CONTENT_FUSION_REVISION, CONTENT_POLICY_REVISION
+    from app.services.content_text import CONTENT_TEXT_REVISION
+    from app.services.content_visual import CONTENT_VISUAL_REVISION
+    from app.services.gpu_stack.reason_qwen import (
+        QWEN_DECODER_REVISION,
+        QWEN_PARSER_REVISION,
+        QWEN_PROMPT_REVISION,
+    )
+
     mode = get_analysis_mode()
     return "|".join(
         [
-            "v14",  # do not persist incomplete nudity runs as clean media
+            "v16",  # shared content taxonomy + cross-detector category fusion
             f"mode={mode.value if mode else 'none'}",
             f"ocr={int(bool(settings.ocr_enabled))}",
             f"mt={int(bool(settings.media_text_enabled))}",
@@ -39,6 +55,7 @@ def engine_fingerprint() -> str:
             f"wh1st={settings.video_whisper_transcribe_first_s}",
             f"stack={int(bool(settings.gpu_stack_enabled))}",
             f"ob={settings.ocr_backend}",
+            f"ol={settings.ocr_langs}",
             f"full_gal={int(bool(settings.ocr_full_gallery))}",
             f"ocr_px={settings.ocr_max_edge_px}",
             f"ocr_min={settings.ocr_min_edge_px}",
@@ -47,7 +64,35 @@ def engine_fingerprint() -> str:
             f"ocr_mag={settings.ocr_mag_ratio}",
             f"vwh={settings.video_whisper_max_duration_s}",
             f"vkf={settings.video_overlay_keyframes}",
-            f"clip={int(bool(settings.clip_tokoh_enabled))}:{settings.clip_tokoh_model.split('/')[-1]}",
+            (
+                f"clip={int(bool(settings.clip_tokoh_enabled))}:"
+                f"{settings.clip_tokoh_model.split('/')[-1]}:"
+                f"{settings.clip_tokoh_threshold}:{settings.clip_tokoh_margin}"
+            ),
+            (
+                f"content={int(bool(settings.content_detection_enabled))}:"
+                f"{CONTENT_POLICY_REVISION}:{CONTENT_FUSION_REVISION}"
+            ),
+            (
+                f"content_visual={int(bool(settings.content_visual_enabled))}:"
+                f"{_config_digest(settings.content_visual_model)}:"
+                f"{settings.content_visual_threshold}:{CONTENT_VISUAL_REVISION}"
+            ),
+            (
+                f"content_text={_config_digest(settings.content_text_model)}:"
+                f"{settings.content_text_threshold}:"
+                f"{settings.content_text_device}:{CONTENT_TEXT_REVISION}"
+            ),
+            f"content_local={int(bool(settings.content_models_local_only))}",
+            f"content_qwen_json={int(bool(settings.content_qwen_structured))}",
+            (
+                f"qwen={int(bool(settings.gpu_qwen_enabled))}:"
+                f"{_config_digest(settings.gpu_qwen_model)}:"
+                f"{_config_digest(settings.gpu_qwen_plugin)}"
+            ),
+            f"qwen_decoder={QWEN_DECODER_REVISION}",
+            f"qwen_parser={QWEN_PARSER_REVISION}",
+            f"qwen_prompt={QWEN_PROMPT_REVISION}",
             f"meme={len(settings.meme_hate_keywords)}",
             (
                 f"nudity={int(bool(settings.nudity_detection_enabled))}:"

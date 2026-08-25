@@ -382,6 +382,20 @@ def resolve_adb(configured_path: str) -> Path:
     expanded = Path(configured_path).expanduser()
     candidates: list[Path] = []
     if expanded.parent == Path("."):
+        # Under WSL the Android USB device is attached with usbipd and must be
+        # owned by the native Linux adb server.  A PATH entry such as ~/bin/adb
+        # may be a wrapper around Windows adb.exe; preferring it would create
+        # forwards on the Windows loopback, which the WSL backend cannot reach.
+        if configured_path == "adb" and _running_under_wsl():
+            for variable in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+                if os.environ.get(variable):
+                    candidates.append(Path(os.environ[variable]) / "platform-tools" / "adb")
+            candidates.extend(
+                (
+                    Path.home() / "Android" / "Sdk" / "platform-tools" / "adb",
+                    Path("/usr/lib/android-sdk/platform-tools/adb"),
+                )
+            )
         discovered = shutil.which(configured_path)
         if discovered:
             candidates.append(Path(discovered))
@@ -420,30 +434,6 @@ def _running_under_wsl() -> bool:
         return False
 
 
-def _wsl_default_gateway() -> str | None:
-    try:
-        import subprocess
-
-        proc = subprocess.run(
-            ["ip", "route", "show", "default"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except OSError:
-        return None
-    if proc.returncode != 0:
-        return None
-    parts = proc.stdout.split()
-    if len(parts) < 3:
-        return None
-    gateway = parts[2].strip()
-    if not gateway or gateway in {"127.0.0.1", "localhost", "::1"}:
-        return None
-    return gateway
-
-
 def resolve_agent_forward_host(explicit: str | None = None) -> str:
     if explicit and explicit.strip():
         return explicit.strip()
@@ -455,10 +445,10 @@ def resolve_agent_forward_host(explicit: str | None = None) -> str:
         host = adb_socket[4:].rsplit(":", 1)[0].strip()
         if host and host not in {"127.0.0.1", "localhost", "::1"}:
             return host
-    if _running_under_wsl():
-        gateway = _wsl_default_gateway()
-        if gateway:
-            return gateway
+    # `adb forward` listens on the loopback of the machine running the ADB
+    # server.  With native WSL adb that machine is WSL itself.  Merely running
+    # under WSL is therefore not a reason to select the Windows NAT gateway.
+    # Remote ADB remains supported only when explicitly configured above.
     return "127.0.0.1"
 
 

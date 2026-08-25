@@ -19,6 +19,40 @@ def test_engine_fingerprint_changes_with_ocr_flag(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.unit
+def test_engine_fingerprint_tracks_qwen_config(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(config.settings, "gpu_qwen_enabled", True)
+    monkeypatch.setattr(config.settings, "gpu_qwen_model", "models/qwen-a")
+    monkeypatch.setattr(config.settings, "gpu_qwen_plugin", "")
+    first = hash_cache.engine_fingerprint()
+
+    monkeypatch.setattr(config.settings, "gpu_qwen_model", "models/qwen-b")
+    second = hash_cache.engine_fingerprint()
+
+    assert first != second
+    assert "v16" in first
+    assert "qwen_decoder=generated-tokens-v1" in first
+    assert "qwen_parser=assistant-answer-v1" in first
+    assert "qwen_prompt=indonesian-content-json-v2" in first
+
+
+@pytest.mark.unit
+def test_engine_fingerprint_tracks_content_taxonomy_and_ocr_language(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(config.settings, "ocr_langs", "id,en")
+    monkeypatch.setattr(config.settings, "content_visual_threshold", 0.70)
+    first = hash_cache.engine_fingerprint()
+
+    monkeypatch.setattr(config.settings, "content_visual_threshold", 0.82)
+    second = hash_cache.engine_fingerprint()
+
+    assert first != second
+    assert "ol=id,en" in first
+    assert "id-content-v1" in first
+    assert "category-evidence-v1" in first
+
+
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_legacy_cache_list_is_miss(monkeypatch: pytest.MonkeyPatch):
     stored = {"x": None}

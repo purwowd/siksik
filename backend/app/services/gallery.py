@@ -238,6 +238,7 @@ class GalleryRecord:
     album_label: str
     is_favorite: bool
     is_flagged: bool
+    finding_badges: tuple[str, ...]
     recency_ts: float
     touch_ts: float
     access_ts: float
@@ -712,6 +713,7 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         album_label=label,
         is_favorite=favorite,
         is_flagged=bool(_row_get(row, "is_flagged", 0)),
+        finding_badges=tuple(_row_get(row, "finding_badges", ()) or ()),
         recency_ts=recency,
         touch_ts=touch,
         access_ts=access_ts,
@@ -762,6 +764,7 @@ def _to_item(session_id: str, record: GalleryRecord) -> GalleryItemOut:
         access_count=record.access_count,
         favorite=record.is_favorite,
         flagged=record.is_flagged,
+        finding_badges=list(record.finding_badges),
         preview_text=record.preview_text,
     )
 
@@ -876,12 +879,19 @@ async def _load_records(session_id: str, mode: AcquisitionMode) -> list[GalleryR
         (session_id,),
     )
     flagged_rows = await db.fetchall(
-        "SELECT DISTINCT file_id FROM findings WHERE session_id = ?",
+        "SELECT DISTINCT file_id, category FROM findings WHERE session_id = ?",
         (session_id,),
     )
 
     pulled_paths = {str(row["path"]) for row in rows}
     flagged_ids = {str(row["file_id"]) for row in flagged_rows}
+    from app.services.content_policy import gallery_badge
+
+    badges_by_file: dict[str, set[str]] = {}
+    for finding in flagged_rows:
+        badge = gallery_badge(str(_row_get(finding, "category", "") or ""))
+        if badge:
+            badges_by_file.setdefault(str(finding["file_id"]), set()).add(badge)
     crawl_by_record: dict[str, Any] = {}
     crawl_by_path: dict[str, Any] = {}
     crawl_by_companion: dict[str, Any] = {}
@@ -991,6 +1001,13 @@ async def _load_records(session_id: str, mode: AcquisitionMode) -> list[GalleryR
                 "is_flagged": (
                     str(row["id"]) in flagged_ids
                     or linked_record_id in flagged_record_ids
+                ),
+                # Category badges deliberately use the exact session/file
+                # finding join.  Existing linked-record flag propagation is
+                # left untouched, but a badge must not leak to a companion
+                # artifact that was not itself classified in this session.
+                "finding_badges": sorted(
+                    badges_by_file.get(str(row["id"]), set())
                 ),
             }
         )

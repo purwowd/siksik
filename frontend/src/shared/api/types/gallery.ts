@@ -29,4 +29,5 @@ export interface GalleryItem {
   access_count?: number;
   favorite?: boolean;
   flagged?: boolean;
+  finding_badges?: string[];
 }

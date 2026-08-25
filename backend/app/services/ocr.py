@@ -15,6 +15,7 @@ import logging
 import os
 import tempfile
 import threading
+from importlib.metadata import PackageNotFoundError, version
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import lru_cache
@@ -231,9 +232,8 @@ class EasyOCRBackend(OcrBackend):
             use = [l for l in langs if l in ("en", "id", "ch_sim", "ch_tra", "ar", "fr", "de")] or ["en"]
             if "id" not in use and "en" not in use:
                 use = ["en"]
-            use = ["en"] if "id" in use and "en" not in use else (["en"] if use == ["id"] else use)
-            if use == ["id"]:
-                use = ["en"]
+            if "id" in use and "en" not in use:
+                use.append("en")
             model_dir = settings.ocr_model_dir or (settings.data_dir / "easyocr")
             model_dir.mkdir(parents=True, exist_ok=True)
             self._reader = easyocr.Reader(
@@ -279,6 +279,7 @@ class PaddleOCRBackend(OcrBackend):
 
     def __init__(self) -> None:
         self._ocr = None
+        self._device = "cpu"
 
     def available(self) -> bool:
         try:
@@ -292,20 +293,97 @@ class PaddleOCRBackend(OcrBackend):
         if self._ocr is None:
             from paddleocr import PaddleOCR
 
-            self._ocr = PaddleOCR(
-                use_angle_cls=True,
-                lang="en",
-                use_gpu=bool(settings.ocr_gpu),
-                show_log=False,
-            )
+            langs = [value.strip() for value in settings.ocr_langs.split(",") if value.strip()]
+            lang = langs[0] if langs else "en"
+            try:
+                major = int(version("paddleocr").split(".", 1)[0])
+            except (PackageNotFoundError, ValueError):
+                major = 2
+            if major >= 3:
+                device = "cpu"
+                if settings.ocr_gpu:
+                    try:
+                        import paddle
+
+                        if paddle.device.is_compiled_with_cuda():
+                            device = "gpu"
+                    except Exception:
+                        device = "cpu"
+                self._device = "cuda" if device.startswith("gpu") else "cpu"
+                self._ocr = PaddleOCR(
+                    lang=lang,
+                    device=device,
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=False,
+                )
+            else:
+                self._device = "cuda" if settings.ocr_gpu else "cpu"
+                self._ocr = PaddleOCR(
+                    use_angle_cls=True,
+                    lang=lang,
+                    use_gpu=bool(settings.ocr_gpu),
+                    show_log=False,
+                )
         return self._ocr
 
     def extract(self, image_path: Path) -> OcrResult:
         ocr = self._get()
-        result = ocr.ocr(str(image_path), cls=True)
+        try:
+            major = int(version("paddleocr").split(".", 1)[0])
+        except (PackageNotFoundError, ValueError):
+            major = 2
+        result = ocr.predict(str(image_path)) if major >= 3 else ocr.ocr(str(image_path), cls=True)
         texts: list[str] = []
         confs: list[float] = []
-        if result:
+        regions: list[OcrRegion] = []
+        if major >= 3 and result:
+            for block in result:
+                try:
+                    block_texts = list(block["rec_texts"])
+                    block_scores = list(block["rec_scores"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                try:
+                    block_boxes = list(block["rec_boxes"])
+                except (KeyError, TypeError, ValueError):
+                    try:
+                        block_boxes = list(block["rec_polys"])
+                    except (KeyError, TypeError, ValueError):
+                        block_boxes = []
+                for index, value in enumerate(block_texts):
+                    recognized = str(value).strip()
+                    if not recognized:
+                        continue
+                    score = float(block_scores[index]) if index < len(block_scores) else 1.0
+                    texts.append(recognized)
+                    confs.append(score)
+                    if index >= len(block_boxes):
+                        continue
+                    try:
+                        raw_box = block_boxes[index]
+                        flattened = list(raw_box.tolist()) if hasattr(raw_box, "tolist") else list(raw_box)
+                        if flattened and isinstance(flattened[0], (list, tuple)):
+                            xs = [float(point[0]) for point in flattened]
+                            ys = [float(point[1]) for point in flattened]
+                        elif len(flattened) >= 4:
+                            xs = [float(flattened[0]), float(flattened[2])]
+                            ys = [float(flattened[1]), float(flattened[3])]
+                        else:
+                            continue
+                        regions.append(
+                            OcrRegion(
+                                text=recognized,
+                                left=max(0, int(min(xs))),
+                                top=max(0, int(min(ys))),
+                                right=max(0, int(max(xs))),
+                                bottom=max(0, int(max(ys))),
+                                confidence=score,
+                            )
+                        )
+                    except (TypeError, ValueError, IndexError):
+                        continue
+        elif result:
             for block in result:
                 if not block:
                     continue
@@ -319,7 +397,8 @@ class PaddleOCRBackend(OcrBackend):
             text=normalize_ocr_text(text),
             backend=self.name,
             confidence=avg,
-            device="cuda" if settings.ocr_gpu else "cpu",
+            device=self._device,
+            regions=tuple(sorted(regions, key=lambda value: (value.top, value.left))),
         )
 
 
@@ -453,7 +532,7 @@ def ocr_findings_from_text(text: str, *, backend: str, keywords: list[str] | Non
     from app.services.lexicon import findings_from_text, layer_l3
 
     corpus = keywords if keywords is not None else ocr_keyword_corpus()
-    return findings_from_text(
+    findings = findings_from_text(
         text,
         label_prefix="OCR",
         layer=layer_l3(),
@@ -461,6 +540,18 @@ def ocr_findings_from_text(text: str, *, backend: str, keywords: list[str] | Non
         backend=backend,
         keywords=corpus,
     )
+    if settings.content_detection_enabled:
+        from app.services import content_policy
+
+        findings.extend(
+            content_policy.findings_from_text(
+                text,
+                backend=backend,
+                layer=layer_l3(),
+                image_context=True,
+            )
+        )
+    return findings
 
 
 def fuse_tokoh_and_text(
@@ -618,4 +709,9 @@ def analyze_image_ocr(image_path: Path, *, backend: OcrBackend | None = None) ->
     result = run_ocr(image_path, backend=backend)
     if not result or not result.text:
         return []
-    return ocr_findings_from_text(result.text, backend=result.backend)
+    findings = ocr_findings_from_text(result.text, backend=result.backend)
+    if settings.content_detection_enabled:
+        from app.services import content_policy
+
+        return content_policy.merge_content_findings(findings)
+    return findings

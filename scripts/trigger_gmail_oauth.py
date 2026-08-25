@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import secrets
 import sys
 import time
@@ -13,19 +12,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-
-# WSL: agent loopback forward binds Windows host IP, not 127.0.0.1
-if not os.environ.get("SADT_AGENT_FORWARD_HOST"):
-    try:
-        import subprocess
-
-        gateway = subprocess.check_output(
-            ["ip", "route", "show", "default"],
-            text=True,
-        ).split()[2]
-        os.environ["SADT_AGENT_FORWARD_HOST"] = gateway
-    except Exception:
-        pass
 
 from app.acquisition.adb import AsyncAdbTransport
 from app.acquisition.agent_client import AgentClient, AgentClientConfig

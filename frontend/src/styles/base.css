@@ -2336,6 +2336,26 @@ a.btn {
   color: var(--amber);
 }
 
+.gallery-finding-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.gallery-finding-badge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent);
+  border-radius: 999px;
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 9%, transparent);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
 .gallery-state-normal {
   color: var(--muted);
 }

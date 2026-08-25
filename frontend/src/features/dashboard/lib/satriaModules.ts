@@ -55,7 +55,7 @@ const GALLERY_CATEGORY_BUCKETS: { id: string; label: string; match: (c: string) 
   {
     id: "kekerasan",
     label: "Kekerasan / Radikal",
-    match: (c) => /kekerasan|senjata|bom|radikal/i.test(c),
+    match: (c) => /kekerasan|senjata|bom|radikal|incitement|extremism/i.test(c),
   },
   {
     id: "teror",
@@ -65,12 +65,17 @@ const GALLERY_CATEGORY_BUCKETS: { id: string; label: string; match: (c: string) 
   {
     id: "kebencian",
     label: "Ujaran Kebencian",
-    match: (c) => /benci|hate|ujaran/i.test(c),
+    match: (c) => /benci|hate|ujaran|hate_speech/i.test(c),
   },
   {
     id: "anti_pemerintah",
-    label: "Ideologi Anti-Pemerintah",
-    match: (c) => /politik|anti.?pemerintah|presiden/i.test(c),
+    label: "Konten Politik",
+    match: (c) => /politik|political|campaign|demonstration|anti.?pemerintah|presiden/i.test(c),
+  },
+  {
+    id: "lgbt_content",
+    label: "LGBT text/flag",
+    match: (c) => /lgbt|pride|transgender.?flag/i.test(c),
   },
 ];
 

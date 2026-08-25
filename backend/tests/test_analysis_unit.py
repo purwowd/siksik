@@ -136,6 +136,78 @@ def test_crawl_record_merges_precomputed_social_ocr_into_findings(tmp_path):
 
 
 @pytest.mark.unit
+def test_crawl_record_content_flags_enter_findings_once(tmp_path, monkeypatch):
+    from app.core import config
+    from app.services.analysis import CANONICAL_CRAWL_RECORD_MIME, analyze_content_result
+
+    monkeypatch.setattr(config.settings, "gpu_stack_enabled", False)
+    monkeypatch.setattr(config.settings, "content_text_model", "")
+    path = tmp_path / "record_social_content.siksik-record.json"
+    path.write_text("{}", encoding="utf-8")
+
+    outcome = analyze_content_result(
+        path,
+        CANONICAL_CRAWL_RECORD_MIME,
+        "visible_ui",
+        "Acara LGBT Pride Month",
+        [],
+        precomputed_ocr_text="Bendera LGBT pada Pride Month",
+        precomputed_ocr_backend="host_ocr",
+    )
+
+    flagged = [item for item in outcome.findings if item["category"] == "lgbt_content"]
+    assert len(flagged) == 1
+    assert flagged[0]["label"] == "LGBT text/flag"
+
+
+@pytest.mark.unit
+def test_image_cross_detector_hits_are_one_finding(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services.analysis import analyze_content_result
+
+    image = tmp_path / "flag.png"
+    image.write_bytes(b"placeholder")
+    monkeypatch.setattr(
+        "app.services.nudity.analyze_image_result",
+        lambda _path: SimpleNamespace(findings=(), cacheable=True),
+    )
+    monkeypatch.setattr(
+        "app.services.vision.analyze_image_file",
+        lambda _path, **_kwargs: [
+            {
+                "category": "lgbt_content",
+                "label": "LGBT text/flag",
+                "confidence": 0.84,
+                "layer_origin": "L3",
+                "evidence": "[visual] pride flag",
+            },
+            {
+                "category": "lgbt_flag",
+                "label": "Qwen: pride flag",
+                "confidence": 0.91,
+                "layer_origin": "L3",
+                "evidence": "[qwen] pride flag",
+            },
+        ],
+    )
+
+    outcome = analyze_content_result(
+        image,
+        "image/png",
+        "media_image",
+        "",
+        [],
+    )
+
+    flagged = [item for item in outcome.findings if item["category"] == "lgbt_content"]
+    assert len(flagged) == 1
+    assert flagged[0]["confidence"] == 0.91
+    assert "visual" in flagged[0]["evidence"]
+    assert "qwen" in flagged[0]["evidence"]
+
+
+@pytest.mark.unit
 def test_comments_body_ocr_strips_chrome():
     from app.acquisition.social_ocr import _comments_body_from_ocr
 
@@ -147,4 +219,3 @@ def test_comments_body_ocr_strips_chrome():
     assert "Makar" in cleaned
     assert "Komentar" not in cleaned
     assert "Pilih" not in cleaned
-

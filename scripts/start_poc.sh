@@ -7,30 +7,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# WSL2: libcuda hidup di /usr/lib/wsl/lib — tanpa ini torch/paddle tidak melihat GPU
-if [[ -d /usr/lib/wsl/lib ]]; then
-  export PATH="/usr/lib/wsl/lib:${PATH:-}"
-  export LD_LIBRARY_PATH="/usr/lib/wsl/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-fi
-# Prefer ~/bin adb wrapper (USB via Windows ADB server) + local Android SDK tools
-export PATH="${HOME}/bin:${HOME}/Android/Sdk/platform-tools:${HOME}/Android/Sdk/cmdline-tools/latest/bin:${PATH:-}"
-# `ip` hanya ada di Linux/WSL. Di Mac perintah itu 127 + pipefail = skrip diam-diam exit.
-WSL_ADB_GATEWAY=""
-if command -v ip >/dev/null 2>&1; then
-  WSL_ADB_GATEWAY="$(ip route show default 2>/dev/null | awk '{print $3}' || true)"
-fi
-if [[ -n "${WSL_ADB_GATEWAY:-}" ]]; then
-  export ADB_SERVER_SOCKET="tcp:${WSL_ADB_GATEWAY}:5037"
-  export SADT_AGENT_FORWARD_HOST="${SADT_AGENT_FORWARD_HOST:-$WSL_ADB_GATEWAY}"
-fi
-if [[ -d /usr/lib/jvm/java-17-openjdk-amd64 ]]; then
-  export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}"
-fi
-export ANDROID_HOME="${ANDROID_HOME:-${HOME}/Android/Sdk}"
-export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-
 # Load repo-root .env then backend/.env (only keys not already set by caller).
-# Without this, the lab defaults below would export 0 and override pydantic .env.
+# Platform discovery below therefore remains overridable by deployment config.
 load_env_file() {
   local env_file="$1"
   [[ -f "$env_file" ]] || return 0
@@ -50,6 +28,48 @@ load_env_file() {
 }
 load_env_file "$ROOT/.env"
 load_env_file "$ROOT/backend/.env"
+
+# WSL2: libcuda hidup di /usr/lib/wsl/lib — tanpa ini torch/paddle tidak melihat GPU
+if [[ -d /usr/lib/wsl/lib ]]; then
+  export PATH="/usr/lib/wsl/lib:${PATH:-}"
+  export LD_LIBRARY_PATH="/usr/lib/wsl/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
+# Respect deployment configuration first, then discover conventional SDK roots.
+# No host-specific SDK path or ADB transport is forced into the shared process.
+if [[ -z "${ANDROID_HOME:-}" && -n "${ANDROID_SDK_ROOT:-}" ]]; then
+  export ANDROID_HOME="$ANDROID_SDK_ROOT"
+fi
+if [[ -z "${ANDROID_HOME:-}" ]]; then
+  SDK_CANDIDATES=()
+  case "$(uname -s)" in
+    Darwin)
+      SDK_CANDIDATES+=("${HOME}/Library/Android/sdk")
+      ;;
+    Linux)
+      SDK_CANDIDATES+=(
+        "${HOME}/Android/Sdk"
+        "${HOME}/Android/sdk"
+        "/usr/lib/android-sdk"
+      )
+      ;;
+  esac
+  for sdk_candidate in "${SDK_CANDIDATES[@]}"; do
+    if [[ -x "${sdk_candidate}/platform-tools/adb" ]]; then
+      export ANDROID_HOME="$sdk_candidate"
+      break
+    fi
+  done
+fi
+if [[ -n "${ANDROID_HOME:-}" ]]; then
+  export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+  export PATH="${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/cmdline-tools/latest/bin:${HOME}/bin:${PATH:-}"
+else
+  export PATH="${HOME}/bin:${PATH:-}"
+fi
+if [[ -d /usr/lib/jvm/java-17-openjdk-amd64 ]]; then
+  export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}"
+fi
 
 API_PORT="${SADT_API_PORT:-8000}"
 UI_PORT="${SADT_UI_PORT:-5173}"

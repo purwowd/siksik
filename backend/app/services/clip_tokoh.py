@@ -8,6 +8,7 @@ Tanpa transformers / gagal load → no-op (OCR tetap jadi jalur utama).
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
 from app.core.config import settings
@@ -100,33 +101,50 @@ def _get_pipeline():
         return None, None
 
 
+def score_image_prompts(path: Path, prompts: list[str]) -> list[float] | None:
+    """Return raw image/text logits while reusing the existing CLIP instance.
+
+    The shared scorer lets the new content classifier add prompts without
+    loading a second copy of CLIP into the 6 GB GPU.  ``None`` preserves the
+    existing best-effort/no-op behavior when the model is unavailable.
+    """
+    if not prompts:
+        return []
+    model, processor = _get_pipeline()
+    if model is None or processor is None:
+        return None
+    try:
+        import torch
+        from PIL import Image
+
+        with Image.open(path) as im:
+            image = im.convert("RGB")
+            image.thumbnail((384, 384))
+        inputs = processor(text=prompts, images=image, return_tensors="pt", padding=True)
+        device = _device()
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+        with torch.no_grad():
+            output = model(**inputs)
+        logits = getattr(output, "logits_per_image", None)
+        if logits is None:
+            return None
+        return [float(value) for value in logits[0].detach().float().cpu().tolist()]
+    except Exception as exc:
+        log.debug("CLIP prompt scoring skip %s: %s", path.name, exc)
+        return None
+
+
 def analyze_image_tokoh(path: Path) -> list[dict]:
     """Zero-shot: foto tokoh/presiden vs konten lain."""
     if not settings.clip_tokoh_enabled:
         return []
-    model, processor = _get_pipeline()
-    if model is None or processor is None:
+    logits = score_image_prompts(path, [prompt for _, prompt, _ in _LABELS])
+    if logits is None or not logits:
         return []
-    try:
-        import torch
-        from PIL import Image
-    except Exception:
-        return []
-
-    try:
-        with Image.open(path) as im:
-            image = im.convert("RGB")
-            image.thumbnail((384, 384))
-        texts = [prompt for _, prompt, _ in _LABELS]
-        inputs = processor(text=texts, images=image, return_tensors="pt", padding=True)
-        device = _device()
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        with torch.no_grad():
-            out = model(**inputs)
-            probs = out.logits_per_image.softmax(dim=-1)[0].tolist()
-    except Exception as exc:
-        log.debug("CLIP infer skip %s: %s", path.name, exc)
-        return []
+    peak = max(logits)
+    weights = [math.exp(value - peak) for value in logits]
+    denominator = sum(weights) or 1.0
+    probs = [value / denominator for value in weights]
 
     scored = list(zip(_LABELS, probs, strict=True))
     best_hit = max((x for x in scored if x[0][2]), key=lambda x: x[1], default=None)

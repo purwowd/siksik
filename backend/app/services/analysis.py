@@ -203,7 +203,18 @@ def analyze_content_result(
 ) -> ContentAnalysisResult:
     ext = path.suffix.lower()
     if mime == CANONICAL_CRAWL_RECORD_MIME:
+        from app.services import content_policy
+
         findings = analyze_text_l1_l2(text, keywords) if text.strip() else []
+        if settings.content_detection_enabled and text.strip():
+            findings.extend(
+                content_policy.findings_from_text(
+                    text,
+                    backend="canonical_text",
+                    layer=Layer.L2.value,
+                    image_context=False,
+                )
+            )
         if precomputed_ocr_text and precomputed_ocr_text.strip():
             from app.services import ocr as ocr_mod
 
@@ -217,6 +228,24 @@ def analyze_content_result(
                 findings.extend(
                     analyze_text_l1_l2(precomputed_ocr_text, keywords)
                 )
+        combined_content_text = "\n".join(
+            value
+            for value in (text.strip(), (precomputed_ocr_text or "").strip())
+            if value
+        )
+        if (
+            settings.content_detection_enabled
+            and settings.gpu_stack_enabled
+            and settings.gpu_qwen_enabled
+            and content_policy.should_adjudicate_text(combined_content_text)
+        ):
+            from app.services.gpu_stack import reason_qwen
+
+            findings.extend(
+                hit.as_finding()
+                for hit in reason_qwen.moderate_text(combined_content_text)
+            )
+        findings = content_policy.merge_content_findings(findings)
         seen: set[str] = set()
         uniq: list[dict] = []
         for f in findings:
@@ -255,21 +284,24 @@ def analyze_content_result(
         # Social UI screenshots already have structured inventory records.
         # Running EasyOCR/media_text here hangs the pipeline (looks stuck at INDEXING).
         if source in {"visible_ui", "accessibility_visible_ui"}:
-            if precomputed_ocr_text:
-                from app.services import ocr as ocr_mod
-
-                findings.extend(
-                    ocr_mod.ocr_findings_from_text(
-                        precomputed_ocr_text,
-                        backend=precomputed_ocr_backend or "host_ocr",
-                    )
+            findings.extend(
+                vis.analyze_lightweight_image_file(
+                    path,
+                    precomputed_ocr_text=precomputed_ocr_text,
+                    precomputed_ocr_backend=precomputed_ocr_backend,
+                    include_reasoning=True,
                 )
-            else:
-                findings.extend(vis._analyze_pil_image(path))
+            )
         elif _skip_heavy_ocr_for_gallery(path, source, origin_hint):
             # iOS AFC dumps raw camera HEIC; Android already samples a few media.
             # QUICK: PIL/path signals only — EasyOCR on every HEIC is why iOS lags.
-            findings.extend(vis._analyze_pil_image(path))
+            findings.extend(
+                vis.analyze_lightweight_image_file(
+                    path,
+                    precomputed_ocr_text=precomputed_ocr_text,
+                    precomputed_ocr_backend=precomputed_ocr_backend,
+                )
+            )
         else:
             findings.extend(
                 vis.analyze_image_file(
@@ -285,8 +317,32 @@ def analyze_content_result(
         findings.extend(vis.analyze_video_file(path))
     elif _is_probably_text(path, mime) and text.strip():
         findings.extend(analyze_text_l1_l2(text, keywords))
+        if settings.content_detection_enabled:
+            from app.services import content_policy
+
+            findings.extend(
+                content_policy.findings_from_text(
+                    text,
+                    backend="text",
+                    layer=Layer.L2.value,
+                    image_context=False,
+                )
+            )
+            if (
+                settings.gpu_stack_enabled
+                and settings.gpu_qwen_enabled
+                and content_policy.should_adjudicate_text(text)
+            ):
+                from app.services.gpu_stack import reason_qwen
+
+                findings.extend(
+                    hit.as_finding() for hit in reason_qwen.moderate_text(text)
+                )
     # pdf/docx/binaries lain: path signals saja sampai ada extractor khusus
 
+    from app.services import content_policy
+
+    findings = content_policy.merge_content_findings(findings)
     # de-dupe by label+evidence prefix
     seen: set[str] = set()
     uniq: list[dict] = []
@@ -592,6 +648,17 @@ async def _analyze_session_body(
                     or row["source"] == "video"
                     or (row["mime"] or "").startswith(("video/", "image/"))
                 )
+                if not is_heavy and settings.content_detection_enabled and text.strip():
+                    from app.services import content_policy
+
+                    is_heavy = bool(
+                        settings.content_text_model
+                        or (
+                            settings.gpu_stack_enabled
+                            and settings.gpu_qwen_enabled
+                            and content_policy.should_adjudicate_text(text)
+                        )
+                    )
                 if is_heavy:
                     outcome = await asyncio.to_thread(
                         run_guarded,

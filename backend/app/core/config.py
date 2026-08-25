@@ -135,6 +135,7 @@ class Settings(BaseSettings):
     android_agent_token_ttl_s: int = 3600
     android_agent_request_timeout_s: float = 60.0
     android_agent_request_attempts: int = 3
+    android_agent_health_probe_timeout_s: float = Field(default=3.0, ge=0.5, le=10.0)
     android_agent_reconnect_timeout_s: float = Field(default=90.0, ge=5.0, le=600.0)
     android_agent_reconnect_poll_s: float = Field(default=0.5, ge=0.1, le=10.0)
     android_agent_max_response_mb: int = Field(default=4, ge=1, le=16)
@@ -356,7 +357,7 @@ class Settings(BaseSettings):
     ocr_enabled: bool = False
     ocr_backend: str = "paddleocr"  # paddleocr | easyocr | tesseract | fake
     ocr_gpu: bool = True
-    ocr_langs: str = "en"
+    ocr_langs: str = "id,en"
     # EasyOCR model dir (default: data/easyocr) — hindari ~/.EasyOCR di lab Mac
     ocr_model_dir: Path | None = None
 
@@ -390,6 +391,22 @@ class Settings(BaseSettings):
     clip_tokoh_model: str = "openai/clip-vit-base-patch32"
     clip_tokoh_threshold: float = 0.24
     clip_tokoh_margin: float = 0.04
+
+    # Shared multimodal content taxonomy.  The learned backends are optional;
+    # explicit OCR/text rules remain portable on CPU-only Ubuntu/macOS.
+    content_detection_enabled: bool = True
+    content_visual_enabled: bool = True
+    # Empty reuses the already-loaded CLIP tokoh model.  A local SigLIP2
+    # checkpoint can be selected without changing code.
+    content_visual_model: str = ""
+    content_visual_threshold: float = Field(default=0.70, ge=0.5, le=0.99)
+    content_models_local_only: bool = True
+    # Optional fine-tuned multi-label checkpoint (base IndoBERTweet alone is
+    # deliberately not treated as a classifier).
+    content_text_model: str = ""
+    content_text_device: str = "cpu"  # cpu | auto | cuda | mps
+    content_text_threshold: float = Field(default=0.65, ge=0.5, le=0.99)
+    content_qwen_structured: bool = True
 
     # ---- GPU moderation stack (SafeWatch / ICM / Qwen-VL / Whisper / PaddleOCR) ----
     # Aktif: python run.py … --gpu  atau  SADT_GPU_STACK_ENABLED=1
