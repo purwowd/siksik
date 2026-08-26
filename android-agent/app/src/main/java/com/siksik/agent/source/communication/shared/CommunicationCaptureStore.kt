@@ -367,6 +367,80 @@ class CommunicationCaptureStore(context: Context) : AutoCloseable {
     }
 
     @Synchronized
+    fun recordAutomationScopeCheckpoint(
+        crawlId: String,
+        targetPackage: String,
+        socialScope: String,
+        state: String,
+        attempt: Int,
+        failureClass: String?,
+        reason: String?,
+        scrollCount: Int,
+        screenshotCount: Int,
+        now: Long,
+    ): Boolean {
+        require(CommunicationIdentifiers.SAFE_ID.matches(crawlId))
+        require(targetPackage in CommunicationPolicy.supportedSocialTargets)
+        require(CommunicationPolicy.supportsSocialScope(targetPackage, socialScope))
+        require(state in AUTOMATION_SCOPE_STATES)
+        require(attempt in 0..32)
+        require(failureClass == null || failureClass in AUTOMATION_FAILURE_CLASSES)
+        require(reason == null || SAFE_REASON.matches(reason))
+        require(scrollCount in 0..2_000 && screenshotCount in 0..48)
+        val capture = session(crawlId) ?: return false
+        if (targetPackage !in capture.targetPackages) return false
+        return database.insertWithOnConflict(
+            "automation_scope_results",
+            null,
+            ContentValues().apply {
+                put("crawl_id", crawlId)
+                put("target_package", targetPackage)
+                put("social_scope", socialScope)
+                put("state", state)
+                put("attempt", attempt)
+                put("failure_class", failureClass)
+                put("reason", reason)
+                put("scroll_count", scrollCount)
+                put("screenshot_count", screenshotCount)
+                put("updated_at", now)
+            },
+            SQLiteDatabase.CONFLICT_REPLACE,
+        ) != -1L
+    }
+
+    @Synchronized
+    fun completedAutomationScopes(crawlId: String, targetPackage: String): Set<String> {
+        // Resume only scopes that both checkpointed complete and still have capture rows.
+        // A bare checkpoint without visible_ui evidence must be retried.
+        val checkpointed = database.query(
+            "automation_scope_results",
+            arrayOf("social_scope"),
+            "crawl_id = ? AND target_package = ? AND state = ?",
+            arrayOf(crawlId, targetPackage, "complete"),
+            null,
+            null,
+            "row_id ASC",
+        ).use { cursor ->
+            buildSet {
+                while (cursor.moveToNext()) add(cursor.getString(0))
+            }
+        }
+        if (checkpointed.isEmpty()) return emptySet()
+        return checkpointed.filterTo(linkedSetOf()) { scope ->
+            database.query(
+                "visible_snapshots",
+                arrayOf("row_id"),
+                "crawl_id = ? AND package_name = ? AND social_scope = ?",
+                arrayOf(crawlId, targetPackage, scope),
+                null,
+                null,
+                "row_id ASC",
+                "1",
+            ).use { cursor -> cursor.moveToFirst() }
+        }
+    }
+
+    @Synchronized
     fun automationIssue(crawlId: String): String? {
         val reasons = linkedSetOf<String>()
         database.query(
@@ -586,6 +660,7 @@ class CommunicationCaptureStore(context: Context) : AutoCloseable {
             database.delete("visible_snapshots", "crawl_id = ?", arrayOf(crawlId))
             database.delete("notifications", "crawl_id = ?", arrayOf(crawlId))
             database.delete("automation_results", "crawl_id = ?", arrayOf(crawlId))
+            database.delete("automation_scope_results", "crawl_id = ?", arrayOf(crawlId))
             captureDirectory(sessionId, crawlId).deleteRecursively()
         }
         database.delete("capture_sessions", "session_id = ?", arrayOf(sessionId))
@@ -597,6 +672,7 @@ class CommunicationCaptureStore(context: Context) : AutoCloseable {
         database.delete("visible_snapshots", "crawl_id = ?", arrayOf(crawlId))
         database.delete("notifications", "crawl_id = ?", arrayOf(crawlId))
         database.delete("automation_results", "crawl_id = ?", arrayOf(crawlId))
+        database.delete("automation_scope_results", "crawl_id = ?", arrayOf(crawlId))
         database.delete("capture_sessions", "crawl_id = ?", arrayOf(crawlId))
         if (sessionId != null) captureDirectory(sessionId, crawlId).deleteRecursively()
     }
@@ -851,6 +927,7 @@ class CommunicationCaptureStore(context: Context) : AutoCloseable {
                 )
                 """.trimIndent(),
             )
+            createAutomationScopeResultsTable(db)
             db.execSQL("CREATE INDEX capture_session_active ON capture_sessions(active, updated_at)")
             db.execSQL("CREATE INDEX visible_crawl_page ON visible_snapshots(crawl_id, row_id)")
             db.execSQL(
@@ -876,14 +953,42 @@ class CommunicationCaptureStore(context: Context) : AutoCloseable {
                         "profile_links TEXT NOT NULL DEFAULT '[]'",
                 )
             }
+            if (oldVersion < 4) {
+                createAutomationScopeResultsTable(db)
+            }
             if (newVersion > DATABASE_VERSION) {
                 error("Unsupported communication database migration")
             }
         }
+
+        private fun createAutomationScopeResultsTable(db: SQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS automation_scope_results (
+                    row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    crawl_id TEXT NOT NULL,
+                    target_package TEXT NOT NULL,
+                    social_scope TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    failure_class TEXT,
+                    reason TEXT,
+                    scroll_count INTEGER NOT NULL,
+                    screenshot_count INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    UNIQUE(crawl_id, target_package, social_scope)
+                )
+                """.trimIndent(),
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS automation_scope_crawl " +
+                    "ON automation_scope_results(crawl_id, target_package, state)",
+            )
+        }
     }
 
     companion object {
-        private const val DATABASE_VERSION = 3
+        private const val DATABASE_VERSION = 4
         private const val MAX_PROFILE_LINKS = 16
         private const val MAX_PROFILE_LINK_LENGTH = 2048
         private const val MAX_ISSUE_REASON_LENGTH = 128
@@ -892,6 +997,7 @@ class CommunicationCaptureStore(context: Context) : AutoCloseable {
             "visible_snapshots",
             "notifications",
             "automation_results",
+            "automation_scope_results",
         )
         private val AUTOMATION_STATES = setOf(
             "complete",
@@ -900,6 +1006,18 @@ class CommunicationCaptureStore(context: Context) : AutoCloseable {
             "failed",
             "target_missing",
             "timeout",
+        )
+        private val AUTOMATION_SCOPE_STATES = setOf(
+            "complete",
+            "retrying",
+            "failed",
+            "cancelled",
+        )
+        private val AUTOMATION_FAILURE_CLASSES = setOf(
+            "observation",
+            "action",
+            "postcondition",
+            "empty_content",
         )
         private val SHORT_TARGET_LABELS = mapOf(
             "com.instagram.android" to "ig",

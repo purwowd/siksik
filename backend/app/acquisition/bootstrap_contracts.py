@@ -175,6 +175,9 @@ STATE_MESSAGES = {
 SPECIAL_ACCESS_WAIT_MESSAGES = {
     SpecialAccessKind.ACCESSIBILITY: "Menunggu konfirmasi Aksesibilitas pada perangkat",
     SpecialAccessKind.MANAGE_ALL_FILES: "Menunggu izin Semua file pada perangkat",
+    SpecialAccessKind.NOTIFICATION_LISTENER: (
+        "Menunggu izin akses notifikasi pada perangkat"
+    ),
 }
 
 

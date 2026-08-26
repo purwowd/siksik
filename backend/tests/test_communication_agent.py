@@ -15,8 +15,11 @@ from app.acquisition.automation import (
     RESULT_PREFIX,
     AndroidUiAutomationOrchestrator,
     AutomationConfig,
+    AutomationScopeProgressV1,
+    enforce_required_scope_evidence,
     instrumentation_failure_token,
     parse_instrumentation_result,
+    parse_instrumentation_scope_progress,
 )
 from app.acquisition.bootstrap_contracts import InstallAction
 from app.acquisition.errors import AcquisitionError, ErrorCategory
@@ -636,3 +639,169 @@ def test_normalize_automation_result_upgrades_text_only_partial_to_failed() -> N
     )
     assert instagram.state == "failed"
     assert instagram.reason == "scope_navigation_incomplete"
+
+
+def _scope_progress_line(
+    *,
+    target: str = "com.instagram.android",
+    scope: str = "own_profile",
+    stage: str = "checkpoint_saved",
+    state: str = "complete",
+    attempt: int = 1,
+    scroll_count: int = 0,
+    screenshot_count: int = 0,
+    failure_class: str | None = None,
+    reason: str | None = None,
+) -> str:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "target_package": target,
+        "scope": scope,
+        "stage": stage,
+        "state": state,
+        "attempt": attempt,
+        "scroll_count": scroll_count,
+        "screenshot_count": screenshot_count,
+    }
+    if failure_class is not None:
+        payload["failure_class"] = failure_class
+    if reason is not None:
+        payload["reason"] = reason
+    return (
+        "INSTRUMENTATION_STATUS: siksik_scope_progress="
+        + json.dumps(payload, separators=(",", ":"))
+    )
+
+
+@pytest.mark.unit
+def test_parse_instrumentation_scope_progress_accepts_valid_line() -> None:
+    parsed = parse_instrumentation_scope_progress(
+        _scope_progress_line(
+            scope="own_posts",
+            stage="attempt_started",
+            state="running",
+            attempt=2,
+            scroll_count=4,
+            screenshot_count=1,
+        ),
+        "com.instagram.android",
+    )
+    assert parsed is not None
+    assert parsed.scope == "own_posts"
+    assert parsed.state == "running"
+    assert parsed.attempt == 2
+    assert parsed.scroll_count == 4
+    assert parsed.screenshot_count == 1
+
+
+@pytest.mark.unit
+def test_parse_instrumentation_scope_progress_ignores_unrelated_lines() -> None:
+    assert (
+        parse_instrumentation_scope_progress(
+            "INSTRUMENTATION_STATUS: stream=stdout",
+            "com.instagram.android",
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_parse_instrumentation_scope_progress_rejects_inconsistent_payload() -> None:
+    with pytest.raises(AcquisitionError) as exc:
+        parse_instrumentation_scope_progress(
+            _scope_progress_line(scope="own_tweets"),
+            "com.instagram.android",
+        )
+    assert exc.value.category == ErrorCategory.AGENT_INVALID_RESPONSE
+
+
+@pytest.mark.unit
+def test_enforce_required_scope_evidence_keeps_complete_when_progress_empty() -> None:
+    result = AutomationResultV1(
+        schema_version=1,
+        target_package="com.instagram.android",
+        state="complete",
+        reason=None,
+        scroll_count=3,
+        screenshot_ids=[],
+        duration_ms=1000,
+    )
+    assert (
+        enforce_required_scope_evidence(result, "com.instagram.android", []).state
+        == "complete"
+    )
+
+
+@pytest.mark.unit
+def test_enforce_required_scope_evidence_fails_when_observed_scopes_incomplete() -> None:
+    result = AutomationResultV1(
+        schema_version=1,
+        target_package="com.instagram.android",
+        state="complete",
+        reason=None,
+        scroll_count=3,
+        screenshot_ids=[],
+        duration_ms=1000,
+    )
+    progress = [
+        AutomationScopeProgressV1(
+            target_package="com.instagram.android",
+            scope="own_profile",
+            stage="checkpoint_saved",
+            state="complete",
+            attempt=1,
+            failure_class=None,
+            reason=None,
+            scroll_count=0,
+            screenshot_count=0,
+        ),
+        AutomationScopeProgressV1(
+            target_package="com.instagram.android",
+            scope="own_posts",
+            stage="attempt_failed",
+            state="failed",
+            attempt=3,
+            failure_class="action",
+            reason="scope_navigation_failed",
+            scroll_count=0,
+            screenshot_count=0,
+        ),
+    ]
+    enforced = enforce_required_scope_evidence(
+        result,
+        "com.instagram.android",
+        progress,
+    )
+    assert enforced.state == "failed"
+    assert enforced.reason == "required_scope_evidence_missing"
+
+
+@pytest.mark.unit
+def test_enforce_required_scope_evidence_keeps_complete_when_all_required_complete() -> None:
+    result = AutomationResultV1(
+        schema_version=1,
+        target_package="com.twitter.android",
+        state="complete",
+        reason=None,
+        scroll_count=10,
+        screenshot_ids=[],
+        duration_ms=2000,
+    )
+    progress = [
+        AutomationScopeProgressV1(
+            target_package="com.twitter.android",
+            scope=scope,
+            stage="checkpoint_saved",
+            state="complete",
+            attempt=1,
+            failure_class=None,
+            reason=None,
+            scroll_count=1,
+            screenshot_count=0,
+        )
+        for scope in ("own_profile", "own_tweets", "own_replies")
+    ]
+    assert (
+        enforce_required_scope_evidence(result, "com.twitter.android", progress).state
+        == "complete"
+    )

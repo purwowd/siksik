@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from app.acquisition.adb import AsyncAdbTransport
+from app.acquisition.automation import AutomationScopeProgressV1
 
 from app.acquisition.agent_client import (
     AutomationResultV1,
@@ -96,6 +97,10 @@ class AutomationRunner(Protocol):
         target_packages: tuple[str, ...],
         request_id: str | None,
         on_progress: Callable[[str, str], Awaitable[None]] | None = None,
+        on_result: Callable[[AutomationResultV1], Awaitable[None]] | None = None,
+        on_scope_progress: (
+            Callable[[AutomationScopeProgressV1], Awaitable[None]] | None
+        ) = None,
     ) -> list[AutomationResultV1]: ...
 
 
@@ -449,6 +454,25 @@ class Phase7AndroidAgentRunner:
                     "restore_agent_failed": "Pemulihan agent setelah instrumentation gagal",
                     "restore_accessibility": "Memulihkan accessibility setelah crawl visual",
                 }
+                scope_labels = {
+                    "own_profile": "profil sendiri",
+                    "own_posts": "postingan sendiri",
+                    "own_tweets": "tweet sendiri",
+                    "own_story_archive": "arsip story",
+                    "own_comments": "komentar sendiri",
+                    "own_replies": "balasan sendiri",
+                }
+                stage_labels = {
+                    "attempt_started": "memulai",
+                    "initial_captured": "bukti awal tersimpan",
+                    "capture_scrolled": "mengambil halaman lanjutan",
+                    "attempt_failed": "percobaan gagal",
+                    "state_recovered": "state dipulihkan",
+                    "checkpoint_saved": "scope lengkap",
+                    "checkpoint_restored": "checkpoint dipulihkan",
+                    "checkpoint_failed": "checkpoint gagal",
+                }
+                reported_targets: set[str] = set()
 
                 async def on_social_progress(target_package: str, phase: str) -> None:
                     if target_package == "__system__":
@@ -477,6 +501,47 @@ class Phase7AndroidAgentRunner:
                         crawl_stage=phase,
                     )
 
+                async def on_social_scope_progress(
+                    progress: AutomationScopeProgressV1,
+                ) -> None:
+                    app_label = social_labels.get(
+                        progress.target_package,
+                        progress.target_package,
+                    )
+                    scope_label = scope_labels.get(progress.scope, progress.scope)
+                    stage_label = stage_labels.get(progress.stage, progress.stage)
+                    attempt_suffix = (
+                        f" · percobaan {progress.attempt}"
+                        if progress.attempt > 0
+                        else ""
+                    )
+                    await context.on_progress(
+                        SessionStatus.ACQUIRING,
+                        12.0,
+                        f"Crawl {app_label} — {scope_label}: {stage_label}{attempt_suffix}",
+                        crawl_id=run.crawl_id,
+                        crawl_state="social_automation",
+                        crawl_source="accessibility_visible_ui",
+                        crawl_target=progress.target_package,
+                        crawl_scope=progress.scope,
+                        crawl_stage=progress.stage,
+                        crawl_attempt=progress.attempt,
+                        crawl_attempt_state=progress.state,
+                        crawl_failure_class=progress.failure_class,
+                        crawl_reason=progress.reason,
+                        crawl_scroll_count=progress.scroll_count,
+                        crawl_screenshot_count=progress.screenshot_count,
+                    )
+
+                async def on_social_result(outcome: AutomationResultV1) -> None:
+                    await client.report_automation_result(
+                        context.session_id,
+                        run.crawl_id,
+                        outcome,
+                        request_id=context.request_id,
+                    )
+                    reported_targets.add(outcome.target_package)
+
                 await context.on_progress(
                     SessionStatus.ACQUIRING,
                     9.0,
@@ -499,6 +564,8 @@ class Phase7AndroidAgentRunner:
                     target_packages=self._target_packages,
                     request_id=context.request_id,
                     on_progress=on_social_progress,
+                    on_result=on_social_result,
+                    on_scope_progress=on_social_scope_progress,
                 )
                 configured = (
                     await client.bootstrap(
@@ -515,6 +582,8 @@ class Phase7AndroidAgentRunner:
                         "Android agent tidak pulih setelah automation social.",
                     )
                 for outcome in outcomes:
+                    if outcome.target_package in reported_targets:
+                        continue
                     await client.report_automation_result(
                         context.session_id,
                         run.crawl_id,

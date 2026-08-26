@@ -57,7 +57,19 @@ class SocialCrawlInstrumentation {
             navigationDeadlineAtMs = System.currentTimeMillis() + navigationDeadlineMs,
         )
         val outcome = try {
-            AutomationEngine().execute(strategy, driver, limits) {
+            AutomationEngine().execute(
+                strategy,
+                driver,
+                limits,
+                onProgress = { progress ->
+                    instrumentation.sendStatus(
+                        PROGRESS_STATUS_CODE,
+                        Bundle().apply {
+                            putString(PROGRESS_KEY, progressJson(progress).toString())
+                        },
+                    )
+                },
+            ) {
                 sessionStore.session(crawlId)?.active == true
             }
         } finally {
@@ -99,9 +111,23 @@ class SocialCrawlInstrumentation {
         .put("screenshot_ids", JSONArray(value.screenshotIds))
         .put("duration_ms", value.durationMs)
 
+    private fun progressJson(value: AutomationScopeProgress): JSONObject = JSONObject()
+        .put("schema_version", 1)
+        .put("target_package", value.targetPackage)
+        .put("scope", value.scope.wireName)
+        .put("stage", value.stage)
+        .put("state", value.state)
+        .put("attempt", value.attempt)
+        .put("failure_class", value.failureClass?.wireName ?: JSONObject.NULL)
+        .put("reason", value.reason ?: JSONObject.NULL)
+        .put("scroll_count", value.scrollCount)
+        .put("screenshot_count", value.screenshotCount)
+
     companion object {
         const val RESULT_KEY = "siksik_result"
+        const val PROGRESS_KEY = "siksik_scope_progress"
         private const val RESULT_STATUS_CODE = 2
+        private const val PROGRESS_STATUS_CODE = 1
         private const val MIN_TIME_SCOPE_EPOCH_MS = 946_684_800_000L
     }
 }

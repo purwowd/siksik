@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
-
-AutomationProgressCallback = Callable[[str, str], Awaitable[None]]
 
 from pydantic import ValidationError
 
@@ -27,6 +27,8 @@ from app.core.config import settings
 from app.models.schemas import AcquisitionMode
 
 logger = logging.getLogger("siksik.acquisition.automation")
+AutomationProgressCallback = Callable[[str, str], Awaitable[None]]
+AutomationResultCallback = Callable[[AutomationResultV1], Awaitable[None]]
 SYSTEM_PROGRESS_TARGET = "__system__"
 TEXT_ONLY_SOCIAL_TARGETS = frozenset({
     "com.twitter.android",
@@ -45,6 +47,42 @@ RESULT_PREFIXES = (
     "INSTRUMENTATION_RESULT: siksik_result=",
 )
 RESULT_PREFIX = RESULT_PREFIXES[0]
+SCOPE_PROGRESS_PREFIXES = (
+    "INSTRUMENTATION_STATUS: siksik_scope_progress=",
+    "INSTRUMENTATION_RESULT: siksik_scope_progress=",
+)
+TARGET_REQUIRED_SCOPES = {
+    "com.instagram.android": frozenset(
+        {"own_profile", "own_posts", "own_story_archive", "own_comments"}
+    ),
+    "com.twitter.android": frozenset({"own_profile", "own_tweets", "own_replies"}),
+    "com.facebook.katana": frozenset({"own_profile", "own_posts", "own_comments"}),
+}
+SCOPE_PROGRESS_STATES = frozenset(
+    {"running", "retrying", "complete", "failed", "cancelled"}
+)
+SCOPE_FAILURE_CLASSES = frozenset(
+    {"observation", "action", "postcondition", "empty_content"}
+)
+SAFE_SCOPE_TOKEN = re.compile(r"^[a-z0-9_]{1,64}$")
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationScopeProgressV1:
+    target_package: str
+    scope: str
+    stage: str
+    state: str
+    attempt: int
+    failure_class: str | None
+    reason: str | None
+    scroll_count: int
+    screenshot_count: int
+
+
+AutomationScopeProgressCallback = Callable[
+    [AutomationScopeProgressV1], Awaitable[None]
+]
 
 
 class ArtifactBuilder(Protocol):
@@ -181,6 +219,8 @@ class AndroidUiAutomationOrchestrator:
         target_packages: Sequence[str],
         request_id: str | None,
         on_progress: AutomationProgressCallback | None = None,
+        on_result: AutomationResultCallback | None = None,
+        on_scope_progress: AutomationScopeProgressCallback | None = None,
     ) -> list[AutomationResultV1]:
         targets = tuple(dict.fromkeys(target_packages))
         if (
@@ -296,6 +336,7 @@ class AndroidUiAutomationOrchestrator:
                         target_package=target,
                         request_id=request_id,
                         on_progress=on_progress,
+                        on_scope_progress=on_scope_progress,
                     )
                     await self._pull_debug_mapping(
                         serial=serial,
@@ -341,6 +382,8 @@ class AndroidUiAutomationOrchestrator:
                             target_package=target,
                         )
                     results.append(result)
+                    if on_result is not None:
+                        await on_result(result)
                     if on_progress is not None:
                         detail = result.reason or result.state
                         await on_progress(target, f"{result.state}:{detail}")
@@ -870,6 +913,7 @@ class AndroidUiAutomationOrchestrator:
         target_package: str,
         request_id: str | None,
         on_progress: AutomationProgressCallback | None = None,
+        on_scope_progress: AutomationScopeProgressCallback | None = None,
     ) -> tuple[AutomationResultV1, bool, bool]:
         if on_progress is not None:
             await on_progress(target_package, "target_probe")
@@ -959,6 +1003,29 @@ class AndroidUiAutomationOrchestrator:
         navigation_deadline_ms = int(
             max(15.0, self._config.target_timeout_seconds - 10.0) * 1000,
         )
+        observed_scope_progress: list[AutomationScopeProgressV1] = []
+
+        async def on_instrumentation_line(line: str) -> None:
+            try:
+                progress = parse_instrumentation_scope_progress(line, target_package)
+            except AcquisitionError as exc:
+                logger.warning(
+                    "automation_scope_progress_invalid",
+                    extra={
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "crawl_id": crawl_id,
+                        "target_package": target_package,
+                        "error_category": exc.category.value,
+                    },
+                )
+                return
+            if progress is None:
+                return
+            observed_scope_progress.append(progress)
+            if on_scope_progress is not None:
+                await on_scope_progress(progress)
+
         try:
             result = await self._adb.run_instrumentation(
                 serial,
@@ -979,6 +1046,7 @@ class AndroidUiAutomationOrchestrator:
                     "debug_snapshots": str(self._config.debug_snapshots).lower(),
                 },
                 timeout=self._config.target_timeout_seconds,
+                on_stdout_line=on_instrumentation_line,
             )
         except AcquisitionError as exc:
             state = "timeout" if exc.category == ErrorCategory.ADB_TIMEOUT else "failed"
@@ -1006,12 +1074,26 @@ class AndroidUiAutomationOrchestrator:
                 True,
             )
         try:
-            parsed = normalize_automation_result(
+            for raw_line in result.stdout.splitlines():
+                try:
+                    progress = parse_instrumentation_scope_progress(
+                        raw_line,
+                        target_package,
+                    )
+                except AcquisitionError:
+                    continue
+                if progress is not None and progress not in observed_scope_progress:
+                    observed_scope_progress.append(progress)
+            parsed = enforce_required_scope_evidence(
+                normalize_automation_result(
                 parse_instrumentation_result(
                     f"{result.stdout}\n{result.stderr}",
                     target_package,
                 ),
                 target_package,
+                ),
+                target_package,
+                observed_scope_progress,
             )
         except AcquisitionError:
             return (
@@ -1045,6 +1127,118 @@ def instrumentation_failure_token(stdout: str, stderr: str) -> str:
     if "PROCESS_CRASHED" in blob:
         return "process_crashed"
     return "instrument_nonzero_exit"
+
+
+def parse_instrumentation_scope_progress(
+    raw_line: str,
+    expected_target: str,
+) -> AutomationScopeProgressV1 | None:
+    line = raw_line.strip()
+    prefix = next(
+        (item for item in SCOPE_PROGRESS_PREFIXES if line.startswith(item)),
+        None,
+    )
+    if prefix is None:
+        return None
+    encoded = line.removeprefix(prefix).strip()
+    if not encoded or len(encoded) > 32 * 1024:
+        raise acquisition_error(
+            ErrorCategory.AGENT_INVALID_RESPONSE,
+            "Progress scope automation Android tidak valid.",
+        )
+    try:
+        payload = json.loads(encoded)
+    except (TypeError, ValueError) as exc:
+        raise acquisition_error(
+            ErrorCategory.AGENT_INVALID_RESPONSE,
+            "Progress scope automation Android tidak valid.",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise acquisition_error(
+            ErrorCategory.AGENT_INVALID_RESPONSE,
+            "Progress scope automation Android tidak valid.",
+        )
+    target = payload.get("target_package")
+    scope = payload.get("scope")
+    stage = payload.get("stage")
+    state = payload.get("state")
+    attempt = payload.get("attempt")
+    failure_class = payload.get("failure_class")
+    reason = payload.get("reason")
+    scroll_count = payload.get("scroll_count")
+    screenshot_count = payload.get("screenshot_count")
+    valid_integer_fields = (
+        isinstance(attempt, int)
+        and not isinstance(attempt, bool)
+        and 0 <= attempt <= 32
+        and isinstance(scroll_count, int)
+        and not isinstance(scroll_count, bool)
+        and 0 <= scroll_count <= 2_000
+        and isinstance(screenshot_count, int)
+        and not isinstance(screenshot_count, bool)
+        and 0 <= screenshot_count <= 48
+    )
+    if (
+        payload.get("schema_version") != 1
+        or target != expected_target
+        or expected_target not in TARGET_REQUIRED_SCOPES
+        or not isinstance(scope, str)
+        or scope not in TARGET_REQUIRED_SCOPES[expected_target]
+        or not isinstance(stage, str)
+        or SAFE_SCOPE_TOKEN.fullmatch(stage) is None
+        or state not in SCOPE_PROGRESS_STATES
+        or not valid_integer_fields
+        or (failure_class is not None and failure_class not in SCOPE_FAILURE_CLASSES)
+        or (
+            reason is not None
+            and (
+                not isinstance(reason, str)
+                or re.fullmatch(r"[a-z0-9_]{1,128}", reason) is None
+            )
+        )
+    ):
+        raise acquisition_error(
+            ErrorCategory.AGENT_INVALID_RESPONSE,
+            "Progress scope automation Android tidak konsisten.",
+        )
+    return AutomationScopeProgressV1(
+        target_package=target,
+        scope=scope,
+        stage=stage,
+        state=state,
+        attempt=attempt,
+        failure_class=failure_class,
+        reason=reason,
+        scroll_count=scroll_count,
+        screenshot_count=screenshot_count,
+    )
+
+
+def enforce_required_scope_evidence(
+    result: AutomationResultV1,
+    target_package: str,
+    progress: Sequence[AutomationScopeProgressV1],
+) -> AutomationResultV1:
+    """Downgrade a claimed complete only when scope progress was observed.
+
+    Empty progress must not fail a target: OEM/ADB buffers often drop
+    INSTRUMENTATION_STATUS lines while the final siksik_result remains valid.
+    Engine already emits partial when a required scope fails on-device.
+    """
+    if result.state != "complete":
+        return result
+    required = TARGET_REQUIRED_SCOPES.get(target_package)
+    if required is None:
+        return result
+    observed = [item for item in progress if item.target_package == target_package]
+    if not observed:
+        return result
+    completed = {item.scope for item in observed if item.state == "complete"}
+    if required <= completed:
+        return result
+    return result.model_copy(
+        update={"state": "failed", "reason": "required_scope_evidence_missing"}
+    )
 
 
 def parse_instrumentation_result(
@@ -1084,10 +1278,11 @@ def normalize_automation_result(
     target_package: str,
 ) -> AutomationResultV1:
     if result.state == "partial" and target_package in allowed_social_targets():
-        return failure_result(
-            target_package,
-            "failed",
-            result.reason or "scope_navigation_incomplete",
+        return result.model_copy(
+            update={
+                "state": "failed",
+                "reason": result.reason or "scope_navigation_incomplete",
+            }
         )
     return result
 

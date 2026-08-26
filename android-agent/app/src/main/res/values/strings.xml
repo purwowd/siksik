@@ -9,6 +9,13 @@
     <string name="permission_denied">Akses tidak disetujui.</string>
     <string name="permission_cancelled">Permintaan akses dibatalkan.</string>
     <string name="permission_revoked">Akses tidak lagi tersedia.</string>
+    <string name="permission_special_access_title">SIKSIK memerlukan akses tambahan</string>
+    <string name="permission_manage_all_files_message">Android tidak menerima grant otomatis. Ketuk Izinkan untuk membuka kontrol akses semua file.</string>
+    <string name="permission_accessibility_message">Android tidak menerima grant otomatis. Ketuk Izinkan untuk membuka kontrol layanan aksesibilitas SIKSIK.</string>
+    <string name="permission_notification_listener_message">Android tidak menerima grant otomatis. Ketuk Izinkan untuk membuka kontrol akses notifikasi SIKSIK.</string>
+    <string name="permission_allow">Izinkan</string>
+    <string name="permission_deny">Tolak</string>
+    <string name="permission_settings_unavailable">Android tidak menyediakan halaman izin yang dapat dibuka untuk perangkat ini.</string>
     <string name="background_channel_name">Sesi perangkat SATRIA</string>
     <string name="background_notification_title">Sesi SATRIA aktif</string>
     <string name="background_notification_text">Koneksi lokal melalui ADB sedang berjalan.</string>

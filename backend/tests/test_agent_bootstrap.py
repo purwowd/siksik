@@ -97,6 +97,8 @@ class FakeAdb:
         self.runtime_permission_settings_opened = 0
         self.special_sequences: dict[SpecialAccessKind, list[SpecialAccessState]] = {}
         self.opened_access: list[SpecialAccessKind] = []
+        self.special_access_dialogs: list[SpecialAccessKind] = []
+        self.manage_all_files_grants = 0
         self.restore_accessibility_state: SpecialAccessState | None = None
         self.accessibility_ready = True
         self.accessibility_ready_sequence: list[bool] = []
@@ -285,6 +287,22 @@ class FakeAdb:
             return sequence.pop(0)
         return sequence[0]
 
+    async def grant_manage_all_files(
+        self,
+        serial: str,
+        package_name: str,
+        *,
+        user_id: int | None = None,
+    ) -> SpecialAccessState:
+        assert serial == SERIAL
+        assert package_name == "com.siksik.agent"
+        assert user_id == 0
+        self._step("grant:manage_all_files")
+        self.manage_all_files_grants += 1
+        # Unit fixtures treat shell appops auto-grant as unavailable so the
+        # operator dialog / settings path is exercised via special_sequences.
+        return SpecialAccessState.NOT_GRANTED
+
     async def restore_accessibility_service(
         self,
         serial: str,
@@ -358,6 +376,12 @@ class FakeAdb:
         assert timeout > 0
         self._step("start_activity")
         self.started_extras = extras
+        access = extras.get("request_special_access")
+        if isinstance(access, str):
+            try:
+                self.special_access_dialogs.append(SpecialAccessKind(access))
+            except ValueError:
+                pass
 
     async def create_forward(self, serial: str, device_port: int) -> int:
         assert serial == SERIAL
@@ -578,6 +602,14 @@ async def run_bootstrap(service: AndroidAgentBootstrapService):
     )
     return record, progress
 
+
+def assert_special_access_prompted(adb: FakeAdb, access: SpecialAccessKind) -> None:
+    """Dialog Izinkan/Tolak (start_activity) or Settings deep-link both count."""
+    prompted = access in adb.special_access_dialogs or access in adb.opened_access
+    assert prompted, (
+        f"expected special-access prompt for {access.value}; "
+        f"dialogs={adb.special_access_dialogs!r} settings={adb.opened_access!r}"
+    )
 
 @pytest.mark.unit
 async def test_first_install_reaches_ready_with_complete_trace(tmp_path: Path) -> None:
@@ -817,7 +849,7 @@ async def test_special_access_waits_and_continues_after_approval(tmp_path: Path)
     record, progress = await run_bootstrap(service)
 
     assert record.state == AgentRuntimeState.READY
-    assert adb.opened_access == [access]
+    assert_special_access_prompted(adb, access)
     assert "awaiting_access" in [item[3]["bootstrap_state"] for item in progress]
     assert record.details["special_access"]["accessibility"] == "granted"
     await service.teardown(SESSION_ID)
@@ -840,7 +872,7 @@ async def test_accessibility_granted_but_unbound_opens_settings(tmp_path: Path) 
     record, progress = await run_bootstrap(service)
 
     assert record.state == AgentRuntimeState.READY
-    assert adb.opened_access == [access]
+    assert_special_access_prompted(adb, access)
     assert "awaiting_access" in [item[3]["bootstrap_state"] for item in progress]
     assert record.details["special_access"]["accessibility"] == "granted"
     await service.teardown(SESSION_ID)
@@ -865,7 +897,7 @@ async def test_adb_accessibility_restore_denial_opens_settings_instead_of_failin
     record, progress = await run_bootstrap(service)
 
     assert record.state == AgentRuntimeState.READY
-    assert adb.opened_access == [access]
+    assert_special_access_prompted(adb, access)
     assert "awaiting_access" in [item[3]["bootstrap_state"] for item in progress]
     assert record.details["special_access"]["accessibility"] == "granted"
     await service.teardown(SESSION_ID)
@@ -925,7 +957,7 @@ async def test_optional_all_files_denial_continues_with_explicit_capability_stat
     )
 
     assert record.state == AgentRuntimeState.READY
-    assert adb.opened_access == [access]
+    assert_special_access_prompted(adb, access)
     assert record.details["special_access"][access.value] == SpecialAccessState.DENIED.value
     await service.teardown(SESSION_ID)
     await database.close()
@@ -962,11 +994,34 @@ async def test_optional_all_files_wait_uses_operator_prompt(tmp_path: Path) -> N
     )
 
     assert record.state == AgentRuntimeState.READY
-    assert adb.opened_access == [access]
+    assert_special_access_prompted(adb, access)
     assert any(
         state == "awaiting_access" and "Semua file" in message
         for _phase, message, state in progress
     )
+    assert record.details["special_access"][access.value] == SpecialAccessState.GRANTED.value
+    await service.teardown(SESSION_ID)
+    await database.close()
+
+
+@pytest.mark.unit
+async def test_special_access_prefers_native_dialog_over_settings(tmp_path: Path) -> None:
+    access = SpecialAccessKind.ACCESSIBILITY
+    service, adb, database, _artifacts, _behavior = await make_service(
+        tmp_path,
+        special_access=(access,),
+    )
+    adb.special_sequences[access] = [
+        SpecialAccessState.NOT_GRANTED,
+        SpecialAccessState.GRANTED,
+    ]
+    adb.restore_accessibility_state = SpecialAccessState.NOT_GRANTED
+
+    record, _progress = await run_bootstrap(service)
+
+    assert record.state == AgentRuntimeState.READY
+    assert access in adb.special_access_dialogs
+    assert adb.opened_access == []
     assert record.details["special_access"][access.value] == SpecialAccessState.GRANTED.value
     await service.teardown(SESSION_ID)
     await database.close()

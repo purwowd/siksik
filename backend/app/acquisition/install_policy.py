@@ -83,11 +83,13 @@ def initial_install_attempt(
             "itel",
             "huawei",
             "honor",
+            "samsung",
+            "sec",
         )
     )
     use_push = prefer_no_streaming or oem_prefers_push or (
         api_level is not None and api_level <= 28
-    )
+    ) or True
     use_grant = bool(grant_runtime_permissions and runtime_grant_supported)
     return InstallAttempt(
         grant_runtime_permissions=use_grant,

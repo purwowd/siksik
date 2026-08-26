@@ -76,6 +76,60 @@ class AutomationEngineTest {
         assertEquals(strategy.scopes, driver.openedScopes)
     }
 
+    @Test
+    fun retryableScopeFailureRecoversAndCompletes() {
+        val driver = FakeDriver(
+            navigateFailures = mutableMapOf(SocialScope.OWN_PROFILE to 1),
+            recoverReturns = true,
+        )
+        val progress = mutableListOf<AutomationScopeProgress>()
+        val result = AutomationEngine(sequenceClock()).execute(
+            strategy,
+            driver,
+            limits,
+            onProgress = { progress += it },
+        ) { true }
+
+        assertEquals("complete", result.state)
+        assertEquals(2, driver.navigateAttempts[SocialScope.OWN_PROFILE])
+        assertEquals(1, driver.recoverCalls)
+        assertTrue(progress.any { it.state == "retrying" && it.scope == SocialScope.OWN_PROFILE })
+        assertTrue(
+            progress.any {
+                it.state == "complete" &&
+                    it.scope == SocialScope.OWN_PROFILE &&
+                    it.stage == "checkpoint_saved"
+            },
+        )
+    }
+
+    @Test
+    fun completedCheckpointSkipsNavigationForThatScope() {
+        val driver = FakeDriver(
+            completedCheckpoints = setOf(SocialScope.OWN_PROFILE, SocialScope.OWN_POSTS),
+        )
+        val progress = mutableListOf<AutomationScopeProgress>()
+        val result = AutomationEngine(sequenceClock()).execute(
+            strategy,
+            driver,
+            limits,
+            onProgress = { progress += it },
+        ) { true }
+
+        assertEquals("complete", result.state)
+        assertEquals(
+            listOf(SocialScope.OWN_STORY_ARCHIVE, SocialScope.OWN_COMMENTS),
+            driver.openedScopes,
+        )
+        assertTrue(
+            progress.any {
+                it.scope == SocialScope.OWN_PROFILE &&
+                    it.stage == "checkpoint_restored" &&
+                    it.state == "complete"
+            },
+        )
+    }
+
     private fun sequenceClock(): () -> Long {
         var value = 1_000L
         return { value.also { value += 10 } }
@@ -86,11 +140,17 @@ class AutomationEngineTest {
         private val visible: Boolean = true,
         private val foreground: Boolean = true,
         private val exhausted: Boolean = false,
+        private val navigateFailures: MutableMap<SocialScope, Int> = mutableMapOf(),
+        private val recoverReturns: Boolean = false,
+        private val completedCheckpoints: Set<SocialScope> = emptySet(),
     ) : AutomationDriver {
         var scrollCalls = 0
         var captureCalls = 0
         var returnCalled = false
+        var recoverCalls = 0
         val openedScopes = mutableListOf<SocialScope>()
+        val navigateAttempts = mutableMapOf<SocialScope, Int>()
+        private var lastFailure: String? = null
 
         override fun targetExists(targetPackage: String) = exists
         override fun launch(targetPackage: String) = true
@@ -98,7 +158,16 @@ class AutomationEngineTest {
         override fun waitStable(timeoutMs: Long) = Unit
         override fun isForeground(targetPackage: String) = foreground
         override fun navigateToScope(targetPackage: String, scope: SocialScope): Boolean {
+            val attempt = (navigateAttempts[scope] ?: 0) + 1
+            navigateAttempts[scope] = attempt
+            val remaining = navigateFailures[scope] ?: 0
+            if (remaining > 0) {
+                navigateFailures[scope] = remaining - 1
+                lastFailure = "scope_navigation_failed"
+                return false
+            }
             openedScopes.add(scope)
+            lastFailure = null
             return true
         }
         override fun scrollForward(): Boolean {
@@ -113,6 +182,18 @@ class AutomationEngineTest {
                 exhausted = exhausted,
             )
         }
+        override fun lastFailureReason(): String? = lastFailure
+        override fun recoverScope(
+            targetPackage: String,
+            scope: SocialScope,
+            failedAttempt: Int,
+            reason: String,
+        ): Boolean {
+            recoverCalls += 1
+            return recoverReturns
+        }
+        override fun completedScopeCheckpoints(targetPackage: String): Set<SocialScope> =
+            completedCheckpoints
         override fun returnToAgent() {
             returnCalled = true
         }

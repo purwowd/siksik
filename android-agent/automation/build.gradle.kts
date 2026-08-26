@@ -56,5 +56,6 @@ dependencies {
     implementation("androidx.test.ext:junit-ktx:1.2.1")
     implementation("androidx.test:runner:1.6.2")
     implementation("androidx.test.uiautomator:uiautomator:2.3.0")
+    implementation("com.google.mlkit:text-recognition:16.0.1")
     testImplementation("junit:junit:4.13.2")
 }

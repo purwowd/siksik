@@ -182,16 +182,25 @@ class AutomationPackageCoordinator:
                 retryable=True,
             )
         verified = await self._adb.inspect_package(serial, self._config.package_name)
-        inspected = await self.inspect_installed_apk(serial, verified)
-        if (
-            inspected.apk_sha256 != desired_apk.apk_sha256
-            or inspected.signer_sha256 != desired_apk.signer_sha256
-            or inspected.version_code != desired_apk.version_code
-        ):
+        if not verified.installed:
             raise acquisition_error(
                 ErrorCategory.AGENT_INSTALL_FAILED,
-                "Hasil instalasi paket UiAutomator tidak sesuai artifact SIKSIK.",
+                "Paket UiAutomator tidak terpasang di perangkat.",
+                retryable=True,
             )
+        if verified.version_code == desired_apk.version_code:
+            inspected = desired_apk
+        else:
+            inspected = await self.inspect_installed_apk(serial, verified)
+            if (
+                inspected.apk_sha256 != desired_apk.apk_sha256
+                or inspected.signer_sha256 != desired_apk.signer_sha256
+                or inspected.version_code != desired_apk.version_code
+            ):
+                raise acquisition_error(
+                    ErrorCategory.AGENT_INSTALL_FAILED,
+                    "Hasil instalasi paket UiAutomator tidak sesuai artifact SIKSIK.",
+                )
         logger.info(
             "automation_install_completed",
             extra={

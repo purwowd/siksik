@@ -176,18 +176,28 @@ class AgentPackageCoordinator:
                     outcome.runtime_granted_during_install
                 )
             installed = await self._adb.inspect_package(serial, self._config.package_name)
-            inspected = await self.inspect_installed_apk(serial, installed)
-            if (
-                inspected.apk_sha256 != work.desired_apk.apk_sha256
-                or inspected.signer_sha256 != work.desired_apk.signer_sha256
-                or inspected.version_code != work.desired_apk.version_code
-            ):
+            if not installed.installed:
                 raise acquisition_error(
                     ErrorCategory.AGENT_INSTALL_FAILED,
-                    "Hasil instalasi Android agent tidak sesuai artifact SIKSIK.",
+                    "Paket Android agent tidak terpasang di perangkat.",
+                    retryable=True,
                 )
-            work.installed_package = installed
-            work.installed_apk = inspected
+            if installed.version_code == work.desired_apk.version_code:
+                work.installed_package = installed
+                work.installed_apk = work.desired_apk
+            else:
+                inspected = await self.inspect_installed_apk(serial, installed)
+                if (
+                    inspected.apk_sha256 != work.desired_apk.apk_sha256
+                    or inspected.signer_sha256 != work.desired_apk.signer_sha256
+                    or inspected.version_code != work.desired_apk.version_code
+                ):
+                    raise acquisition_error(
+                        ErrorCategory.AGENT_INSTALL_FAILED,
+                        "Hasil instalasi Android agent tidak sesuai artifact SIKSIK.",
+                    )
+                work.installed_package = installed
+                work.installed_apk = inspected
         except AcquisitionError as exc:
             logger.warning(
                 "agent_install_failed",
@@ -671,27 +681,66 @@ class AgentAccessCoordinator:
                         "access_state": state.value,
                     },
                 )
-            if state == SpecialAccessState.UNAVAILABLE:
-                if is_required:
-                    raise acquisition_error(
-                        ErrorCategory.DEVICE_UNSUPPORTED,
-                        "Special access wajib belum didukung Android agent.",
+                # A failed shell grant is not a user refusal. Re-probe the real state
+                # before falling back to the app-owned Izinkan/Tolak dialog.
+                if state in {SpecialAccessState.UNAVAILABLE, SpecialAccessState.DENIED}:
+                    state = await self._adb.special_access_state(
+                        serial,
+                        self._config.package_name,
+                        access,
+                        component=component,
+                        user_id=user_id,
                     )
-                continue
-            if state == SpecialAccessState.DENIED:
-                if is_required:
-                    raise acquisition_error(
-                        ErrorCategory.ACCESS_DENIED,
-                        "Special access Android ditolak.",
+                    work.special_access[access.value] = state.value
+            if access == SpecialAccessKind.MANAGE_ALL_FILES and callable(
+                grant_manage_all_files := getattr(
+                    self._adb,
+                    "grant_manage_all_files",
+                    None,
+                )
+            ):
+                try:
+                    state = await grant_manage_all_files(
+                        serial,
+                        self._config.package_name,
+                        user_id=user_id,
                     )
-                continue
-            await self._adb.open_special_access_settings(
+                except AcquisitionError as exc:
+                    logger.warning(
+                        "agent_manage_all_files_adb_grant_failed",
+                        extra={
+                            "request_id": request_id,
+                            "session_id": session_id,
+                            "device_ref": device_ref(serial),
+                            "error_category": exc.category.value,
+                        },
+                    )
+                work.special_access[access.value] = state.value
+                if state == SpecialAccessState.GRANTED:
+                    continue
+                if state in {SpecialAccessState.UNAVAILABLE, SpecialAccessState.DENIED}:
+                    state = await self._adb.special_access_state(
+                        serial,
+                        self._config.package_name,
+                        access,
+                        component=component,
+                        user_id=user_id,
+                    )
+                    work.special_access[access.value] = state.value
+            dialog_opened = await self._relaunch_for_special_access_dialog(
                 serial,
-                self._config.package_name,
+                session_id,
+                work,
                 access,
-                user_id=user_id,
-                component=component,
             )
+            if not dialog_opened:
+                await self._adb.open_special_access_settings(
+                    serial,
+                    self._config.package_name,
+                    access,
+                    user_id=user_id,
+                    component=component,
+                )
             await publish_awaiting(
                 message=SPECIAL_ACCESS_WAIT_MESSAGES.get(access),
             )
@@ -752,6 +801,49 @@ class AgentAccessCoordinator:
                         "state": access.value,
                     },
                 )
+
+    async def _relaunch_for_special_access_dialog(
+        self,
+        serial: str,
+        session_id: str,
+        work: BootstrapWorkingState,
+        access: SpecialAccessKind,
+    ) -> bool:
+        if work.token is None or work.token_expires_at is None:
+            return False
+        try:
+            await self._adb.start_activity(
+                serial,
+                self._config.component,
+                {
+                    "session_id": session_id,
+                    "session_token": work.token,
+                    "token_expires_at_epoch_ms": int(
+                        work.token_expires_at.timestamp() * 1000
+                    ),
+                    "request_special_access": access.value,
+                },
+            )
+        except AcquisitionError as exc:
+            logger.warning(
+                "agent_special_access_dialog_launch_failed",
+                extra={
+                    "session_id": session_id,
+                    "device_ref": device_ref(serial),
+                    "state": access.value,
+                    "error_category": exc.category.value,
+                },
+            )
+            return False
+        logger.info(
+            "agent_special_access_dialog_launched",
+            extra={
+                "session_id": session_id,
+                "device_ref": device_ref(serial),
+                "state": access.value,
+            },
+        )
+        return True
 
     async def _settle_notification_listener(
         self,

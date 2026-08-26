@@ -23,7 +23,7 @@ from app.acquisition.install_policy import (
     next_install_attempt,
     oem_install_guidance,
 )
-from app.acquisition.process import ProcessResult, run_process
+from app.acquisition.process import ProcessLineCallback, ProcessResult, run_process
 
 logger = logging.getLogger("siksik.acquisition.adb")
 
@@ -580,6 +580,7 @@ class AsyncAdbTransport:
         operation: str,
         timeout: float | None = None,
         check: bool = True,
+        on_stdout_line: ProcessLineCallback | None = None,
     ) -> ProcessResult:
         if not args:
             raise acquisition_error(ErrorCategory.VALIDATION_ERROR, "Perintah ADB kosong.")
@@ -587,15 +588,20 @@ class AsyncAdbTransport:
         if serial is not None:
             argv.extend(["-s", validate_serial(serial)])
         argv.extend(str(value) for value in args)
+        runner_kwargs = {
+            "timeout": timeout or self._timeout_seconds,
+            "check": False,
+            "output_limit_bytes": self._output_limit_bytes,
+            "not_found_category": ErrorCategory.ADB_NOT_FOUND,
+            "timeout_category": ErrorCategory.ADB_TIMEOUT,
+            "failure_category": ErrorCategory.ADB_COMMAND_FAILED,
+            "operation": operation,
+        }
+        if on_stdout_line is not None:
+            runner_kwargs["on_stdout_line"] = on_stdout_line
         result = await self._runner(
             argv,
-            timeout=timeout or self._timeout_seconds,
-            check=False,
-            output_limit_bytes=self._output_limit_bytes,
-            not_found_category=ErrorCategory.ADB_NOT_FOUND,
-            timeout_category=ErrorCategory.ADB_TIMEOUT,
-            failure_category=ErrorCategory.ADB_COMMAND_FAILED,
-            operation=operation,
+            **runner_kwargs,
         )
         if check and result.returncode != 0:
             raise self._categorized_command_error(result, operation)
@@ -1094,6 +1100,7 @@ class AsyncAdbTransport:
         test_class: str,
         arguments: Mapping[str, str | int],
         timeout: float,
+        on_stdout_line: ProcessLineCallback | None = None,
     ) -> ProcessResult:
         if (
             not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]{1,254}/[A-Za-z][A-Za-z0-9_.]{1,254}", runner_component)
@@ -1125,6 +1132,7 @@ class AsyncAdbTransport:
             operation="social_ui_automation",
             timeout=timeout,
             check=False,
+            on_stdout_line=on_stdout_line,
         )
 
     async def pull_installed_apk(
@@ -1487,7 +1495,9 @@ class AsyncAdbTransport:
         text = f"{result.stdout}\n{result.stderr}".casefold()
         if "allow" in text:
             return SpecialAccessState.GRANTED
-        if "no operations" in text or "unknown operation" in text:
+        if "no operations" in text:
+            return SpecialAccessState.NOT_GRANTED
+        if "unknown operation" in text:
             return SpecialAccessState.UNAVAILABLE
         return SpecialAccessState.NOT_GRANTED
 
@@ -2458,6 +2468,55 @@ class AsyncAdbTransport:
             user_id=active_user_id,
         )
 
+    async def grant_manage_all_files(
+        self,
+        serial: str,
+        package_name: str,
+        *,
+        user_id: int | None = None,
+    ) -> SpecialAccessState:
+        validate_package_name(package_name)
+        active_user_id = await self.current_user_id(serial) if user_id is None else user_id
+        if not 0 <= active_user_id <= 100_000:
+            raise acquisition_error(ErrorCategory.VALIDATION_ERROR, "Android user tidak valid.")
+        current = await self.special_access_state(
+            serial,
+            package_name,
+            SpecialAccessKind.MANAGE_ALL_FILES,
+            user_id=active_user_id,
+        )
+        if current == SpecialAccessState.GRANTED:
+            return current
+        result = await self.run(
+            serial,
+            [
+                "shell",
+                "cmd",
+                "appops",
+                "set",
+                "--user",
+                str(active_user_id),
+                package_name,
+                "MANAGE_EXTERNAL_STORAGE",
+                "allow",
+            ],
+            operation="all_files_access_grant",
+            check=False,
+        )
+        if result.returncode != 0:
+            text = f"{result.stdout}\n{result.stderr}".casefold()
+            if "unknown operation" in text or "unknown command" in text:
+                return SpecialAccessState.UNAVAILABLE
+            if "security exception" in text or "permission denial" in text:
+                return SpecialAccessState.DENIED
+            return self._unavailable_or_raise(result, "all_files_access_grant")
+        return await self.special_access_state(
+            serial,
+            package_name,
+            SpecialAccessKind.MANAGE_ALL_FILES,
+            user_id=active_user_id,
+        )
+
     async def open_special_access_settings(
         self,
         serial: str,
@@ -2470,15 +2529,13 @@ class AsyncAdbTransport:
         validate_package_name(package_name)
         if user_id is not None and not 0 <= user_id <= 100_000:
             raise acquisition_error(ErrorCategory.VALIDATION_ERROR, "Android user tidak valid.")
-        if access == SpecialAccessKind.NOTIFICATION_LISTENER:
-            raise acquisition_error(
-                ErrorCategory.VALIDATION_ERROR,
-                "Notification Listener hanya boleh diaktifkan melalui ADB terverifikasi.",
-            )
         if component is not None:
             validate_component_name(component, package_name)
         actions = {
             SpecialAccessKind.ACCESSIBILITY: "android.settings.ACCESSIBILITY_SETTINGS",
+            SpecialAccessKind.NOTIFICATION_LISTENER: (
+                "android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"
+            ),
             SpecialAccessKind.MANAGE_ALL_FILES: (
                 "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION"
             ),
@@ -2496,6 +2553,22 @@ class AsyncAdbTransport:
                     "android.settings.ACCESSIBILITY_DETAILS_SETTINGS",
                     "--ecn",
                     "android.intent.extra.COMPONENT_NAME",
+                    component,
+                ],
+                operation="special_access_settings_open",
+                check=False,
+            )
+            if self._activity_started(details):
+                return
+        if access == SpecialAccessKind.NOTIFICATION_LISTENER and component is not None:
+            details = await self.run(
+                serial,
+                [
+                    *launch,
+                    "-a",
+                    "android.settings.NOTIFICATION_LISTENER_DETAIL_SETTINGS",
+                    "--ecn",
+                    "android.provider.extra.NOTIFICATION_LISTENER_COMPONENT_NAME",
                     component,
                 ],
                 operation="special_access_settings_open",

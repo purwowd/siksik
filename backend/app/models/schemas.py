@@ -224,6 +224,17 @@ class SessionProgress(ResponseModel):
     agent_error_category: str | None = None
     runtime_permissions: dict[str, str] | None = None
     special_access: dict[str, str] | None = None
+    crawl_state: str | None = Field(default=None, max_length=64)
+    crawl_source: str | None = Field(default=None, max_length=64)
+    crawl_target: str | None = Field(default=None, max_length=255)
+    crawl_scope: str | None = Field(default=None, max_length=64)
+    crawl_stage: str | None = Field(default=None, max_length=64)
+    crawl_attempt: int | None = Field(default=None, ge=0, le=32)
+    crawl_attempt_state: str | None = Field(default=None, max_length=32)
+    crawl_failure_class: str | None = Field(default=None, max_length=32)
+    crawl_reason: str | None = Field(default=None, max_length=128)
+    crawl_scroll_count: int | None = Field(default=None, ge=0, le=2_000)
+    crawl_screenshot_count: int | None = Field(default=None, ge=0, le=48)
     selection_state: str | None = None
     selection_revision: int | None = Field(default=None, ge=1)
     selection_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")

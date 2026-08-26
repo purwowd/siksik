@@ -167,9 +167,12 @@ class CdpWebSocket:
         self._writer.write(frame)
         await self._writer.drain()
 
-    async def _read_exact(self, size: int) -> bytes:
+    async def _read_exact(self, size: int, timeout: float = 2.0) -> bytes:
         while len(self._buf) < size:
-            chunk = await self._reader.read(max(4096, size - len(self._buf)))
+            chunk = await asyncio.wait_for(
+                self._reader.read(max(4096, size - len(self._buf))),
+                timeout=timeout,
+            )
             if not chunk:
                 break
             self._buf.extend(chunk)
@@ -177,37 +180,46 @@ class CdpWebSocket:
         del self._buf[:size]
         return result
 
-    async def recv(self) -> dict[str, Any] | None:
-        header = await self._read_exact(2)
-        if len(header) < 2:
-            return None
-        opcode = header[0] & 0x0F
-        length = header[1] & 0x7F
-        masked = bool(header[1] & 0x80)
-        if length == 126:
-            ext = await self._read_exact(2)
-            length = int.from_bytes(ext, "big")
-        elif length == 127:
-            ext = await self._read_exact(8)
-            length = int.from_bytes(ext, "big")
-        mask = await self._read_exact(4) if masked else b""
-        payload = bytearray(await self._read_exact(length))
-        if masked:
-            for index in range(len(payload)):
-                payload[index] ^= mask[index % 4]
-        if opcode in {0x8}:
-            return None
-        if opcode in {0x9, 0xA}:
-            return await self.recv()
+    async def recv(self, timeout: float = 2.0) -> dict[str, Any] | None:
         try:
-            parsed = json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            header = await self._read_exact(2, timeout=timeout)
+            if len(header) < 2:
+                return None
+            opcode = header[0] & 0x0F
+            length = header[1] & 0x7F
+            masked = bool(header[1] & 0x80)
+            if length == 126:
+                ext = await self._read_exact(2, timeout=timeout)
+                length = int.from_bytes(ext, "big")
+            elif length == 127:
+                ext = await self._read_exact(8, timeout=timeout)
+                length = int.from_bytes(ext, "big")
+            mask = await self._read_exact(4, timeout=timeout) if masked else b""
+            payload = bytearray(await self._read_exact(length, timeout=timeout))
+            if masked:
+                for index in range(len(payload)):
+                    payload[index] ^= mask[index % 4]
+            if opcode in {0x8}:
+                return None
+            if opcode in {0x9, 0xA}:
+                return await self.recv(timeout=timeout)
+            try:
+                parsed = json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None
+            return parsed if isinstance(parsed, dict) else None
+        except (asyncio.TimeoutError, ConnectionError, OSError):
             return None
-        return parsed if isinstance(parsed, dict) else None
 
-    async def recv_id(self, message_id: int, *, max_messages: int = 80) -> dict[str, Any] | None:
+    async def recv_id(
+        self,
+        message_id: int,
+        *,
+        max_messages: int = 80,
+        timeout: float = 2.0,
+    ) -> dict[str, Any] | None:
         for _ in range(max_messages):
-            message = await self.recv()
+            message = await self.recv(timeout=timeout)
             if message is None:
                 return None
             if message.get("id") == message_id:
@@ -224,13 +236,16 @@ class CdpWebSocket:
 
 async def fetch_tabs(host: str, port: int, *, timeout: float) -> list[dict[str, Any]]:
     url = f"http://{host}:{port}/json"
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        payload = response.json()
-    if not isinstance(payload, list):
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            payload = response.json()
+        if not isinstance(payload, list):
+            return []
+        return [item for item in payload if isinstance(item, dict)]
+    except (httpx.HTTPError, OSError, ValueError):
         return []
-    return [item for item in payload if isinstance(item, dict)]
 
 
 async def wait_devtools_ready(host: str, port: int, *, attempts: int = 10) -> bool:
@@ -255,7 +270,7 @@ async def _page_evaluate(ws: CdpWebSocket, session_id: str, expression: str, mes
             "params": {"expression": expression, "returnByValue": True},
         }
     )
-    result = await ws.recv_id(message_id)
+    result = await ws.recv_id(message_id, timeout=2.5)
     if not result:
         return None
     return result.get("result", {}).get("result", {}).get("value")
@@ -270,7 +285,7 @@ async def _open_inspect_page(
     settle_s: float,
 ) -> tuple[str, str] | None:
     await browser_ws.send({"id": create_id, "method": "Target.createTarget", "params": {"url": url}})
-    created = await browser_ws.recv_id(create_id)
+    created = await browser_ws.recv_id(create_id, timeout=2.5)
     if not created or "result" not in created:
         return None
     target_id = str(created["result"].get("targetId") or "")
@@ -283,7 +298,7 @@ async def _open_inspect_page(
             "params": {"targetId": target_id, "flatten": True},
         }
     )
-    attached = await browser_ws.recv_id(attach_id)
+    attached = await browser_ws.recv_id(attach_id, timeout=2.5)
     if not attached or "result" not in attached:
         return None
     session_id = str(attached["result"].get("sessionId") or "")
@@ -301,6 +316,7 @@ async def extract_tab_histories(
     timeout: float,
 ) -> list[BrowserHistoryItem]:
     items: list[BrowserHistoryItem] = []
+    tab_timeout = min(timeout, 1.5)
     for tab in tabs:
         tab_id = str(tab.get("id") or "")
         if not tab_id:
@@ -308,10 +324,10 @@ async def extract_tab_histories(
         ws: CdpWebSocket | None = None
         try:
             ws = await CdpWebSocket.connect(
-                host, port, f"/devtools/page/{tab_id}", timeout=min(timeout, 8.0)
+                host, port, f"/devtools/page/{tab_id}", timeout=tab_timeout
             )
             await ws.send({"id": 1, "method": "Page.getNavigationHistory"})
-            result = await ws.recv_id(1)
+            result = await ws.recv_id(1, timeout=tab_timeout)
         except (OSError, ConnectionError, asyncio.TimeoutError):
             continue
         finally:

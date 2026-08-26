@@ -6,6 +6,10 @@ import { ACTIVE } from "@/shared/constants";
 export function CaseFlowBar({ session }: { session: SessionSummary | null }) {
   const live = !!session && ACTIVE.has(session.status);
   const pct = Math.max(0, Math.min(100, session?.progress?.percent ?? 0));
+  const scope = session?.progress?.crawl_scope?.replaceAll("_", " ");
+  const attempt = session?.progress?.crawl_attempt;
+  const attemptState = session?.progress?.crawl_attempt_state;
+  const socialCrawlActive = session?.progress?.crawl_state === "social_automation";
 
   return (
     <section className={`ent-case-flow ent-glass${live ? " is-live" : ""}`} aria-label="Alur kasus">
@@ -52,6 +56,16 @@ export function CaseFlowBar({ session }: { session: SessionSummary | null }) {
               {live && (
                 <span className="ent-meta-chip pct" title="Progres pipeline">
                   {pct.toFixed(0)}%
+                </span>
+              )}
+              {live && socialCrawlActive && scope && (
+                <span className="ent-meta-chip" title="Scope crawl sosial aktif">
+                  {scope}
+                </span>
+              )}
+              {live && socialCrawlActive && attemptState && (
+                <span className="ent-meta-chip mono" title="State percobaan crawl sosial">
+                  {attempt && attempt > 0 ? `#${attempt} · ` : ""}{attemptState}
                 </span>
               )}
             </>

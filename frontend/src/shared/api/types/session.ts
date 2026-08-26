@@ -24,6 +24,17 @@ export interface SessionProgress {
   whatsapp_messages?: number;
   whatsapp_conversations?: number;
   whatsapp_parse_skipped?: number;
+  crawl_state?: string | null;
+  crawl_source?: string | null;
+  crawl_target?: string | null;
+  crawl_scope?: string | null;
+  crawl_stage?: string | null;
+  crawl_attempt?: number | null;
+  crawl_attempt_state?: string | null;
+  crawl_failure_class?: string | null;
+  crawl_reason?: string | null;
+  crawl_scroll_count?: number | null;
+  crawl_screenshot_count?: number | null;
   authorized_by?: string | null;
   authorized_at?: string | null;
   authorize_note?: string | null;
