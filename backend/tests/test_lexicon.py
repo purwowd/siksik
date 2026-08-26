@@ -66,3 +66,36 @@ def test_text_l1_no_ganti_fp():
         "Kami ganti jadwal rapat saja", settings.risk_keywords
     )
     assert findings == []
+
+
+@pytest.mark.unit
+def test_job_ad_instansi_pemerintah_is_not_anti_pemerintah():
+    text = (
+        "STAFF BAGIAN PENGURUSAN PERIJINAN. "
+        "Memiliki kemampuan komunikasi yang baik dengan instansi pemerintah maupun klien. "
+        "Terbiasa mengunggah dokumen pada sistem pemerintah. "
+        "Memahami regulasi BKPM, Kementerian Hukum, DJP."
+    )
+    assert match_keywords(text) == []
+    assert analyze_text_l1_l2(text, settings.risk_keywords) == []
+    findings = ocr_findings_from_text(text, backend="fake")
+    assert not any("pemerintah" in f["label"].lower() for f in findings)
+    assert not any(f["category"] == "anti_pemerintah" for f in findings)
+
+
+@pytest.mark.unit
+def test_anti_pemerintah_and_ganti_presiden_still_match_as_phrases():
+    from app.services.lexicon import keyword_match_terms
+
+    assert keyword_match_terms("anti pemerintah") == ["anti pemerintah"]
+    assert keyword_match_terms("ganti presiden") == ["ganti presiden"]
+    assert "anti pemerintah" in [
+        h.lower() for h in match_keywords("Spanduk anti pemerintah di jalan")
+    ]
+    assert "ganti presiden" in [
+        h.lower() for h in match_keywords("SERIBU KALI GANTI PRESIDEN")
+    ]
+    text_hits = analyze_text_l1_l2(
+        "Ajak aksi anti pemerintah malam ini", settings.risk_keywords
+    )
+    assert any("anti pemerintah" in f["label"].lower() for f in text_hits)

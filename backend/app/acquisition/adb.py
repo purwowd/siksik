@@ -319,16 +319,21 @@ def parse_available_data_bytes(output: str) -> int | None:
 
 def parse_device_unlocked(output: str) -> bool | None:
     lowered = output.casefold()
+    # Do not use showingAndNotOccluded: MIUI can keep it true after unlock.
     locked_markers = (
         "mshowinglockscreen=true",
+        "mdreaminglockscreen=true",
         "mkeyguardshowing=true",
         "isstatusbarkeyguard=true",
+        "misshowing=true",
         "showing=true occluded=false",
     )
     unlocked_markers = (
         "mshowinglockscreen=false",
+        "mdreaminglockscreen=false",
         "mkeyguardshowing=false",
         "isstatusbarkeyguard=false",
+        "misshowing=false",
         "showing=false",
     )
     if any(marker in lowered for marker in locked_markers):

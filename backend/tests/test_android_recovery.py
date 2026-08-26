@@ -17,6 +17,7 @@ from app.acquisition.android_recovery.contracts import (
 )
 from app.acquisition.android_recovery.gateway import (
     DiscoveryResult,
+    PATH_SHA256_SCRIPT,
     RecoveryAdbGateway,
     TransferResult,
 )
@@ -30,7 +31,7 @@ from app.acquisition.android_recovery.parsers import (
     parse_gallery_index,
     parse_media_store_rows,
 )
-from app.acquisition.android_recovery.paths import validate_shared_path
+from app.acquisition.android_recovery.paths import recovery_file_source, validate_shared_path
 from app.acquisition.android_recovery.service import (
     AndroidRecoveryService,
     cleanup_recovery_staging,
@@ -212,6 +213,9 @@ def test_mediastore_parser_and_trash_path_policy():
     )
     assert is_control_file("/sdcard/Android/data/vendor/.Trash/trash_bin.db")
     assert not is_trash_path("/sdcard/DCIM/current.jpg")
+    assert recovery_file_source("filesystem_trash") == "recovered_trash"
+    assert recovery_file_source("classic_thumbnail") == "recovered_cache"
+    assert recovery_file_source("gallery_cache") == "recovered_cache"
 
 
 @pytest.mark.unit
@@ -962,3 +966,209 @@ def test_recovery_uses_existing_human_readable_report_layout():
     assert "Ketelanjangan / konten eksplisit" in html
     assert "Recovery sampah Android (Penuh)" in html
     assert "Recovery sampah Android: 1 item · 1024 bytes · selesai" in html
+
+
+@pytest.mark.unit
+async def test_file_sha256_keeps_dashed_filename_as_single_shell_argument():
+    captured: dict[str, object] = {}
+    dashed = "/sdcard/Widia/Form - New supplier.docx"
+
+    class Transport:
+        async def run(self, _serial, args, **kwargs):
+            captured["args"] = list(args)
+            captured["operation"] = kwargs.get("operation")
+            return ProcessResult(tuple(args), 0, f"{'ab' * 32}  {args[-1]}\n", "", False)
+
+    gateway = RecoveryAdbGateway(  # type: ignore[arg-type]
+        Transport(),
+        output_limit_bytes=1024,
+    )
+    digest = await gateway.file_sha256("device-1", dashed, ["/sdcard"])
+
+    assert digest == "ab" * 32
+    assert captured["args"][:4] == ["exec-out", "sh", "-c", PATH_SHA256_SCRIPT]
+    assert captured["args"][-1] == (
+        "/storage/emulated/0/Widia/Form - New supplier.docx"
+    )
+    assert captured["operation"] == "recovery_file_sha256"
+    assert "-" not in captured["args"]
+
+
+@pytest.mark.unit
+async def test_disk_cache_does_not_hash_live_files_of_unrelated_size(tmp_path: Path):
+    preview = png_bytes()
+
+    class DiskCacheGateway(FakeGateway):
+        def __init__(self) -> None:
+            super().__init__(payload=b"trash-bytes")
+            self.preview = preview
+            self.sha_calls: list[str] = []
+
+        async def media_store_rows(self, serial: str, *, trashed_only: bool, timeout: float):
+            if not trashed_only:
+                return (
+                    [
+                        MediaStoreRow(
+                            media_id="99",
+                            path="/sdcard/Widia/Form - New supplier.docx",
+                            display_name="Form - New supplier.docx",
+                            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            size_bytes=2_000_000,
+                            expires_epoch_s=None,
+                            is_trashed=False,
+                        )
+                    ],
+                    False,
+                    False,
+                )
+            return await super().media_store_rows(
+                serial, trashed_only=trashed_only, timeout=timeout
+            )
+
+        async def discover_disk_cache_jpegs(self, _serial: str, _roots, *, timeout: float):
+            return DiscoveryResult(
+                (
+                    "/sdcard/Android/data/com.miui.gallery/files/gallery_disk_cache/small_size/abc.0",
+                ),
+                False,
+                False,
+            )
+
+        async def file_sha256(self, _serial: str, path: str, _roots):
+            self.sha_calls.append(path)
+            return None
+
+        async def transfer(
+            self,
+            serial: str,
+            *,
+            remote_path: str | None,
+            content_uri: str | None,
+            roots,
+            destination: Path,
+            max_bytes: int,
+            timeout: float,
+        ):
+            if remote_path and "gallery_disk_cache" in remote_path:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(self.preview)
+                self.transfer_calls += 1
+                return TransferResult(True, "adb_pull", len(self.preview))
+            return await super().transfer(
+                serial,
+                remote_path=remote_path,
+                content_uri=content_uri,
+                roots=roots,
+                destination=destination,
+                max_bytes=max_bytes,
+                timeout=timeout,
+            )
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    gateway = DiskCacheGateway()
+
+    async def on_progress(*_args, **_kwargs):
+        return None
+
+    result = await AndroidRecoveryService(gateway).recover(  # type: ignore[arg-type]
+        session_id="session-disk-cache-skip-hash",
+        serial="device-1",
+        mode=AcquisitionMode.QUICK,
+        staging=staging,
+        on_progress=on_progress,
+        request_id=None,
+    )
+    assert gateway.sha_calls == []
+    assert any(
+        item.classification == "orphan_disk_cache" for item in result.manifest.artifacts
+    )
+
+
+@pytest.mark.unit
+async def test_disk_cache_skips_blob_when_live_file_hash_matches(tmp_path: Path):
+    preview = png_bytes()
+
+    class DiskCacheGateway(FakeGateway):
+        def __init__(self) -> None:
+            super().__init__(payload=b"trash-bytes")
+            self.preview = preview
+
+        async def media_store_rows(self, serial: str, *, trashed_only: bool, timeout: float):
+            if not trashed_only:
+                return (
+                    [
+                        MediaStoreRow(
+                            media_id="99",
+                            path="/sdcard/DCIM/Camera/live.png",
+                            display_name="live.png",
+                            mime_type="image/png",
+                            size_bytes=len(self.preview),
+                            expires_epoch_s=None,
+                            is_trashed=False,
+                        )
+                    ],
+                    False,
+                    False,
+                )
+            return await super().media_store_rows(
+                serial, trashed_only=trashed_only, timeout=timeout
+            )
+
+        async def discover_disk_cache_jpegs(self, _serial: str, _roots, *, timeout: float):
+            return DiscoveryResult(
+                (
+                    "/sdcard/Android/data/com.miui.gallery/files/gallery_disk_cache/small_size/abc.0",
+                ),
+                False,
+                False,
+            )
+
+        async def file_sha256(self, _serial: str, path: str, _roots):
+            if path.endswith("live.png"):
+                return hashlib.sha256(self.preview).hexdigest()
+            return None
+
+        async def transfer(
+            self,
+            serial: str,
+            *,
+            remote_path: str | None,
+            content_uri: str | None,
+            roots,
+            destination: Path,
+            max_bytes: int,
+            timeout: float,
+        ):
+            if remote_path and "gallery_disk_cache" in remote_path:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(self.preview)
+                self.transfer_calls += 1
+                return TransferResult(True, "adb_pull", len(self.preview))
+            return await super().transfer(
+                serial,
+                remote_path=remote_path,
+                content_uri=content_uri,
+                roots=roots,
+                destination=destination,
+                max_bytes=max_bytes,
+                timeout=timeout,
+            )
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    async def on_progress(*_args, **_kwargs):
+        return None
+
+    result = await AndroidRecoveryService(DiskCacheGateway()).recover(  # type: ignore[arg-type]
+        session_id="session-disk-cache-dup",
+        serial="device-1",
+        mode=AcquisitionMode.QUICK,
+        staging=staging,
+        on_progress=on_progress,
+        request_id=None,
+    )
+    assert not any(
+        item.classification == "orphan_disk_cache" for item in result.manifest.artifacts
+    )

@@ -13,6 +13,9 @@ STORAGE_UUID = re.compile(r"^[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}$")
 SAFE_EXTENSION = re.compile(r"^\.[A-Za-z0-9]{1,12}$")
 RECOVERY_ROOT = "recovered_trash"
 RECOVERY_BUCKETS = frozenset({"trash", "previews"})
+CACHE_RECOVERY_SOURCES = frozenset({"gallery_cache", "classic_thumbnail", "thumbdata"})
+RECOVERY_CACHE_SOURCE = "recovered_cache"
+RECOVERY_TRASH_SOURCE = "recovered_trash"
 
 
 def canonical_shared_path(value: str) -> str:
@@ -46,6 +49,13 @@ def validate_shared_path(value: str, roots: Sequence[str]) -> str:
         ErrorCategory.VALIDATION_ERROR,
         "Path recovery berada di luar shared storage.",
     )
+
+
+def recovery_file_source(recovery_source: str | None) -> str:
+    value = getattr(recovery_source, "value", recovery_source) or ""
+    if value in CACHE_RECOVERY_SOURCES:
+        return RECOVERY_CACHE_SOURCE
+    return RECOVERY_TRASH_SOURCE
 
 
 def stable_candidate_id(source: str, identity: str) -> str:

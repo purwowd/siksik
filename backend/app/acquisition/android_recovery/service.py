@@ -16,6 +16,7 @@ from typing import Sequence
 from app.acquisition.adb import AsyncAdbTransport
 from app.acquisition.android_recovery.contracts import (
     MediaIndex,
+    MediaStoreRow,
     RecoveryArtifactV1,
     RecoveryConfidence,
     RecoveryManifestV1,
@@ -167,6 +168,13 @@ class AndroidRecoveryService:
                 artifacts.append(artifact)
 
         if policy.recover_cache:
+            await on_progress(
+                SessionStatus.ACQUIRING,
+                70.0,
+                f"Memulihkan pratinjau cache Android ({mode.value})",
+                recovery_state="scanning",
+                recovery_mode=mode.value,
+            )
             await self._recover_cache_previews(
                 serial,
                 roots,
@@ -452,7 +460,7 @@ class AndroidRecoveryService:
                 roots,
                 staging,
                 temp_root,
-                media_index,
+                rows,
                 policy,
                 artifacts,
                 stats,
@@ -710,7 +718,7 @@ class AndroidRecoveryService:
         roots: Sequence[str],
         staging: Path,
         temp_root: Path,
-        media_index: MediaIndex,
+        rows: Sequence[MediaStoreRow],
         policy: RecoveryPolicy,
         artifacts: list[RecoveryArtifactV1],
         stats: MutableStats,
@@ -721,7 +729,9 @@ class AndroidRecoveryService:
 
         Infinix/Samsung keep Gallery3D imgcache*.idx; that path is unchanged.
         Skip blobs whose hash matches a live MediaStore file so current photos
-        are not re-imported as recovery.
+        are not re-imported as recovery. Hash only live files whose MediaStore
+        size matches a pulled cache blob; hashing every document can stall for
+        minutes on OEM toybox variants.
         """
         discovery = await self._gateway.discover_disk_cache_jpegs(
             serial,
@@ -733,13 +743,7 @@ class AndroidRecoveryService:
         if not discovery.paths:
             return
         live_hashes = set(known_hashes)
-        for path in media_index.paths:
-            try:
-                digest = await self._gateway.file_sha256(serial, path, roots)
-            except AcquisitionError:
-                continue
-            if digest:
-                live_hashes.add(digest)
+        hashed_sizes: set[int] = set()
         for index, remote in enumerate(discovery.paths):
             if self._budget_reached(policy, artifacts, stats):
                 warnings.add("recovery_budget_truncated")
@@ -768,6 +772,22 @@ class AndroidRecoveryService:
             image = max(images, key=lambda item: item.end - item.offset)
             encoded = raw[image.offset : image.end]
             digest = hashlib.sha256(encoded).hexdigest()
+            blob_size = len(encoded)
+            if blob_size not in hashed_sizes:
+                hashed_sizes.add(blob_size)
+                for row in rows:
+                    if not row.path or row.size_bytes != blob_size:
+                        continue
+                    try:
+                        live_digest = await self._gateway.file_sha256(
+                            serial,
+                            row.path,
+                            roots,
+                        )
+                    except AcquisitionError:
+                        continue
+                    if live_digest:
+                        live_hashes.add(live_digest)
             if digest in live_hashes:
                 stats.duplicate_payloads += 1
                 continue

@@ -57,6 +57,13 @@ while IFS= read -r -d '' dir; do
 done
 """.strip()
 
+# Keep the path in $1. Passing names containing " - " directly to
+# sha256sum can make some Android toybox builds treat '-' as stdin and hang.
+PATH_SHA256_SCRIPT = r'sha256sum -- "$1"'
+PATH_IS_FILE_SCRIPT = r'test -f "$1"'
+PATH_IS_DIR_SCRIPT = r'test -d "$1"'
+PATH_STAT_SIZE_SCRIPT = r'stat -c %s "$1"'
+
 
 @dataclass(frozen=True, slots=True)
 class DiscoveryResult:
@@ -230,16 +237,16 @@ class RecoveryAdbGateway:
         roots: Sequence[str],
     ) -> str | None:
         try:
-            validated = validate_shared_path(path, roots)
+            result = await self._run_path_script(
+                serial,
+                path,
+                roots,
+                PATH_SHA256_SCRIPT,
+                "recovery_file_sha256",
+                timeout=20.0,
+            )
         except AcquisitionError:
             return None
-        result = await self._transport.run(
-            serial,
-            ["shell", "sha256sum", device_shared_path(validated)],
-            operation="recovery_file_sha256",
-            timeout=20.0,
-            check=False,
-        )
         if result.returncode != 0 or not result.stdout:
             return None
         token = result.stdout.strip().split(None, 1)[0].lower()
@@ -288,33 +295,59 @@ class RecoveryAdbGateway:
                     failed = True
         return DiscoveryResult(tuple(sorted(found)), truncated, failed)
 
-    async def is_file(self, serial: str, path: str, roots: Sequence[str]) -> bool:
+    async def _run_path_script(
+        self,
+        serial: str,
+        path: str,
+        roots: Sequence[str],
+        script: str,
+        operation: str,
+        *,
+        timeout: float | None = None,
+    ):
         validated = validate_shared_path(path, roots)
-        result = await self._transport.run(
+        return await self._transport.run(
             serial,
-            ["shell", "test", "-f", device_shared_path(validated)],
-            operation="recovery_path_probe",
+            [
+                "exec-out",
+                "sh",
+                "-c",
+                script,
+                "siksik-recovery",
+                device_shared_path(validated),
+            ],
+            operation=operation,
+            timeout=timeout,
             check=False,
+        )
+
+    async def is_file(self, serial: str, path: str, roots: Sequence[str]) -> bool:
+        result = await self._run_path_script(
+            serial,
+            path,
+            roots,
+            PATH_IS_FILE_SCRIPT,
+            "recovery_path_probe",
         )
         return result.returncode == 0
 
     async def is_directory(self, serial: str, path: str, roots: Sequence[str]) -> bool:
-        validated = validate_shared_path(path, roots)
-        result = await self._transport.run(
+        result = await self._run_path_script(
             serial,
-            ["shell", "test", "-d", device_shared_path(validated)],
-            operation="recovery_directory_probe",
-            check=False,
+            path,
+            roots,
+            PATH_IS_DIR_SCRIPT,
+            "recovery_directory_probe",
         )
         return result.returncode == 0
 
     async def stat_size(self, serial: str, path: str, roots: Sequence[str]) -> int | None:
-        validated = validate_shared_path(path, roots)
-        result = await self._transport.run(
+        result = await self._run_path_script(
             serial,
-            ["shell", "stat", "-c", "%s", device_shared_path(validated)],
-            operation="recovery_size_probe",
-            check=False,
+            path,
+            roots,
+            PATH_STAT_SIZE_SCRIPT,
+            "recovery_size_probe",
         )
         value = result.stdout.strip()
         return int(value) if result.returncode == 0 and value.isdigit() else None
