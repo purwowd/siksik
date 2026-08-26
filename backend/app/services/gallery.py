@@ -175,6 +175,7 @@ SOURCE_ALBUMS = {
     "whatsapp": "WhatsApp",
     "browser_history_full": "Riwayat Browser (lengkap)",
     "browser_history_partial": "Riwayat Browser (sebagian)",
+    "recovered_cache": "Pratinjau cache",
     "recovered_trash": "Recovered image",
     "ios_hidden": "Photos tersembunyi",
     "ios_recently_deleted": "Baru dihapus",
@@ -186,6 +187,7 @@ SOURCE_FIRST_ALBUMS = STRUCTURED_SOURCES | {
     "gmail",
     "browser_history_full",
     "browser_history_partial",
+    "recovered_cache",
     "recovered_trash",
     "ios_hidden",
     "ios_recently_deleted",
@@ -194,8 +196,11 @@ SOURCE_FIRST_ALBUMS = STRUCTURED_SOURCES | {
 }
 SOCIAL_PACKAGES = {
     "com.instagram.android": "Instagram",
+    "com.instagram.barcelona": "Threads",
     "com.twitter.android": "X",
     "com.facebook.katana": "Facebook",
+    "com.whatsapp": "WhatsApp",
+    "org.telegram.messenger": "Telegram",
 }
 SOCIAL_TEXT_ONLY = {"com.twitter.android", "com.facebook.katana"}
 INSTAGRAM_PACKAGE = "com.instagram.android"
@@ -336,6 +341,10 @@ def is_gallery_media(
     has_screenshot: bool = False,
 ) -> bool:
     """Expose one gallery item per logical record, not transfer companions."""
+    from app.services.acquisition import is_agent_self_capture
+
+    if is_agent_self_capture(path):
+        return False
     del source, mime
     normalized_role = str(role or "").casefold()
     normalized_app = str(source_app or "").casefold()
@@ -584,6 +593,13 @@ def gallery_meta_from_canonical(payload: dict[str, Any]) -> dict[str, Any]:
         str(display_name or ""),
         path_hint,
     )
+    from app.acquisition.source_app_hints import inferred_album_label
+
+    inferred = inferred_album_label(
+        directory_hint=directory_hint if isinstance(directory_hint, str) else None,
+        display_name=display_name if isinstance(display_name, str) else None,
+        path=path_hint,
+    )
     result = {
         "directory_hint": directory_hint if isinstance(directory_hint, str) else None,
         "display_name": display_name if isinstance(display_name, str) else None,
@@ -591,7 +607,8 @@ def gallery_meta_from_canonical(payload: dict[str, Any]) -> dict[str, Any]:
         "date_added": metadata.get("date_added"),
         "date_modified": metadata.get("date_modified"),
         "date_taken": metadata.get("date_taken") or metadata.get("capture_time"),
-        "album": album_leaf(
+        "album": inferred
+        or album_leaf(
             directory_hint if isinstance(directory_hint, str) else None,
             str(display_name or ""),
             str(payload.get("source_kind") or ""),
@@ -658,6 +675,20 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         and meta.get("ios_original_filename")
         else Path(path).name
     )
+    from app.services.acquisition import is_agent_self_capture
+
+    if meta.get("acquisition_self_capture") or is_agent_self_capture(
+        path, str(display_name)
+    ):
+        return None
+    if not source_app:
+        from app.acquisition.source_app_hints import infer_source_app
+
+        source_app = infer_source_app(
+            directory_hint=directory_hint,
+            display_name=str(display_name),
+            path=path,
+        )
     preview_text = _compact_preview(_row_get(row, "preview_text")) or _compact_preview(
         meta.get("preview_text") or meta.get("normalized_text")
     )
@@ -693,16 +724,26 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         and _optional_text(meta.get("conversation_id"))
         and _optional_text(meta.get("message_id"))
     )
+    is_social_crawl = bool(
+        source_app
+        and not meta.get("source_app_inferred")
+        and (
+            social_scope
+            or meta.get("crawl_record_id")
+            or source_l in {"visible_ui", "accessibility_visible_ui"}
+        )
+    )
     presentation = (
         "chat"
         if is_whatsapp_message
         else "text"
-        if source_app_l in SOCIAL_TEXT_ONLY or source_l in BROWSER_HISTORY_SOURCES
+        if (is_social_crawl and source_app_l in SOCIAL_TEXT_ONLY)
+        or source_l in BROWSER_HISTORY_SOURCES
         else "visual"
-        if source_app_l == INSTAGRAM_PACKAGE
+        if is_social_crawl and source_app_l == INSTAGRAM_PACKAGE
         else "file"
     )
-    if source_app:
+    if is_social_crawl:
         display_name = _social_display_name(
             source_app,
             social_scope,
@@ -732,7 +773,7 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         preview_path = _optional_text(_row_get(row, "visual_preview_path"))
         preview_mime = _optional_text(_row_get(row, "visual_preview_mime"))
     origin_path = _origin_path(directory_hint, str(display_name), path)
-    if source_app:
+    if is_social_crawl:
         source_path = source_locator or origin_path
     elif is_whatsapp_message:
         source_path = f"WhatsApp/{display_name}"

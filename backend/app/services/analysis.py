@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from app.core.config import settings
 from app.core.db import db, utcnow
@@ -42,8 +42,49 @@ def _skip_heavy_ocr_for_gallery(
     return not media_text.should_try_ocr(path, origin_hint=origin_hint)
 
 
-def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.lower()).strip()
+def _file_meta(row: Any) -> dict[str, Any]:
+    try:
+        value = json.loads(row["meta_json"] or "{}")
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def media_siblings_by_record(rows: Sequence[Any]) -> dict[str, Any]:
+    """Map a canonical crawl record to its best visual/source attachment."""
+    output: dict[str, Any] = {}
+    for row in rows:
+        meta = _file_meta(row)
+        role = str(meta.get("crawl_artifact_role") or "")
+        record_id = str(meta.get("crawl_record_id") or "")
+        mime = str(row["mime"] or "")
+        if not record_id or role not in {"source_binary", "screenshot"}:
+            continue
+        if not (mime.startswith("image/") or mime.startswith("video/")):
+            continue
+        previous = output.get(record_id)
+        previous_role = (
+            str(_file_meta(previous).get("crawl_artifact_role") or "")
+            if previous is not None
+            else ""
+        )
+        if previous is None or (
+            role == "source_binary" and previous_role != "source_binary"
+        ):
+            output[record_id] = row
+    return output
+
+
+def finding_attachment_row(row: Any, siblings: dict[str, Any]) -> Any:
+    """Attach canonical media findings to the source binary when available."""
+    meta = _file_meta(row)
+    if (
+        str(row["mime"] or "") != CANONICAL_CRAWL_RECORD_MIME
+        or str(meta.get("crawl_artifact_role") or "") != "canonical_record"
+    ):
+        return row
+    sibling = siblings.get(str(meta.get("crawl_record_id") or ""))
+    return sibling if sibling is not None else row
 
 
 def analyze_text_l1_l2(text: str, keywords: list[str]) -> list[dict]:
@@ -455,6 +496,16 @@ async def _analyze_session_body(
         (session_id,),
     )
     findings_count = int(finding_count_row["total"]) if finding_count_row else 0
+    sibling_rows = await db.fetchall(
+        "SELECT id, source, path, sha256, mime, meta_json FROM files "
+        "WHERE session_id = ?",
+        (session_id,),
+    )
+    media_siblings = media_siblings_by_record(sibling_rows)
+    file_identity_by_id = {
+        str(item["id"]): str(item["sha256"] or item["id"])
+        for item in sibling_rows
+    }
 
     # Light inventory/text first (SMS/contacts/JSON), then images, then video.
     # iOS used to OCR all HEIC gallery first → UI stuck at "8/106" for minutes.
@@ -594,6 +645,17 @@ async def _analyze_session_body(
                 meta = json.loads(row["meta_json"] or "{}")
             except (TypeError, json.JSONDecodeError):
                 meta = {}
+            from app.services.acquisition import is_agent_self_capture
+
+            if meta.get("acquisition_self_capture") or is_agent_self_capture(
+                str(row["path"] or ""),
+                (
+                    meta.get("display_name")
+                    if isinstance(meta.get("display_name"), str)
+                    else None
+                ),
+            ):
+                return []
             canonical_text = str(meta.get("canonical_normalized_text") or "").strip()
             cache_key = str(row["sha256"] or "")
             if (
@@ -721,14 +783,15 @@ async def _analyze_session_body(
                 media_captured_at = cm.get("captured_at")
 
             out: list[tuple] = []
+            target = finding_attachment_row(row, media_siblings)
             for f in results:
                 out.append(
                     (
                         str(uuid.uuid4()),
                         session_id,
-                        row["id"],
-                        row["source"],
-                        row["path"],
+                        target["id"],
+                        target["source"],
+                        target["path"],
                         f["category"],
                         f["label"],
                         f["confidence"],
@@ -778,8 +841,10 @@ async def _analyze_session_body(
         filtered: list[tuple[Any, list[tuple]]] = []
         for row, items in results:
             kept: list[tuple] = []
-            ident = str(row["sha256"] or row["id"])
             for item in items:
+                ident = file_identity_by_id.get(
+                    str(item[2]), str(row["sha256"] or row["id"])
+                )
                 key = (ident, str(item[6]))
                 if key in seen_finding_keys:
                     continue

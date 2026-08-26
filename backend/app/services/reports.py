@@ -6,27 +6,25 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.acquisition.device_identity import (
+    hints_from_document,
+    merge_device_identity_hints,
+)
 from app.acquisition.social_ocr import repair_ocr_link_text
+from app.acquisition.source_app_hints import SOCIAL_PACKAGE_LABELS, infer_source_app
 from app.core.branding import PRODUCT_FULL_NAME, PRODUCT_NAME, PRODUCT_TAGLINE
 from app.core.config import settings
 from app.core.db import db
 
-SOCIAL_PACKAGES = {
-    "com.instagram.android": "Instagram",
-    "com.twitter.android": "X / Twitter",
-    "com.facebook.katana": "Facebook",
-}
+SOCIAL_PACKAGES = dict(SOCIAL_PACKAGE_LABELS)
 SOCIAL_SCOPES = {
     "own_profile": "Profil akun",
     "own_posts": "Postingan akun",
     "own_tweets": "Tweet akun",
-    "own_tweets": "Tweet akun",
-    "own_story_archive": "Arsip story",
     "own_story_archive": "Arsip story",
     "own_comments": "Komentar akun",
-    "own_comments": "Komentar akun",
     "own_replies": "Balasan akun",
-    "own_replies": "Balasan akun",
+    "device_media": "Media di perangkat",
 }
 MAX_SOCIAL_REPORT_ITEMS = 500
 MAX_SOCIAL_PREVIEW_CHARS = 2_000
@@ -63,6 +61,7 @@ REPORT_SOURCE_LABELS = {
     "dcim": "Kamera HP",
     "download": "Folder unduhan",
     "recovered_trash": "Sampah / media terhapus",
+    "recovered_cache": "Pratinjau cache galeri",
     "ios_hidden": "Photos Tersembunyi (iOS)",
     "ios_recently_deleted": "Baru Dihapus (iOS)",
     "ios_recovered_cache": "Cache / preview Photos (iOS)",
@@ -972,10 +971,51 @@ def _archive_social_preview(text: object) -> str | None:
     return None
 
 
-def _social_item_preview(scope: str, text: object) -> str | None:
+def _record_source_app(record: dict) -> str | None:
+    existing = record.get("source_app")
+    if isinstance(existing, str) and existing in SOCIAL_PACKAGES:
+        return existing
+    metadata = _record_metadata(record)
+    inferred = infer_source_app(
+        directory_hint=(
+            metadata.get("directory_hint")
+            if isinstance(metadata.get("directory_hint"), str)
+            else None
+        ),
+        display_name=(
+            metadata.get("display_name")
+            if isinstance(metadata.get("display_name"), str)
+            else None
+        ),
+        path=str(record.get("source_locator") or "") or None,
+    )
+    return inferred if inferred in SOCIAL_PACKAGES else None
+
+
+def _record_social_scope(record: dict, package_name: str) -> str | None:
+    metadata = _record_metadata(record)
+    scope = metadata.get("social_scope") or record.get("social_scope")
+    if scope in SOCIAL_SCOPES and scope != "device_media":
+        return str(scope)
+    if record.get("source_kind") in {"media_image", "media_video"} and package_name:
+        return "device_media"
+    return None
+
+
+def _social_item_preview(scope: str, record: dict) -> str | None:
+    if scope == "device_media":
+        metadata = _record_metadata(record)
+        name = metadata.get("display_name")
+        if isinstance(name, str) and name.strip():
+            hint = metadata.get("directory_hint")
+            if isinstance(hint, str) and hint.strip():
+                return f"{name.strip()} · {hint.strip()}"
+            return name.strip()
     if scope == "own_story_archive":
-        return _archive_social_preview(text) or _social_preview(text)
-    return _social_preview(text)
+        return _archive_social_preview(record.get("normalized_text")) or _social_preview(
+            record.get("normalized_text")
+        )
+    return _social_preview(record.get("normalized_text"))
 
 
 def _apply_social_enrichment(record: dict, row) -> dict:
@@ -1035,7 +1075,8 @@ async def _load_social_records(session_id: str) -> list[dict]:
         "e.metadata_json AS host_metadata_json FROM crawl_records r "
         "LEFT JOIN social_snapshot_enrichments e "
         "ON e.crawl_id = r.crawl_id AND e.record_id = r.record_id "
-        "WHERE r.session_id = ? AND r.source_kind = 'visible_ui' "
+        "WHERE r.session_id = ? AND r.source_kind IN "
+        "('visible_ui', 'media_image', 'media_video') "
         "ORDER BY r.ingested_at, r.record_id",
         (session_id,),
     )
@@ -1071,15 +1112,93 @@ async def _load_social_records(session_id: str) -> list[dict]:
     return records
 
 
+async def _session_inventory_counts(session_id: str) -> dict:
+    contact_rows = await db.fetchall(
+        "SELECT meta_json FROM files WHERE session_id = ? "
+        "AND LOWER(source) IN ('contact', 'contacts')",
+        (session_id,),
+    )
+    contact_records = len(contact_rows)
+    contact_unique = 0
+    contact_names: set[str] = set()
+    for row in contact_rows:
+        try:
+            metadata = json.loads(row["meta_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        display_name = str(metadata.get("display_name") or "").strip().casefold()
+        if display_name:
+            contact_names.add(display_name)
+        if not metadata.get("contact_duplicate"):
+            contact_unique += 1
+    if contact_records and not contact_unique:
+        contact_unique = contact_records
+
+    sms_rows = await db.fetchall(
+        "SELECT json_extract(canonical_json, '$.metadata.direction') AS direction, "
+        "COUNT(*) AS total FROM crawl_records "
+        "WHERE session_id = ? AND source_kind = 'sms' GROUP BY 1",
+        (session_id,),
+    )
+    sms_by_direction = {
+        str(row["direction"] or "unknown"): int(row["total"]) for row in sms_rows
+    }
+    recovery_rows = await db.fetchall(
+        "SELECT source, COUNT(*) AS total FROM files WHERE session_id = ? "
+        "AND source IN ('recovered_trash', 'recovered_cache') GROUP BY source",
+        (session_id,),
+    )
+    recovery = {str(row["source"]): int(row["total"]) for row in recovery_rows}
+    return {
+        "contact_records": contact_records,
+        "contact_unique": contact_unique,
+        "contact_unique_names": len(contact_names),
+        "sms_by_direction": sms_by_direction,
+        "recovery_cache": recovery.get("recovered_cache", 0),
+        "recovery_trash": recovery.get("recovered_trash", 0),
+    }
+
+
+async def _session_device_identity(session_id: str) -> dict:
+    rows = await db.fetchall(
+        "SELECT f.meta_json, cr.normalized_text FROM files f "
+        "LEFT JOIN crawl_records cr ON cr.session_id = f.session_id "
+        "AND cr.record_id = json_extract(f.meta_json, '$.crawl_record_id') "
+        "WHERE f.session_id = ? AND LOWER(f.source) IN ('document', 'documents')",
+        (session_id,),
+    )
+    hints = []
+    for row in rows:
+        try:
+            metadata = json.loads(row["meta_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        hint = hints_from_document(
+            display_name=(
+                metadata.get("display_name")
+                if isinstance(metadata.get("display_name"), str)
+                else None
+            ),
+            normalized_text=(
+                row["normalized_text"]
+                if isinstance(row["normalized_text"], str)
+                else None
+            ),
+        )
+        if hint:
+            hints.append(hint)
+    return merge_device_identity_hints(hints)
+
+
 async def _social_report_data(session_id: str) -> tuple[list[dict], int, bool]:
     accounts: dict[str, dict] = {}
     all_items: list[dict] = []
     for record in await _load_social_records(session_id):
-        package_name = record.get("source_app")
+        package_name = _record_source_app(record)
         if package_name not in SOCIAL_PACKAGES:
             continue
         metadata = _record_metadata(record)
-        scope = metadata.get("social_scope")
+        scope = _record_social_scope(record, package_name)
         if scope not in SOCIAL_SCOPES:
             continue
         account = accounts.setdefault(
@@ -1131,7 +1250,7 @@ async def _social_report_data(session_id: str) -> tuple[list[dict], int, bool]:
             "scope": scope,
             "scope_label": SOCIAL_SCOPES[scope],
             "observed_at": record.get("observed_at"),
-            "preview_text": _social_item_preview(scope, record.get("normalized_text")),
+            "preview_text": _social_item_preview(scope, record),
         }
         account["items"].append(item)
         all_items.append(item)
@@ -1143,6 +1262,10 @@ async def _social_report_data(session_id: str) -> tuple[list[dict], int, bool]:
         account["items"].sort(key=lambda value: str(value.get("observed_at") or ""))
         account["items"] = account["items"][:remaining]
         remaining -= len(account["items"])
+        if not account.get("display_name") and account["scope_counts"].get(
+            "device_media"
+        ):
+            account["display_name"] = "Jejak di galeri HP"
     return ordered_accounts, total, total > MAX_SOCIAL_REPORT_ITEMS
 
 
@@ -1275,6 +1398,8 @@ async def build_session_report(session_id: str) -> dict:
     progress = json.loads(row["progress_json"])
     timing = json.loads(row["timing_json"])
     social_accounts, social_total, social_truncated = await _social_report_data(session_id)
+    inventory = await _session_inventory_counts(session_id)
+    device_identity = await _session_device_identity(session_id)
     whatsapp_rooms, whatsapp_total, whatsapp_conversations, whatsapp_truncated = (
         await _whatsapp_report_data(session_id, list(findings))
     )
@@ -1327,11 +1452,20 @@ async def build_session_report(session_id: str) -> dict:
             "authorize_note": progress.get("authorize_note"),
             "participant": participant,
         },
+        "device_identity": device_identity,
         "metrics": {
             "files": files["c"] if files else 0,
             "bytes": files["bytes"] if files else 0,
             "findings": len(findings),
             "social_records": social_total,
+            "contact_records": inventory["contact_records"],
+            "contact_unique": inventory["contact_unique"],
+            "contact_unique_names": inventory["contact_unique_names"],
+            "sms_by_direction": inventory["sms_by_direction"],
+            "recovery": {
+                "cache": inventory["recovery_cache"],
+                "trash": inventory["recovery_trash"],
+            },
             "whatsapp_messages": whatsapp_total,
             "whatsapp_conversations": whatsapp_conversations,
             "timing": timing,
@@ -1616,18 +1750,56 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
         evidence_stats += (
             f"<li><span>Berkas dianalisis</span><strong>{_esc(analyzed)}</strong></li>"
         )
+    contact_unique = int(m.get("contact_unique") or 0)
+    contact_records = int(m.get("contact_records") or 0)
+    if contact_records:
+        evidence_stats += (
+            "<li><span>Kontak</span>"
+            f"<strong>{_esc(contact_unique)} unik · "
+            f"{_esc(contact_records)} rekam</strong></li>"
+        )
+    sms_direction = (
+        m.get("sms_by_direction")
+        if isinstance(m.get("sms_by_direction"), dict)
+        else {}
+    )
+    sms_total = sum(int(value or 0) for value in sms_direction.values())
+    if sms_total:
+        received = int(sms_direction.get("received") or 0)
+        sent = int(sms_direction.get("sent") or 0)
+        evidence_stats += (
+            "<li><span>SMS</span>"
+            f"<strong>{_esc(sms_total)} · {received} masuk · "
+            f"{sent} terkirim</strong></li>"
+        )
 
+    recovery = m.get("recovery") if isinstance(m.get("recovery"), dict) else {}
     recovery_metric = ""
-    if progress.get("recovery_state"):
-        state_label = _report_label(progress["recovery_state"], RECOVERY_STATE_LABELS)
+    cache_count = int(recovery.get("cache") or 0)
+    trash_count = int(recovery.get("trash") or 0)
+    if cache_count or trash_count or progress.get("recovery_state"):
+        state_label = _report_label(
+            progress.get("recovery_state"), RECOVERY_STATE_LABELS
+        )
+        recovered_parts = []
+        if trash_count:
+            recovered_parts.append(f"{trash_count} sampah")
+        if cache_count:
+            recovered_parts.append(f"{cache_count} pratinjau cache")
+        if not recovered_parts:
+            recovered_parts.append(f"{progress.get('recovery_captured', 0)} item")
+        if progress.get("recovery_state"):
+            recovered_parts.append(state_label)
+            recovered_parts.extend(
+                (
+                    f"{progress.get('recovery_bytes', 0)} bytes",
+                    f"{progress.get('recovery_warning_count', 0)} peringatan",
+                    f"{progress.get('recovery_cache_sources', 0)} sumber cache",
+                )
+            )
         recovery_metric = (
-            "<li>Recovery sampah Android: "
-            f"{_esc(progress.get('recovery_captured', 0))} item · "
-            f"{_esc(progress.get('recovery_bytes', 0))} bytes · "
-            f"{_esc(state_label)} · "
-            f"{_esc(progress.get('recovery_warning_count', 0))} peringatan · "
-            f"cache {_esc(progress.get('recovery_cache_captured', 0))} preview/"
-            f"{_esc(progress.get('recovery_cache_sources', 0))} sumber</li>"
+            "<li>Recovery Android: "
+            f"{_esc(' · '.join(recovered_parts))}</li>"
         )
 
     ios_library_metric = ""
@@ -1674,11 +1846,43 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
     if has_participant:
         nik_val = str(participant.get("nik") or "").strip() or "—"
         org_val = str(participant.get("organization") or "").strip() or "—"
+        device_identity = (
+            report.get("device_identity")
+            if isinstance(report.get("device_identity"), dict)
+            else {}
+        )
+        operator_name = str(participant.get("full_name") or "").strip()
+        device_names = [
+            str(name)
+            for name in (device_identity.get("names") or [])
+            if str(name).strip()
+            and str(name).casefold() != operator_name.casefold()
+        ]
+        device_name_row = ""
+        if device_names:
+            source_label = ""
+            sources = device_identity.get("sources") or []
+            if sources and isinstance(sources[0], dict):
+                source_label = str(sources[0].get("label") or "")
+            device_name_row = (
+                "<div><span>Nama di perangkat</span>"
+                f"<strong>{_esc(device_names[0])}"
+                f"{(' · ' + _esc(source_label)) if source_label else ''}"
+                "</strong></div>"
+            )
+        if nik_val == "—" and device_identity.get("nik_candidates"):
+            nik_val = (
+                f"{device_identity['nik_candidates'][0]} "
+                "(dari dokumen, belum diverifikasi)"
+            )
+        if org_val == "—" and device_identity.get("organizations"):
+            org_val = f"{device_identity['organizations'][0]} (dari dokumen)"
         identity_section = f"""
 <section class="panel">
   <h2>Identitas peserta seleksi</h2>
   <div class="meta-grid">
     <div><span>Nama lengkap</span><strong>{_esc(participant.get('full_name') or '—')}</strong></div>
+    {device_name_row}
     <div><span>No. peserta / registrasi</span><strong>{_esc(participant.get('registration_no') or '—')}</strong></div>
     <div><span>NIK</span><strong>{_esc(nik_val)}</strong></div>
     <div><span>Instansi / formasi</span><strong>{_esc(org_val)}</strong></div>

@@ -69,6 +69,7 @@ _JUNK_BASENAMES = frozenset(
     }
 )
 _MEDIA_EXT = IMG_EXT | VID_EXT | AUDIO_EXT | TEXT_EXT | DOC_EXT
+_AGENT_SELF_CAPTURE_STEMS = frozenset({"sadt_shot", "satria_shot", "siksik_shot"})
 
 
 def _nonnegative_int(value: object) -> int:
@@ -83,6 +84,20 @@ def _nonnegative_int(value: object) -> int:
 def looks_favorite_path(path_str: str) -> bool:
     value = path_str.casefold()
     return any(token in value for token in ("favorite", "favourite", "favorit"))
+
+
+def is_agent_self_capture(
+    path_str: str | None = None,
+    display_name: str | None = None,
+) -> bool:
+    """Identify acquisition-only screenshots so they never become evidence."""
+    for raw in (path_str, display_name):
+        if not raw:
+            continue
+        stem = Path(str(raw).replace("\\", "/")).stem.casefold()
+        if stem in _AGENT_SELF_CAPTURE_STEMS:
+            return True
+    return False
 
 
 def _is_junk_media_path(path_str: str) -> bool:
@@ -1102,7 +1117,10 @@ async def hash_file(path: Path) -> str:
 async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[int, float]:
     t0 = time.perf_counter()
     files: list[tuple] = []
-    from app.acquisition.android_recovery.paths import is_recovery_namespace_path
+    from app.acquisition.android_recovery.paths import (
+        is_recovery_namespace_path,
+        recovery_file_source,
+    )
     from app.acquisition.android_recovery.service import (
         detect_recovery_mime_type,
         recovery_metadata,
@@ -1243,6 +1261,8 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                 if artifact is not None
                 else ios_artifact.source
                 if ios_artifact is not None
+                else recovery_file_source(recovered.source)
+                if recovered is not None
                 else Path(rel).parts[0] if Path(rel).parts else "other"
             )
             digest = (
@@ -1417,15 +1437,46 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         "ios_original_filename": ios_artifact.original_filename,
                     }
                 )
+            from app.acquisition.source_app_hints import (
+                infer_source_app,
+                inferred_album_label,
+            )
             from app.services.gallery import album_leaf, looks_favorite
 
-            if not meta.get("album"):
-                hint = meta.get("directory_hint")
+            hint = (
+                meta.get("directory_hint")
+                if isinstance(meta.get("directory_hint"), str)
+                else None
+            )
+            display = (
+                meta.get("display_name")
+                if isinstance(meta.get("display_name"), str)
+                else None
+            )
+            inferred_album = inferred_album_label(
+                directory_hint=hint,
+                display_name=display,
+                path=rel,
+            )
+            if inferred_album:
+                meta["album"] = inferred_album
+            elif not meta.get("album"):
                 meta["album"] = album_leaf(
-                    hint if isinstance(hint, str) else None,
+                    hint,
                     rel,
                     str(source),
                 )
+            if not meta.get("source_app"):
+                inferred_app = infer_source_app(
+                    directory_hint=hint,
+                    display_name=display,
+                    path=rel,
+                )
+                if inferred_app:
+                    meta["source_app"] = inferred_app
+                    meta["source_app_inferred"] = True
+            if is_agent_self_capture(rel, display):
+                meta["acquisition_self_capture"] = True
             meta["is_favorite"] = bool(meta.get("is_favorite")) or looks_favorite(
                 rel,
                 str(meta.get("album") or ""),
@@ -1460,6 +1511,16 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         ),
                     }
                 )
+                if record.source_kind == "contact":
+                    from app.acquisition.contact_identity import (
+                        contact_cluster_keys,
+                        contact_emails,
+                        contact_phones,
+                    )
+
+                    meta["contact_phones"] = contact_phones(record.metadata)
+                    meta["contact_emails"] = contact_emails(record.metadata)
+                    meta["contact_cluster_keys"] = contact_cluster_keys(record.metadata)
             file_id = (
                 existing_file_ids.get(rel)
                 or (
@@ -1482,7 +1543,7 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                 p.stat().st_size,
                 digest,
                 "pulled",
-                0,
+                1 if meta.get("acquisition_self_capture") else 0,
                 json.dumps(meta),
             )
 
@@ -1504,6 +1565,9 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
         )
 
     if files:
+        from app.acquisition.contact_identity import annotate_contact_file_rows
+
+        files = annotate_contact_file_rows(files)
         await db.executemany(
             """
             INSERT INTO files (id, session_id, source, path, mime, size_bytes, sha256, pull_status, analyzed, meta_json)
