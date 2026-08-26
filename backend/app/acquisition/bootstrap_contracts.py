@@ -214,11 +214,16 @@ def runtime_permissions_for_api(api_level: int) -> tuple[RuntimePermissionRequir
 
 def special_access_for_inventory_mode(
     mode: str,
+    *,
+    require_accessibility: bool = True,
 ) -> tuple[tuple[SpecialAccessKind, ...], tuple[SpecialAccessKind, ...]]:
     if mode not in {"quick", "full"}:
         raise ValueError("Android inventory mode is invalid")
-    optional = (
+    optional = [
         SpecialAccessKind.MANAGE_ALL_FILES,
         SpecialAccessKind.NOTIFICATION_LISTENER,
-    )
-    return (SpecialAccessKind.ACCESSIBILITY,), optional
+    ]
+    if require_accessibility:
+        return (SpecialAccessKind.ACCESSIBILITY,), tuple(optional)
+    optional.append(SpecialAccessKind.ACCESSIBILITY)
+    return (), tuple(optional)

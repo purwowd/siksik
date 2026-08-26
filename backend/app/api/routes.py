@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.core.db import db, utcnow
 from app.models.schemas import (
     AcquisitionMode,
+    AnalysisScope,
     AgentBootstrapRequest,
     AgentBootstrapStatus,
     AuthorizeRequest,
@@ -148,6 +149,10 @@ def _pages(total: int, page_size: int) -> int:
     if total <= 0:
         return 1
     return max(1, (total + page_size - 1) // page_size)
+
+
+def _csv_values(value: str | None) -> list[str]:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
 
 
 def _clamp_page(page: int, pages: int) -> int:
@@ -438,6 +443,9 @@ async def start_session_from_zip(
     user: Annotated[AuthUser, Depends(require_perm("sessions:start"))],
     file: UploadFile = File(..., description="ZIP hasil adb pull / dump media"),
     mode: AcquisitionMode = Form(AcquisitionMode.QUICK),
+    analysis_scope: AnalysisScope | None = Form(None),
+    device_sources: str | None = Form(None),
+    social_targets: str | None = Form(None),
     label: str | None = Form(None),
     participant_full_name: str = Form(""),
     participant_registration_no: str = Form(""),
@@ -457,6 +465,13 @@ async def start_session_from_zip(
     if len(raw) > max_b:
         raise HTTPException(status_code=413, detail=f"ZIP melebihi {settings.zip_max_mb} MB")
     try:
+        from app.acquisition.analysis_plan import build_analysis_plan
+
+        plan = build_analysis_plan(
+            scope=analysis_scope or AnalysisScope.COMBINED,
+            device_sources=_csv_values(device_sources),
+            social_targets=_csv_values(social_targets),
+        )
         participant = ParticipantInput(
             full_name=participant_full_name,
             registration_no=participant_registration_no,
@@ -472,6 +487,7 @@ async def start_session_from_zip(
             label=label,
             participant=participant,
             operator_id=user.id,
+            analysis_plan=plan,
         )
         return SessionSummary.model_validate(data)
     except RuntimeError as exc:

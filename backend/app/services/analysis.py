@@ -479,11 +479,47 @@ async def _analyze_session_body(
     progress_end: float,
     progress_label: str,
 ) -> tuple[int, int, float, dict]:
-    rows = await db.fetchall(
+    session_row = await db.fetchone(
+        "SELECT progress_json FROM sessions WHERE id = ?",
+        (session_id,),
+    )
+    try:
+        progress_payload = (
+            json.loads(session_row["progress_json"] or "{}") if session_row else {}
+        )
+    except (TypeError, json.JSONDecodeError):
+        progress_payload = {}
+    from app.acquisition.analysis_plan import analysis_plan_from_progress
+    from app.services.acquisition import is_agent_self_capture
+
+    analysis_plan = analysis_plan_from_progress(progress_payload)
+    pending_rows = await db.fetchall(
         "SELECT id, source, path, sha256, mime, meta_json FROM files "
         "WHERE session_id = ? AND analyzed = 0",
         (session_id,),
     )
+    rows = []
+    excluded_ids = []
+    for row in pending_rows:
+        metadata = _file_meta(row)
+        display_name = (
+            metadata.get("display_name")
+            if isinstance(metadata.get("display_name"), str)
+            else None
+        )
+        if (
+            not analysis_plan.allows_file_source(row["source"])
+            or metadata.get("acquisition_self_capture")
+            or is_agent_self_capture(str(row["path"] or ""), display_name)
+        ):
+            excluded_ids.append((row["id"],))
+        else:
+            rows.append(row)
+    if excluded_ids:
+        await db.executemany(
+            "UPDATE files SET analyzed = 1 WHERE id = ?",
+            excluded_ids,
+        )
     file_count_row = await db.fetchone(
         "SELECT COUNT(*) AS total, COALESCE(SUM(analyzed), 0) AS analyzed "
         "FROM files WHERE session_id = ?",
@@ -645,8 +681,6 @@ async def _analyze_session_body(
                 meta = json.loads(row["meta_json"] or "{}")
             except (TypeError, json.JSONDecodeError):
                 meta = {}
-            from app.services.acquisition import is_agent_self_capture
-
             if meta.get("acquisition_self_capture") or is_agent_self_capture(
                 str(row["path"] or ""),
                 (
@@ -655,6 +689,8 @@ async def _analyze_session_body(
                     else None
                 ),
             ):
+                return []
+            if not analysis_plan.allows_file_source(row["source"]):
                 return []
             canonical_text = str(meta.get("canonical_normalized_text") or "").strip()
             cache_key = str(row["sha256"] or "")

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
+from app.acquisition.analysis_plan import AnalysisPlan, default_analysis_plan
 from app.models.schemas import AcquisitionMode, DeviceType, Scenario, SessionStatus
 
 
@@ -41,6 +42,7 @@ class AcquisitionContext:
     scenario: Scenario
     file_count: int
     on_progress: ProgressCallback
+    analysis_plan: AnalysisPlan = field(default_factory=default_analysis_plan)
     simulated: bool = False
     archive: UploadedArchive | None = None
     request_id: str | None = None

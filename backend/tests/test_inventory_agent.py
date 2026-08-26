@@ -304,6 +304,28 @@ async def test_inventory_client_uses_typed_authenticated_routes() -> None:
 
 
 @pytest.mark.unit
+async def test_inventory_client_sends_selected_source_adapters() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return agent_response(request, 201, run_payload())
+
+    client = AgentClient(43111, "t" * 32, transport=httpx.MockTransport(handler))
+    await client.start_inventory(
+        SESSION_ID,
+        "quick",
+        target_packages=["com.instagram.android"],
+        source_adapters=["media_store_image", "accessibility_visible_ui"],
+    )
+
+    assert json.loads(seen[0].content)["source_adapters"] == [
+        "media_store_image",
+        "accessibility_visible_ui",
+    ]
+
+
+@pytest.mark.unit
 async def test_inventory_client_rejects_content_uri_or_extra_record_field() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = page_payload()

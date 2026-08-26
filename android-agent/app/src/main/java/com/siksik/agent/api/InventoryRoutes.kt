@@ -138,7 +138,12 @@ class InventoryRoutes(
             request.authenticate(crawlMatch.groupValues[1])
             if (request.method == NanoHTTPD.Method.POST) {
                 val body = request.jsonBody(
-                    setOf("mode", "document_grant_id", "target_packages"),
+                    setOf(
+                        "mode",
+                        "document_grant_id",
+                        "target_packages",
+                        "source_adapters",
+                    ),
                 )
                 val modeValue = body.getString("mode")
                 val mode = InventoryMode.entries.firstOrNull { it.wireName == modeValue }
@@ -172,6 +177,32 @@ class InventoryRoutes(
                         }
                     }
                 }
+                val sourceAdapters = if (
+                    !body.has("source_adapters") || body.isNull("source_adapters")
+                ) {
+                    SourceAdapter.entries.toSet()
+                } else {
+                    val values = body.getJSONArray("source_adapters")
+                    buildSet {
+                        for (index in 0 until values.length()) {
+                            val wireName = values.getString(index)
+                            val adapter = SourceAdapter.entries.firstOrNull {
+                                it.wireName == wireName
+                            } ?: throw ApiException(
+                                "validation_error",
+                                "Sumber inventory tidak valid.",
+                                422,
+                            )
+                            if (!add(adapter)) {
+                                throw ApiException(
+                                    "validation_error",
+                                    "Sumber inventory duplikat.",
+                                    422,
+                                )
+                            }
+                        }
+                    }
+                }
                 return ApiResponse.json(
                     201,
                     runJson(
@@ -180,6 +211,7 @@ class InventoryRoutes(
                             mode,
                             documentGrantId,
                             targetPackages,
+                            sourceAdapters,
                         ),
                     ),
                 )

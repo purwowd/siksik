@@ -100,17 +100,26 @@ class IOSProvider:
             ensure_ios_staging(staging)
 
         # Social first: WDA runs on a clean USB before backup2/AFC hold lockdown.
-        if settings.ios_social_ui_enabled:
+        if settings.ios_social_ui_enabled and context.analysis_plan.includes_social:
             from app.acquisition.ios_social import acquire_ios_social_ui
 
             try:
-                social_count = await acquire_ios_social_ui(
+                social_args = (
                     context.session_id,
                     context.device_id,
                     staging,
                     context.mode,
                     context.on_progress,
                 )
+                if set(context.analysis_plan.social_packages) == set(
+                    settings.ios_social_targets
+                ):
+                    social_count = await acquire_ios_social_ui(*social_args)
+                else:
+                    social_count = await acquire_ios_social_ui(
+                        *social_args,
+                        target_packages=context.analysis_plan.social_packages,
+                    )
                 count += social_count
                 if social_count > 0:
                     methods.append("ios_wda_social")
@@ -124,7 +133,7 @@ class IOSProvider:
                 )
 
         # AFC gallery/video — primary media path when full backup is off/empty.
-        if settings.ios_afc_media_enabled:
+        if settings.ios_afc_media_enabled and context.analysis_plan.includes_gallery:
             try:
                 media_count = await acquire_ios_afc_media(
                     context.session_id,
@@ -145,7 +154,7 @@ class IOSProvider:
                     acquisition_method="ios_afc_media",
                 )
 
-        if settings.ios_afc_docs_enabled:
+        if settings.ios_afc_docs_enabled and context.analysis_plan.includes_documents:
             try:
                 docs_count = await acquire_ios_afc_docs(
                     context.session_id,
@@ -166,7 +175,10 @@ class IOSProvider:
                     acquisition_method="ios_afc_docs",
                 )
 
-        if settings.ios_sms_contacts_enabled:
+        if settings.ios_sms_contacts_enabled and (
+            context.analysis_plan.includes_sms
+            or context.analysis_plan.includes_contacts
+        ):
             from app.acquisition.ios_backup_comms import acquire_ios_backup_comms
 
             try:

@@ -43,14 +43,27 @@ class InventoryController(
         mode: InventoryMode,
         documentGrantId: String?,
         targetPackages: Set<String> = emptySet(),
+        enabledSources: Set<SourceAdapter> = SourceAdapter.entries.toSet(),
     ): InventoryRun {
         val validatedTargets = CommunicationPolicy.validateTargets(targetPackages)
+        if (SourceAdapter.VISIBLE_UI !in enabledSources && validatedTargets.isNotEmpty()) {
+            throw ApiException(
+                "validation_error",
+                "Target social membutuhkan sumber accessibility.",
+                422,
+            )
+        }
         val latest = store.tryLatestForSession(sessionId)
         if (latest != null && latest.state in ACTIVE_RUN_STATES) {
+            val latestEnabledSources = latest.sources
+                .filterNot { it.reason == SCOPE_NOT_SELECTED }
+                .map(InventorySourceProgress::source)
+                .toSet()
             if (
                 latest.mode == mode &&
                 latest.documentGrantId == documentGrantId &&
-                communicationStore.targetsForCrawl(latest.crawlId) == validatedTargets
+                communicationStore.targetsForCrawl(latest.crawlId) == validatedTargets &&
+                latestEnabledSources == enabledSources
             ) {
                 return latest
             }
@@ -64,7 +77,11 @@ class InventoryController(
             clock(),
         )
         val availability = SourceAdapter.entries.map { adapter ->
-            adapter to sources.getValue(adapter).availability(sessionId, documentGrantId)
+            adapter to if (adapter in enabledSources) {
+                sources.getValue(adapter).availability(sessionId, documentGrantId)
+            } else {
+                SourceAvailability(InventorySourceState.COMPLETE, SCOPE_NOT_SELECTED)
+            }
         }
         val run = try {
             store.createRun(
@@ -82,7 +99,7 @@ class InventoryController(
         Log.i(
             LOG_TAG,
             "event=inventory_started crawl_id=$crawlId mode=${mode.wireName} " +
-                "source_count=${availability.size}",
+                "source_count=${availability.size} enabled_source_count=${enabledSources.size}",
         )
         return run
     }
@@ -347,6 +364,7 @@ class InventoryController(
     companion object {
         private const val LOG_TAG = "SIKSIKAgent"
         private const val MAX_SOURCE_REASON_LENGTH = 128
+        private const val SCOPE_NOT_SELECTED = "scope_not_selected"
         private val ACTIVE_RUN_STATES = setOf(
             InventoryRunState.READY,
             InventoryRunState.CRAWLING,

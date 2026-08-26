@@ -6,6 +6,11 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from app.acquisition.analysis_plan import (
+    AnalysisPlan,
+    analysis_plan_from_progress,
+    default_analysis_plan,
+)
 from app.core.config import settings
 from app.core.request_context import current_request_id
 from app.core.db import db, row_to_session, utcnow
@@ -102,7 +107,9 @@ class SessionManager:
             )
             participant = await _ensure_unique_registration(req.participant)
             now = utcnow()
+            plan = req.analysis_plan()
             progress = acq.empty_progress(SessionStatus.PENDING)
+            progress.update(plan.to_progress())
             timing = acq.empty_timing()
 
             await db.execute(
@@ -146,6 +153,7 @@ class SessionManager:
         label: str | None = None,
         participant: ParticipantInput | None = None,
         operator_id: str | None = None,
+        analysis_plan: AnalysisPlan | None = None,
     ) -> dict[str, Any]:
         async with self._lock:
             active = await db.fetchone(
@@ -173,7 +181,9 @@ class SessionManager:
             )
             participant_payload = await _ensure_unique_registration(participant)
             now = utcnow()
+            plan = analysis_plan or default_analysis_plan()
             progress = acq.empty_progress(SessionStatus.PENDING)
+            progress.update(plan.to_progress())
             timing = acq.empty_timing()
 
             await db.execute(
@@ -205,7 +215,13 @@ class SessionManager:
             )
             self._active_device = device_id
             task = asyncio.create_task(
-                self._run_zip_pipeline(session_id, zip_bytes, original_name, mode)
+                self._run_zip_pipeline(
+                    session_id,
+                    zip_bytes,
+                    original_name,
+                    mode,
+                    plan,
+                )
             )
             self._tasks[session_id] = task
             return await self.get(session_id)
@@ -351,8 +367,10 @@ class SessionManager:
         from app.acquisition.bootstrap import agent_bootstrap
         from app.acquisition.bootstrap_contracts import special_access_for_inventory_mode
 
+        plan = analysis_plan_from_progress(json.loads(row["progress_json"] or "{}"))
         required_access, optional_access = special_access_for_inventory_mode(
             str(row["mode"]),
+            require_accessibility=plan.includes_social,
         )
 
         return await agent_bootstrap.bootstrap(
@@ -439,6 +457,7 @@ class SessionManager:
 
     async def _run_pipeline(self, session_id: str, req: StartSessionRequest) -> None:
         wall0 = time.perf_counter()
+        plan = req.analysis_plan()
         uses_android_agent = False
         live_analysis_ms = 0.0
         try:
@@ -484,6 +503,7 @@ class SessionManager:
                 file_count=req.file_count,
                 on_progress=on_progress,
                 review_candidates=req.review_candidates,
+                analysis_plan=plan,
             )
             await self._update(
                 session_id,
@@ -570,6 +590,7 @@ class SessionManager:
         zip_bytes: bytes,
         original_name: str,
         mode: AcquisitionMode,
+        plan: AnalysisPlan,
     ) -> None:
         wall0 = time.perf_counter()
         try:
@@ -586,6 +607,7 @@ class SessionManager:
                 mode=mode,
                 on_progress=on_progress,
                 original_name=original_name,
+                analysis_plan=plan,
             )
             await self._update(
                 session_id,

@@ -1037,6 +1037,7 @@ class AgentClient:
         *,
         document_grant_id: str | None = None,
         target_packages: list[str] | None = None,
+        source_adapters: list[str] | None = None,
         request_id: str | None = None,
     ) -> AgentResponse[InventoryRunV1]:
         self._validate_id(session_id, "session")
@@ -1051,15 +1052,26 @@ class AgentClient:
                 ErrorCategory.VALIDATION_ERROR,
                 "Daftar target social tidak valid.",
             )
+        if source_adapters is not None and (
+            len(source_adapters) != len(set(source_adapters))
+            or not set(source_adapters) <= INVENTORY_SOURCES
+        ):
+            raise acquisition_error(
+                ErrorCategory.VALIDATION_ERROR,
+                "Daftar sumber inventory tidak valid.",
+            )
+        body: dict[str, object] = {
+            "mode": mode,
+            "document_grant_id": document_grant_id,
+            "target_packages": targets,
+        }
+        if source_adapters is not None:
+            body["source_adapters"] = source_adapters
         return await self.request(
             "POST",
             f"/v1/sessions/{session_id}/crawl",
             InventoryRunV1,
-            json_body={
-                "mode": mode,
-                "document_grant_id": document_grant_id,
-                "target_packages": targets,
-            },
+            json_body=body,
             request_id=request_id,
         )
 

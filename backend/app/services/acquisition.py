@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.acquisition.adb import AsyncAdbTransport
+from app.acquisition.analysis_plan import AnalysisPlan, default_analysis_plan
 from app.acquisition.contracts import (
     AcquisitionContext,
     AcquisitionResult,
@@ -855,7 +856,9 @@ async def acquire_dispatch(
     file_count: int,
     on_progress,
     review_candidates: bool = False,
+    analysis_plan: AnalysisPlan | None = None,
 ) -> tuple[Path, int, float, str]:
+    plan = analysis_plan or default_analysis_plan()
     agent_runner = None
     if settings.android_agent_enabled:
         from app.acquisition.bootstrap import android_agent_runner
@@ -874,6 +877,7 @@ async def acquire_dispatch(
         scenario=scenario,
         file_count=file_count,
         on_progress=on_progress,
+        analysis_plan=plan,
         simulated=simulated,
         request_id=current_request_id(),
         review_candidates=review_candidates,
@@ -881,6 +885,7 @@ async def acquire_dispatch(
     result = await registry.acquire(context)
     if (
         settings.android_recovery_enabled
+        and plan.includes_recovery
         and device_type == DeviceType.ANDROID
         and not simulated
     ):
@@ -943,7 +948,11 @@ async def acquire_dispatch(
                 provider=result.provider,
             )
 
-    if device_type == DeviceType.ANDROID and not simulated:
+    if (
+        plan.includes_whatsapp
+        and device_type == DeviceType.ANDROID
+        and not simulated
+    ):
         from app.acquisition.whatsapp_backup import WhatsAppBackupAcquisitionService
 
         whatsapp = await WhatsAppBackupAcquisitionService().acquire(
@@ -968,6 +977,7 @@ async def acquire_dispatch(
 
     if (
         settings.gmail_acquisition_enabled
+        and plan.includes_email
         and (device_type == DeviceType.ANDROID or simulated)
         and not ((result.staging / "email").is_dir() and any((result.staging / "email").iterdir()))
     ):
@@ -1048,7 +1058,11 @@ async def acquire_dispatch(
                     provider=result.provider,
                 )
 
-    if settings.browser_history_enabled and device_type == DeviceType.ANDROID:
+    if (
+        settings.browser_history_enabled
+        and plan.includes_browser
+        and device_type == DeviceType.ANDROID
+    ):
         from app.acquisition.browser_history import BrowserHistoryAcquisitionService
         from app.acquisition.gmail_oauth import session_acquisition_reference
 
@@ -1082,7 +1096,9 @@ async def acquire_zip_dispatch(
     mode: AcquisitionMode,
     original_name: str,
     on_progress,
+    analysis_plan: AnalysisPlan | None = None,
 ) -> tuple[Path, int, float, str]:
+    plan = analysis_plan or default_analysis_plan()
     registry = AcquisitionProviderRegistry()
     result = await registry.acquire(
         AcquisitionContext(
@@ -1093,6 +1109,7 @@ async def acquire_zip_dispatch(
             scenario=Scenario.LULUS,
             file_count=0,
             on_progress=on_progress,
+            analysis_plan=plan,
             archive=UploadedArchive(content=zip_bytes, original_name=original_name),
             request_id=current_request_id(),
         )
