@@ -4,6 +4,7 @@
 Usage:
   cd backend && python scripts/backup_lab_data.py
   cd backend && python scripts/backup_lab_data.py --dest /var/backups/satria
+  cd backend && python scripts/backup_lab_data.py --restore /var/backups/satria/satria_YYYYMMDD_HHMMSS
 
 Cron example (daily 02:00):
   0 2 * * * cd /opt/satria/backend && .venv/bin/python scripts/backup_lab_data.py --dest /var/backups/satria >> /var/log/satria-backup.log 2>&1
@@ -51,7 +52,35 @@ def main() -> int:
         help="Root backup directory (timestamped subfolder created)",
     )
     parser.add_argument("--keep", type=int, default=14, help="Retain newest N backup folders")
+    parser.add_argument(
+        "--restore",
+        type=Path,
+        default=None,
+        help="Restore from a timestamped backup folder created by this script",
+    )
     args = parser.parse_args()
+
+    if args.restore:
+        src = args.restore
+        if not src.is_dir():
+            print(f"restore_fail not_a_directory={src}", file=sys.stderr)
+            return 1
+        db_src = src / settings.db_path.name
+        if not db_src.exists():
+            matches = list(src.glob("*.db"))
+            db_src = matches[0] if matches else db_src
+        if not db_src.exists():
+            print(f"restore_fail missing_db={src}", file=sys.stderr)
+            return 1
+        settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(db_src, settings.db_path)
+        staging_src = src / "staging"
+        if staging_src.exists():
+            if settings.staging_dir.exists():
+                shutil.rmtree(settings.staging_dir)
+            shutil.copytree(staging_src, settings.staging_dir)
+        print(f"restore_ok db={settings.db_path} staging={settings.staging_dir}")
+        return 0
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out_dir = args.dest / f"satria_{stamp}"

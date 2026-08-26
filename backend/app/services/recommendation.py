@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from app.core.db import db, utcnow
+
+logger = logging.getLogger("siksik.recommendation")
 
 REC_LULUS = "LULUS"
 REC_TIDAK_LULUS = "TIDAK LULUS"
@@ -62,6 +66,14 @@ async def apply_recommendation(session_id: str) -> str:
         "UPDATE sessions SET recommendation = ?, updated_at = ? WHERE id = ?",
         (rec, utcnow(), session_id),
     )
+    row = await db.fetchone("SELECT status FROM sessions WHERE id = ?", (session_id,))
+    if row and str(row["status"] or "") == "completed":
+        try:
+            from app.services.reports import save_session_report
+
+            await save_session_report(session_id)
+        except Exception:
+            logger.exception("save_session_report_failed session_id=%s", session_id)
     return rec
 
 

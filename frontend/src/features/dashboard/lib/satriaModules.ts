@@ -1,7 +1,9 @@
-/** Aggregate SPD module columns from session + findings (honest stubs when empty). */
+/** Kolom modul dasbor dari sesi + temuan. */
 
 import type { DashboardStats, Finding, SessionSummary } from "@/shared/api/client";
 import { REC_LULUS, REC_MENUNGGU_REVIEW, REC_TIDAK_LULUS } from "@/shared/constants";
+import { methodSummary } from "@/features/dashboard/lib/dashboardLabels";
+import { humanProgressMessage } from "@/shared/lib/humanProgress";
 
 export type ModuleAvailability = "live" | "empty" | "planned" | "unavailable";
 
@@ -25,6 +27,7 @@ const GALLERY_SOURCES = new Set([
   "media_image",
   "media_video",
   "recovered_trash",
+  "recovered_cache",
   "ios_hidden",
   "ios_recently_deleted",
   "ios_recovered_cache",
@@ -186,8 +189,8 @@ export function buildAnalysisModules(args: {
     const s = f.source.toLowerCase();
     return (
       SOCIAL_SOURCES.has(s) ||
-      /instagram|facebook|twitter|\bx\b|visible_ui|social/i.test(s) ||
-      /instagram|facebook|twitter/i.test(f.path || "")
+      /instagram|facebook|twitter|\bx\b|visible_ui|social|threads|barcelona|whatsapp/i.test(s) ||
+      /instagram|facebook|twitter|threads|barcelona|whatsapp/i.test(f.path || "")
     );
   });
   const socialFromDash = countBySource(
@@ -196,8 +199,6 @@ export function buildAnalysisModules(args: {
       [...SOCIAL_SOURCES].some((s) => n.includes(s)) ||
       /instagram|facebook|twitter|visible/.test(n),
   );
-  const socialCount = Math.max(socialFindings.length, socialFromDash);
-
   const emailFindings = findingsMatching(
     findings,
     (f) => EMAIL_SOURCES.has(f.source.toLowerCase()) || /gmail|email|mail/i.test(f.path || ""),
@@ -209,11 +210,17 @@ export function buildAnalysisModules(args: {
     findings,
     (f) => WA_SOURCES.has(f.source.toLowerCase()) || /whatsapp|msgstore/i.test(f.path || ""),
   );
+  const socialTraces = dash?.social_traces ?? [];
+  const socialTraceCount = socialTraces.reduce((sum, item) => sum + item.count, 0);
+  const waTraces = socialTraces.filter((item) => /whatsapp/i.test(item.name));
+  const waTraceCount = waTraces.reduce((sum, item) => sum + item.count, 0);
+  const socialCount = Math.max(socialFindings.length, socialFromDash, socialTraceCount);
+  const waCount = Math.max(waFindings.length, waTraceCount);
 
-  return [
+  const cards: AnalysisModuleCard[] = [
     {
       id: "forensic",
-      title: "Forensik Pengambilan Data",
+      title: "Data perangkat",
       subtitle: "Perangkat & email yang diizinkan",
       availability: session ? "live" : "empty",
       availabilityLabel: session ? "Data sesi aktif" : "Pilih sesi",
@@ -225,9 +232,9 @@ export function buildAnalysisModules(args: {
       ],
       notes: [
         progress?.acquisition_method
-          ? `Metode: ${progress.acquisition_method}`
-          : "Metode akuisisi belum tercatat",
-        `${progress?.percent ?? 0}% · ${progress?.message || session?.status || "—"}`,
+          ? `Metode: ${methodSummary(progress.acquisition_method)}`
+          : "Metode pengambilan belum tercatat",
+        `${progress?.percent ?? 0}% · ${humanProgressMessage(progress?.message) || session?.status || "—"}`,
       ],
     },
     {
@@ -238,8 +245,8 @@ export function buildAnalysisModules(args: {
       availabilityLabel: galleryCount > 0 ? "Temuan terpetakan" : "Belum ada temuan galeri",
       metrics: [
         { label: "Temuan galeri", value: String(galleryCount) },
-        { label: "Hit OCR", value: String(progress?.hits_ocr ?? 0) },
-        { label: "Hit ASR", value: String(progress?.hits_asr ?? 0) },
+        { label: "Teks pada foto", value: String(progress?.hits_ocr ?? 0) },
+        { label: "Audio", value: String(progress?.hits_asr ?? 0) },
       ],
       notes: categoryLines.length
         ? categoryLines
@@ -250,37 +257,55 @@ export function buildAnalysisModules(args: {
       id: "whatsapp",
       title: "WhatsApp & Grup",
       subtitle: "Obrolan / grup · indikasi kontestasi",
-      availability: waFindings.length > 0 ? "live" : "unavailable",
+      availability: waCount > 0 ? "live" : "unavailable",
       availabilityLabel:
-        waFindings.length > 0
-          ? "Sinyal terkait chat terdeteksi"
+        waCount > 0
+          ? waTraceCount > 0
+            ? "Jejak media WhatsApp di galeri"
+            : "Temuan terkait chat terdeteksi"
           : "Modul belum aktif di runtime ini",
       metrics: [
         { label: "Temuan terkait", value: waFindings.length > 0 ? String(waFindings.length) : "—" },
-        { label: "msgstore.db", value: "Di luar cakupan" },
+        { label: "Jejak galeri", value: waTraceCount > 0 ? String(waTraceCount) : "—" },
       ],
       notes: [
-        "PoC: hanya sinyal dari path/chat hint — bukan parsing msgstore.db penuh.",
-        "Modul belum aktif di runtime; jangan anggap angka kosong sebagai hasil bersih.",
+        waTraceCount > 0
+          ? "Jejak dari foto/video WhatsApp di galeri — bukan isi percakapan penuh."
+          : "Temuan terkait chat terdeteksi pada sesi ini.",
+        waCount > 0
+          ? "Buka galeri album WhatsApp untuk meninjau media."
+          : "Tidak ada jejak WhatsApp pada sesi ini.",
       ],
       drillDown: waFindings.length > 0,
     },
     {
       id: "social",
       title: "Media Sosial",
-      subtitle: "IG · Facebook · X (akun milik)",
+      subtitle: "IG · Facebook · X · Threads (jejak akun / galeri)",
       availability: socialCount > 0 ? "live" : "empty",
       availabilityLabel:
-        socialCount > 0 ? "Crawl / temuan sosmed" : "Belum ada temuan sosmed pada sesi",
+        socialCount > 0
+          ? socialTraceCount > 0
+            ? "Jejak galeri / crawl sosmed"
+            : "Crawl / temuan sosmed"
+          : "Belum ada temuan sosmed pada sesi",
       metrics: [
-        { label: "Temuan / sinyal", value: String(socialCount) },
-        { label: "TikTok / YouTube / Threads", value: "Direncanakan" },
+        { label: "Temuan", value: socialFindings.length > 0 ? String(socialFindings.length) : "0" },
+        {
+          label: "Jejak galeri",
+          value: socialTraceCount > 0 ? String(socialTraceCount) : "0",
+        },
       ],
-      notes: [
-        "Platform yang didukung runtime: Instagram, Facebook, X (akun milik).",
-        "TikTok, YouTube, dan Threads belum tersedia.",
-      ],
-      drillDown: socialCount > 0,
+      notes: socialTraces.length
+        ? [
+            socialTraces.map((item) => `${item.name}: ${item.count}`).join(" · "),
+            "Jejak galeri bukan profil terverifikasi. Crawl akun milik tetap terpisah.",
+          ]
+        : [
+            "Platform crawl akun: Instagram, Facebook, X.",
+            "Screenshot Threads/Facebook/WhatsApp di galeri dihitung sebagai jejak perangkat.",
+          ],
+      drillDown: socialFindings.length > 0,
     },
     {
       id: "email",
@@ -290,32 +315,18 @@ export function buildAnalysisModules(args: {
       availabilityLabel: emailCount > 0 ? "Temuan email" : "Belum ada temuan email",
       metrics: [
         { label: "Temuan email", value: String(emailCount) },
-        {
-          label: "Periode",
-          value: session?.mode === "full" ? "FULL (~6 bln)" : "QUICK (~3 bln)",
-        },
       ],
       notes:
         emailCount > 0
           ? ["Gunakan tab Temuan untuk meninjau item email."]
-          : ["Akuisisi Gmail/email aktif bila dikonfigurasi pada sesi."],
+          : ["Email dianalisa bila dikonfigurasi pada sesi."],
       drillDown: emailCount > 0,
     },
-    {
-      id: "tiktok",
-      title: "TikTok & Short Video",
-      subtitle: "YouTube · Threads · direncanakan",
-      availability: "planned",
-      availabilityLabel: "Modul PoC — belum aktif",
-      metrics: [
-        { label: "TikTok", value: "Direncanakan" },
-        { label: "YouTube / Threads", value: "Direncanakan" },
-      ],
-      notes: [
-        "TikTok / YouTube / Threads: modul direncanakan — tidak ada crawl aktif pada PoC ini.",
-        "Angka kosong bukan indikasi hasil bersih.",
-      ],
-      drillDown: false,
-    },
   ];
+
+  return cards.filter((card) => {
+    if (card.availability === "planned") return false;
+    if (card.id === "whatsapp" && card.availability === "unavailable") return false;
+    return true;
+  });
 }

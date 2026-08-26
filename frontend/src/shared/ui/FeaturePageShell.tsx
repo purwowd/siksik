@@ -3,6 +3,7 @@ import {
   SessionWorkspaceBar,
   type SessionWorkspaceProps,
 } from "@/features/sessions/components/SessionWorkspaceBar";
+import { PageLoading } from "@/shared/ui/PageLoading";
 import { PanelTitle } from "@/shared/ui/PanelTitle";
 import type { FeaturePageMeta } from "@/shared/lib/featurePages";
 
@@ -17,6 +18,8 @@ type Props = {
   toolbarNote?: ReactNode;
   toolbarExtra?: ReactNode;
   filters?: ReactNode;
+  /** Ganti children dengan Memuat… — jangan tampilkan data sesi lama. */
+  loading?: boolean;
   children: ReactNode;
 };
 
@@ -32,18 +35,18 @@ export function FeaturePageShell({
   toolbarNote,
   toolbarExtra,
   filters,
+  loading = false,
   children,
 }: Props) {
   return (
     <section
       ref={panelRef}
-      className={`panel ent-panel ent-desk ent-rise${panelClass ? ` ${panelClass}` : ""}${threat ? " threat" : ""}`}
+      className={`panel ent-panel ent-desk${panelClass ? ` ${panelClass}` : ""}${threat ? " threat" : ""}`}
     >
       {hero}
 
       <div className="ent-desk-head">
         <div>
-          <p className="ent-eyebrow">{meta.eyebrow}</p>
           <PanelTitle title={meta.title} />
           <p className="ent-panel-copy">{meta.copy}</p>
         </div>
@@ -63,7 +66,7 @@ export function FeaturePageShell({
       ) : null}
 
       {filters}
-      {children}
+      {loading ? <PageLoading /> : children}
     </section>
   );
 }

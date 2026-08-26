@@ -31,7 +31,7 @@ Legenda kolom **Sudah (PoC)**:
 |---|------|:-----------:|----------|------------|
 | H1 | Ganti password seed semua role | ⚠️ | Set `SATRIA_SEED_*_PASSWORD` **sebelum** first boot DB prod; atau rotate via admin setelah deploy | Login dengan password lama gagal |
 | H2 | Nonaktifkan re-seed otomatis di DB yang sudah hidup | ✅ | Pastikan seed hanya jalan saat tabel `users` kosong (`auth.py`) | DB prod punya user → restart → hash tidak berubah |
-| H3 | Dokumentasi credential di repo | ⚠️ | Hapus password dari slide/demo publik; simpan di vault panitia | Audit grep `Ops@2026` di artefak deploy |
+| H3 | Dokumentasi credential di repo | ✅ | Sandi seed tidak dicantumkan di README/SETUP publik; vault panitia | Audit grep `Ops@2026` hanya di tes/lab UI |
 | H4 | Matriks role frozen | ✅ | Review `PERMISSIONS` di `backend/app/services/auth.py` + smoke `test_rbac.py` | `pytest backend/tests/test_rbac.py -q` |
 
 ### P0.2 Jaringan & binding
@@ -51,7 +51,7 @@ Legenda kolom **Sudah (PoC)**:
 | H10 | Logout invalidasi token | ✅ | `POST /auth/logout` | Token lama tidak bisa `/auth/me` |
 | H11 | Rate limit login | ✅ | PoC: 8/60s per IP+user in-memory; prod: Redis/shared store | Brute force → 429 |
 | H12 | Token di `localStorage` | ⚠️ | Risiko XSS; P1: httpOnly cookie + CSRF atau short-lived + refresh | Review CSP + audit XSS surface |
-| H13 | Redirect URL ilegal (RBAC UI) | ✅ | `useConsoleNavigation` | Operator ketik `/temuan` → redirect `/operator` |
+| H13 | Redirect URL ilegal (RBAC UI) | ✅ | `useConsoleNavigation` | Operator ketik `/temuan` → redirect `/penerimaan` |
 | H14 | RBAC API setiap endpoint | ✅ | `require_perm` di `backend/app/api/v1/*` | Operator `GET /findings` → 403 |
 
 ### P0.4 Data sensitif
@@ -61,7 +61,7 @@ Legenda kolom **Sudah (PoC)**:
 | H15 | Staging sesi terisolasi per session_id | ✅ | Backup encrypted volume; retention policy | Path staging tidak world-readable |
 | H16 | Media via ticket TTL | ✅ | `media_access.py` — review `TICKET_TTL_SECONDS` | Ticket expired → 403 |
 | H17 | ZIP upload size cap | ✅ | `SATRIA_ZIP_MAX_MB` | Upload > cap → 413/400 |
-| H18 | SQLite WAL backup | ❌ | Cron snapshot `poc.db` + staging; test restore | Restore drill 1x |
+| H18 | SQLite WAL backup | ✅ | `backend/scripts/backup_lab_data.py` + restore `--restore` + [`docs/RUNBOOK.md`](RUNBOOK.md) | Restore drill 1x |
 | H19 | Enkripsi disk at-rest | ❌ | LUKS / volume encrypted cloud | BitLocker/LUKS aktif |
 
 ---
@@ -73,7 +73,7 @@ Legenda kolom **Sudah (PoC)**:
 | # | Item | Sudah (PoC) | Tindakan | Verifikasi |
 |---|------|:-----------:|----------|------------|
 | H20 | Structured HTTP log + request_id | ✅ | Ship ke file/ELK; retain 90 hari | Correlate 1 request end-to-end |
-| H21 | Audit trail otorisasi laporan | ⚠️ | Pastikan `AuditTrailPanel` + DB persist lengkap | Authorize → entry immutable |
+| H21 | Audit trail otorisasi laporan | ✅ | Tabel `audit_events` persist + SHA-256 saat otorisasi | Authorize → entry + hash PDF |
 | H22 | Log auth events (login fail/success) | ⚠️ | Tambah event di `auth.py` login | SIEM alert brute force |
 | H23 | Health tanpa leak secret | ✅ | `/health` no stack trace | JSON tidak ada path internal |
 
@@ -92,7 +92,7 @@ Legenda kolom **Sudah (PoC)**:
 |---|------|:-----------:|----------|------------|
 | H28 | Satu sesi aktif / mutex akuisisi | ⚠️ | Verifikasi di orchestration; dokumentasi ops | Dua start paralel → satu ditolak |
 | H29 | Agent token TTL | ✅ | `android_agent_token_ttl_s` (default 3600) | Agent expired → re-bootstrap |
-| H30 | Simulated / lab_demo off prod | ⚠️ | `SATRIA_LAB_DEMO_MODE=0`, no `force_simulated` | Health tidak menawarkan sim |
+| H30 | Simulated / lab_demo off prod | ✅ | Compose prod `SATRIA_LAB_DEMO_MODE=0`; UI lab chips hanya `VITE_SATRIA_LAB_UI` | Health tidak menawarkan sim |
 | H31 | File upload MIME + path traversal | ⚠️ | Review ZIP extract + media `relative_path` | Fuzz `../etc/passwd` → 400 |
 | H32 | Postgres migration (opsional) | ❌ | Ganti SQLite jika multi-user concurrent | Load test 5 analis parallel |
 
@@ -101,9 +101,9 @@ Legenda kolom **Sudah (PoC)**:
 | # | Item | Sudah (PoC) | Tindakan | Verifikasi |
 |---|------|:-----------:|----------|------------|
 | H33 | `.env` tidak di git | ✅ | Secret manager / env file 600 | `git log -- .env` kosong |
-| H34 | Docker non-root | ❌ | USER directive di Dockerfile | `docker exec whoami` ≠ root |
-| H35 | Resource limits compose | ❌ | `mem_limit`, GPU reservation | OOM tidak bunuh host |
-| H36 | Runbook incident | ❌ | Doc: cancel sesi, clear staging, rotate token | Drill 30 menit |
+| H34 | Docker non-root | ✅ | USER 10001 di `backend/Dockerfile` | `docker exec whoami` ≠ root |
+| H35 | Resource limits compose | ✅ | `mem_limit: 8g` di `docker-compose.yml` | OOM tidak bunuh host |
+| H36 | Runbook incident | ✅ | [`docs/RUNBOOK.md`](RUNBOOK.md): start, cancel, rotate, restore | Drill 30 menit |
 
 ---
 
@@ -114,7 +114,7 @@ Legenda kolom **Sudah (PoC)**:
 | H37 | SSO/LDAP | Integrasi identity panitia; hapus seed demo |
 | H38 | MFA admin | TOTP untuk `admin` / `pimpinan` |
 | H39 | RBAC granular per case | Scope sesi per unit kerja |
-| H40 | Chain-of-custody export | Hash manifest laporan PDF + timestamp |
+| H40 | Chain-of-custody export | ✅ | SHA-256 laporan saat otorisasi + jejak audit persist | Hash tercetak di PDF |
 | H41 | Data retention & wipe | Auto-purge staging N hari; sertifikat penghapusan |
 | H42 | Penetration test | External audit forensik + OWASP ASVS L2 |
 | H43 | HA / DR | API stateless; DB replica; RPO/RTO defined |

@@ -18,7 +18,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 from urllib.parse import urlparse
 
 from app.acquisition.agent_client import InventoryRecordV1
@@ -891,6 +891,7 @@ async def acquire_ios_social_ui(
     staging: Path,
     mode: AcquisitionMode,
     on_progress: ProgressCallback,
+    target_packages: Sequence[str] | None = None,
 ) -> int:
     """Run IG + X + FB WDA flows and stage visible_ui records. Failures are categorized.
 
@@ -908,9 +909,10 @@ async def acquire_ios_social_ui(
             "Toolchain iOS social UI (ios-media-puller) tidak lengkap.",
         )
 
+    wanted = list(target_packages) if target_packages is not None else list(settings.ios_social_targets)
     targets = [
         package
-        for package in settings.ios_social_targets
+        for package in wanted
         if package in FLOW_BY_PACKAGE
     ]
     if not targets:

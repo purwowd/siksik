@@ -67,7 +67,7 @@ def test_report_html_escapes_xss():
     assert "&lt;img" in html
     assert "Ringkasan eksekutif" in html
     assert "Identitas peserta seleksi" in html
-    assert "Cepat" in html
+    assert "Laporan Hasil Analisis" in html
 
     printed = report_to_html(report, print_mode=True)
     assert "print-doc" in printed
@@ -75,6 +75,44 @@ def test_report_html_escapes_xss():
     assert "Cetak / Simpan PDF" in printed
     assert "Pengesahan pimpinan" in printed
     assert "Data akun" not in printed  # section kosong disembunyikan
+
+
+@pytest.mark.unit
+def test_report_html_shortens_hash_paths_and_method_chain():
+    report = {
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "session": {
+            "id": "sess-1",
+            "label": "Nella 02",
+            "device_id": "dev-1",
+            "device_type": "android",
+            "mode": "quick",
+            "acquisition_method": (
+                "android_agent_inventory_partial+preprocessing_partial+"
+                "selection_confirmed+android_agent_direct_manifest+"
+                "android_recovery_quick_partial"
+            ),
+            "recommendation": "LULUS",
+        },
+        "metrics": {"files": 1, "bytes": 10, "findings": 1, "timing": {}},
+        "breakdown": {"by_category": {}},
+        "findings": [
+            {
+                "label": "799c80e00b477d50a4aeb9b88c71324a.jpg",
+                "category": "konten_visual",
+                "source": "image",
+                "path": "/data/staging/abc/DCIM/799c80e00b477d50a4aeb9b88c71324a.jpg",
+                "confidence": 0.9,
+                "layer": "L4",
+            }
+        ],
+    }
+    html = report_to_html(report)
+    assert "799c80e00b477d50a4aeb9b88c71324a.jpg" not in html
+    assert "DCIM/Foto" in html
+    assert "Transfer dari HP" in html
+    assert "Recovery sampah Android" in html
+    assert html.count(" + ") == 0
 
 
 @pytest.mark.api

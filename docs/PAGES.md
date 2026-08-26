@@ -19,11 +19,11 @@ Audit layout, responsivitas, RBAC, dan perilaku UI per tab konsol (Agustus 2026)
 | A11y | ✅ | Label `htmlFor` pada field login |
 | RBAC | — | Semua role login dari sini |
 
-**Isi:** `SatriaMark`, SATRIA, motto, form, picker akun demo, hint `PoC lab · localhost`.
+**Isi:** emblem SATRIA, motto, form masuk. Build produksi tanpa picker akun demo.
 
 ---
 
-## Pengambilan Data (`/operator`)
+## Penerimaan (`/penerimaan`)
 
 | Aspek | Status | Catatan |
 |-------|--------|---------|
@@ -31,7 +31,7 @@ Audit layout, responsivitas, RBAC, dan perilaku UI per tab konsol (Agustus 2026)
 | Responsif | ✅ | `grid-2` → 1 kolom ≤900px; intake steps stack ≤720px |
 | RBAC | operator, admin | Tab default operator |
 
-**Isi:** sumber live/ZIP, mode quick/full, pipeline telemetri, timing sesi.
+**Isi:** sumber USB / arsip perangkat, kedalaman HP/sosmed, status pemeriksaan, timing sesi.
 
 **Selesai analisa:** operator hanya toast (tanpa auto-navigate ke Temuan); admin/analis dapat tombol navigasi.
 
@@ -41,7 +41,7 @@ Audit layout, responsivitas, RBAC, dan perilaku UI per tab konsol (Agustus 2026)
 
 1. Refresh perangkat tidak error
 2. Upload ZIP + mulai analisa (jika enabled)
-3. Pipeline update saat sesi aktif
+3. Status pemeriksaan update saat sesi aktif
 4. Operator tidak melihat tab Temuan/Galeri/Laporan
 
 ---
@@ -72,10 +72,10 @@ Audit layout, responsivitas, RBAC, dan perilaku UI per tab konsol (Agustus 2026)
 |-------|--------|---------|
 | Shell | ✅ | `FeaturePageShell` |
 | Session picker | ✅ | Full width |
-| Responsif | ✅ | Chip album wrap |
+| Responsif | ✅ | Filter akses; folder perangkat di dropdown |
 | RBAC | analis, pimpinan, admin | |
 
-**Isi:** filter album/asal, preview media, paginasi, note toolbar.
+**Isi:** filter akses, dropdown folder perangkat, preview media, paginasi, note toolbar.
 
 ---
 
@@ -92,7 +92,7 @@ Audit layout, responsivitas, RBAC, dan perilaku UI per tab konsol (Agustus 2026)
 
 ---
 
-## Dasbor (`/dasbor`)
+## Ikhtisar (`/ikhtisar`)
 
 | Aspek | Status | Catatan |
 |-------|--------|---------|
@@ -111,10 +111,9 @@ Audit layout, responsivitas, RBAC, dan perilaku UI per tab konsol (Agustus 2026)
 
 | Aspek | Status | Catatan |
 |-------|--------|---------|
-| Topbar | ✅ | `SatriaMark` + SATRIA + user + Keluar |
+| Topbar | ✅ | Logo SATRIA + peran + versi + user + Keluar |
 | Tabs | ✅ | RBAC-filtered; scroll horizontal ≤720px |
-| Breadcrumb | ✅ | Wrap di nav row |
-| Case flow / stepper | ✅ | Scroll horizontal ≤720px |
+| Case flow | ✅ | Bar kasus, tanpa nomor stasiun |
 | Error/toast | ✅ | Banner dismissible + toast stack |
 
 **Dihapus (sengaja):** runtime banner, footer toolchain, readiness panel, assurance strip.
@@ -125,13 +124,15 @@ Audit layout, responsivitas, RBAC, dan perilaku UI per tab konsol (Agustus 2026)
 
 | Tab | operator | analis | pimpinan | admin |
 |-----|:--------:|:------:|:--------:|:-----:|
-| Pengambilan | ✅ | — | — | ✅ |
+| Penerimaan | ✅ | — | — | ✅ |
 | Temuan | — | ✅ | ✅ | ✅ |
 | Galeri | — | ✅ | ✅ | ✅ |
 | Laporan | — | ✅ | ✅ | ✅ |
-| Dasbor | — | ✅ | ✅ | ✅ |
+| Ikhtisar | — | ✅ | ✅ | ✅ |
 
-**Landing default:** operator → Pengambilan · analis → Temuan · pimpinan → Laporan · admin → Pengambilan
+**Landing default:** operator → Penerimaan · analis → Temuan · pimpinan → Laporan · admin → Penerimaan
+
+**Alias URL:** `/operator` → `/penerimaan`, `/dasbor` → `/ikhtisar`.
 
 ---
 

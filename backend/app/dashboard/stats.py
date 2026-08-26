@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from app.acquisition.source_app_hints import SOCIAL_PACKAGE_LABELS
 from app.api.deps import counts, gpu_available
 from app.core.db import db
 from app.models.schemas import DashboardStats, NamedCount, RiskTimeline, YearRiskBucket
@@ -123,6 +124,41 @@ async def build_dashboard_stats(session_id: str | None = None) -> DashboardStats
                 prior_avg=data["prior_avg"],
             )
 
+    social_traces: list[NamedCount] = []
+    contact_unique = 0
+    contact_records = 0
+    if session_id:
+        file_rows = await db.fetchall(
+            "SELECT source, meta_json FROM files WHERE session_id = ?",
+            (session_id,),
+        )
+        app_counts: dict[str, int] = {}
+        for row in file_rows:
+            source = str(row["source"] or "").casefold()
+            try:
+                meta = json.loads(row["meta_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                meta = {}
+            if source == "contact":
+                contact_records += 1
+                if not meta.get("contact_duplicate"):
+                    contact_unique += 1
+            app = meta.get("source_app")
+            if not isinstance(app, str) or app not in SOCIAL_PACKAGE_LABELS:
+                continue
+            if meta.get("acquisition_self_capture"):
+                continue
+            if str(meta.get("crawl_artifact_role") or "") == "canonical_record":
+                continue
+            label = SOCIAL_PACKAGE_LABELS[app]
+            app_counts[label] = app_counts.get(label, 0) + 1
+        if contact_unique == 0 and contact_records:
+            contact_unique = contact_records
+        social_traces = [
+            NamedCount(name=name, count=count)
+            for name, count in sorted(app_counts.items())
+        ]
+
     return DashboardStats(
         total_sessions=total["c"] if total else 0,
         completed_sessions=completed["c"] if completed else 0,
@@ -149,4 +185,7 @@ async def build_dashboard_stats(session_id: str | None = None) -> DashboardStats
         risk_timeline=timeline,
         timeline_session_id=tl_sid,
         timeline_session_label=tl_label,
+        social_traces=social_traces,
+        contact_unique=contact_unique,
+        contact_records=contact_records,
     )

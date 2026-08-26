@@ -76,8 +76,17 @@ export function useConsoleNavigation(p: Params) {
   useEffect(() => {
     if (!p.auth || !tab) return;
     if (tab !== "findings" && tab !== "gallery" && tab !== "report" && tab !== "dashboard") return;
+    const { sesi: urlSesi } = parseTabSearch(p.location.search);
+    if (
+      urlSesi &&
+      p.sessionId &&
+      urlSesi !== p.sessionId &&
+      !p.sessionId.startsWith(urlSesi)
+    ) {
+      return;
+    }
     const url = buildTabUrl(tab, {
-      sesi: p.sessionId ?? null,
+      sesi: p.sessionId ?? urlSesi ?? null,
       filter: tab === "findings" ? p.reviewFilter : null,
       album: tab === "gallery" ? p.galleryAlbum : null,
       modul: tab === "findings" ? p.moduleFilter : null,

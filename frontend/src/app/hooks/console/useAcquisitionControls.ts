@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import {
   api,
-  type AcquisitionMode,
+  type AnalysisScope,
   type DeviceInfo,
   type SessionSummary,
 } from "@/shared/api/client";
@@ -9,13 +9,15 @@ import { ACTIVE } from "@/shared/constants";
 import { SESSION_STORAGE_KEY } from "@/app/hooks/console/constants";
 import type { Tab } from "@/shared/types";
 import type { ParticipantForm } from "@/features/operator/OperatorPage";
+import { analysisPlanReady } from "@/features/operator/analysisScope";
 
 type Params = {
   selected: DeviceInfo | null;
   session: SessionSummary | null;
   setSession: React.Dispatch<React.SetStateAction<SessionSummary | null>>;
-  mode: AcquisitionMode;
-  setMode: React.Dispatch<React.SetStateAction<AcquisitionMode>>;
+  analysisScope: AnalysisScope;
+  deviceSources: string[];
+  socialTargets: string[];
   fileCount: number;
   acqSource: "live" | "zip";
   setAcqSource: React.Dispatch<React.SetStateAction<"live" | "zip">>;
@@ -56,36 +58,46 @@ export function useAcquisitionControls(p: Params) {
     [p.participant.fullName, p.participant.registrationNo, p.participant.nik],
   );
 
+  const planReady = useMemo(
+    () => analysisPlanReady(p.analysisScope, p.deviceSources, p.socialTargets),
+    [p.analysisScope, p.deviceSources, p.socialTargets],
+  );
+
   const canStartLive = useMemo(
     () =>
       identityReady &&
+      planReady &&
       p.acqSource === "live" &&
       !!p.selected &&
       !p.selected.simulated &&
       !busy &&
       !(p.session && ACTIVE.has(p.session.status)),
-    [identityReady, p.acqSource, p.selected, busy, p.session],
+    [identityReady, planReady, p.acqSource, p.selected, busy, p.session],
   );
 
   const canStartZip = useMemo(
     () =>
       identityReady &&
+      planReady &&
       p.acqSource === "zip" &&
       !!p.zipFile &&
       !busy &&
       !(p.session && ACTIVE.has(p.session.status)),
-    [identityReady, p.acqSource, p.zipFile, busy, p.session],
+    [identityReady, planReady, p.acqSource, p.zipFile, busy, p.session],
   );
 
   const start = useCallback(async () => {
-    if (!p.selected || p.selected.simulated || !identityReady) return;
+    if (!p.selected || p.selected.simulated || !identityReady || !planReady) return;
     p.setError(null);
     setBusy(true);
     try {
       const s = await api.startSession({
         device_id: p.selected.device_id,
         device_type: p.selected.device_type === "simulated" ? "android" : p.selected.device_type,
-        mode: p.mode,
+        mode: "quick",
+        analysis_scope: p.analysisScope,
+        device_sources: p.deviceSources,
+        social_targets: p.socialTargets,
         scenario: "lulus",
         file_count: p.fileCount,
         participant: participantPayload(p.participant),
@@ -111,10 +123,10 @@ export function useAcquisitionControls(p: Params) {
     } finally {
       setBusy(false);
     }
-  }, [p, identityReady]);
+  }, [p, identityReady, planReady]);
 
   const startZip = useCallback(async () => {
-    if (!p.zipFile || !identityReady) return;
+    if (!p.zipFile || !identityReady || !planReady) return;
     const maxBytes = p.zipMaxMb * 1024 * 1024;
     if (p.zipFile.size > maxBytes) {
       p.setError(
@@ -127,7 +139,10 @@ export function useAcquisitionControls(p: Params) {
     setUploadPct(0);
     try {
       const s = await api.startSessionFromZip(p.zipFile, {
-        mode: p.mode,
+        mode: "quick",
+        analysis_scope: p.analysisScope,
+        device_sources: p.deviceSources,
+        social_targets: p.socialTargets,
         participant: participantPayload(p.participant),
         onUploadProgress: (pct) => setUploadPct(pct),
       });
@@ -152,13 +167,15 @@ export function useAcquisitionControls(p: Params) {
       setBusy(false);
       setUploadPct(null);
     }
-  }, [p, identityReady]);
+  }, [p, identityReady, planReady]);
 
-  const cancel = useCallback(async () => {
-    if (!p.session) return;
+  const cancel = useCallback(async (sessionId?: string) => {
+    const target = sessionId ?? p.session?.id;
+    if (!target) return;
     setBusy(true);
     try {
-      p.setSession(await api.cancelSession(p.session.id));
+      const updated = await api.cancelSession(target);
+      if (p.session?.id === target) p.setSession(updated);
       void p.refreshSessionList();
     } catch (e) {
       p.setError(e instanceof Error ? e.message : "Gagal membatalkan");

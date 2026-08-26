@@ -14,6 +14,8 @@ from app.models.schemas import (
 from app.api.deps import paginate_findings
 from app.services.auth import require_perm, AuthUser
 from app.services.timeline import build_risk_timeline
+from app.services.audit import record_audit
+from app.services.sessions import require_unlocked_session
 
 router = APIRouter()
 
@@ -87,6 +89,12 @@ async def review_finding(
     row = await db.fetchone("SELECT * FROM findings WHERE id = ?", (finding_id,))
     if not row:
         raise HTTPException(status_code=404, detail="Finding not found")
+    try:
+        await require_unlocked_session(str(row["session_id"]))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     now = utcnow()
     await db.execute(
         """
@@ -99,6 +107,12 @@ async def review_finding(
     from app.services.recommendation import apply_recommendation
 
     await apply_recommendation(str(row["session_id"]))
+    await record_audit(
+        session_id=str(row["session_id"]),
+        actor=user.username,
+        action="finding_reviewed",
+        detail=f"{finding_id[:8]} · {body.review_status.value}",
+    )
     refreshed = await paginate_findings(
         where_sql="WHERE f.id = ?",
         params=(finding_id,),
@@ -121,6 +135,10 @@ async def bulk_review_findings(
     row = await db.fetchone("SELECT id FROM sessions WHERE id = ?", (session_id,))
     if not row:
         raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        await require_unlocked_session(session_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     now = utcnow()
     pending_row = await db.fetchone(
         """
@@ -148,6 +166,12 @@ async def bulk_review_findings(
     from app.services.recommendation import apply_recommendation
 
     await apply_recommendation(session_id)
+    await record_audit(
+        session_id=session_id,
+        actor=user.username,
+        action="findings_bulk_reviewed",
+        detail=f"{pending_count} · {body.review_status.value}",
+    )
     return {
         "session_id": session_id,
         "review_status": body.review_status.value,

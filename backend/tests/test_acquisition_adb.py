@@ -153,6 +153,30 @@ def test_package_storage_and_lock_parsers_are_bounded() -> None:
     assert parse_device_unlocked("mShowingLockscreen=true") is False
     assert parse_device_unlocked("mShowingLockscreen=false") is True
     assert parse_device_unlocked("unknown OEM output") is None
+    assert (
+        parse_device_unlocked(
+            "KeyguardServiceDelegate\n"
+            "  showing=true\n"
+            "  showingAndNotOccluded=true\n"
+            "  occluded=false\n"
+            "  dreaming=true\n"
+            "  mIsShowing=true\n"
+        )
+        is False
+    )
+    assert parse_device_unlocked("mDreamingLockscreen=true") is False
+    assert (
+        parse_device_unlocked(
+            "KeyguardServiceDelegate\n"
+            "  showing=false\n"
+            "  showingAndNotOccluded=true\n"
+            "  occluded=false\n"
+            "  dreaming=false\n"
+            "  mIsShowing=false\n"
+            "  mDreamingLockscreen=false\n"
+        )
+        is True
+    )
 
 
 @pytest.mark.unit

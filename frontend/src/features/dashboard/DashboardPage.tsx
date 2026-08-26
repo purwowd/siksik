@@ -8,6 +8,7 @@ import {
 } from "@/shared/api/client";
 import { DistBars } from "@/features/dashboard/components/DistBars";
 import { FeaturePageShell } from "@/shared/ui/FeaturePageShell";
+import { isContentLoading } from "@/shared/lib/pageLoad";
 import { FeatureKpiGrid } from "@/shared/ui/FeatureKpiGrid";
 import { RiskTimelinePanel } from "@/features/dashboard/components/RiskTimelinePanel";
 import { StatusPill } from "@/shared/ui/StatusPill";
@@ -15,7 +16,7 @@ import { AnalysisColumn } from "@/features/dashboard/components/AnalysisColumn";
 import { DashboardSessionStrip } from "@/features/dashboard/components/DashboardSessionStrip";
 import { IntegrityScorePanel } from "@/features/dashboard/components/IntegrityScorePanel";
 import { MultiSessionCompare } from "@/features/dashboard/components/MultiSessionCompare";
-import { humanLabel, mapNamedCounts } from "@/features/dashboard/lib/dashboardLabels";
+import { humanLabel, mapNamedCounts, methodSummary } from "@/features/dashboard/lib/dashboardLabels";
 import { buildAnalysisModules } from "@/features/dashboard/lib/satriaModules";
 import { FEATURE_EMPTY_NO_SESSION, FEATURE_PAGE_META } from "@/shared/lib/featurePages";
 import type { ModuleFilterParam } from "@/app/routes";
@@ -28,12 +29,14 @@ type Props = {
   sessionsLoading: boolean;
   onPickSession: (id: string) => void;
   dash: DashboardStats | null;
+  dashLoading?: boolean;
   dashSessions: Paginated<SessionSummary> | null;
   dashFindings: Paginated<Finding> | null;
   setDashSessionsPage: (p: number) => void;
   setDashFindingsPage: (p: number) => void;
   openSession: (id: string, tab: Tab) => void;
   onModuleDrillDown?: (modul: ModuleFilterParam) => void;
+  showLabDiagnostics?: boolean;
 };
 
 export function DashboardPage({
@@ -42,12 +45,14 @@ export function DashboardPage({
   sessionsLoading,
   onPickSession,
   dash,
+  dashLoading = false,
   dashSessions,
   dashFindings,
   setDashSessionsPage,
   setDashFindingsPage,
   openSession,
   onModuleDrillDown,
+  showLabDiagnostics = false,
 }: Props) {
   const byCategory = useMemo(
     () => mapNamedCounts("category", dash?.findings_by_category),
@@ -80,15 +85,17 @@ export function DashboardPage({
   const menunggu = dash?.menunggu_review_count ?? 0;
   const tidak = dash?.tidak_lulus_count ?? 0;
   const empty = FEATURE_EMPTY_NO_SESSION.dashboard;
+  const loading = isContentLoading(dashLoading, dash);
 
   return (
     <FeaturePageShell
       meta={FEATURE_PAGE_META.dashboard}
       panelClass="dash-panel satria-dash"
+      loading={loading}
       kpis={
-        dash ? (
+        dash && !loading ? (
           <FeatureKpiGrid
-            ariaLabel="Ringkasan komando"
+            ariaLabel="Ringkasan"
             items={[
               { label: "Perlu dicek", value: menunggu, tone: menunggu > 0 ? "warn" : undefined },
               { label: "Tidak lulus", value: tidak, tone: tidak > 0 ? "bad" : undefined },
@@ -117,9 +124,7 @@ export function DashboardPage({
         </p>
       )}
 
-      {!dash ? (
-        <div className="empty dash-loading">Menyiapkan ringkasan…</div>
-      ) : (
+      {!dash ? null : (
         <div className="dash-body">
           <section className="dash-block dash-priority" aria-labelledby="dash-actions-heading">
             <div className="dash-section-head">
@@ -318,7 +323,7 @@ export function DashboardPage({
                 </div>
               </div>
               {!dashSessions || dashSessions.total === 0 ? (
-                <p className="dash-empty">Belum ada sesi — mulai dari tab Pengambilan Data.</p>
+                <p className="dash-empty">Belum ada sesi — mulai dari tab Penerimaan.</p>
               ) : (
                 <>
                   <div className="dash-session-list">
@@ -329,9 +334,11 @@ export function DashboardPage({
                       >
                         <div className="dash-session-main">
                           <strong className="finding-label">{s.label}</strong>
-                          <span className="finding-meta">
-                            {humanLabel("method", s.progress?.acquisition_method || "unknown")} ·{" "}
-                            {s.mode === "full" ? "Penuh" : "Cepat"} ·{" "}
+                          <span
+                            className="finding-meta"
+                            title={humanLabel("method", s.progress?.acquisition_method || "unknown")}
+                          >
+                            {methodSummary(s.progress?.acquisition_method || "unknown")} ·{" "}
                             {s.progress?.findings_count ?? 0} temuan ·{" "}
                             {ms(s.timing?.t_total_ms ?? 0)}
                           </span>
@@ -361,30 +368,31 @@ export function DashboardPage({
             </div>
           </div>
 
+          {showLabDiagnostics && (
           <details className="dash-tech-collapse">
-            <summary>Rincian teknis (lab)</summary>
+            <summary>Rincian teknis</summary>
             <div className="grid-3 grid-spaced">
               <DistBars
                 title="Lapisan analisa"
-                subtitle="Pipeline AI / OCR"
+                subtitle="Jenis deteksi"
                 items={byLayer}
                 emptyHint="Belum ada data layer"
               />
               <DistBars
-                title="Metode akuisisi"
-                subtitle="USB live atau ZIP"
+                title="Metode pengambilan"
+                subtitle="USB atau arsip"
                 items={byMethod}
                 emptyHint="Belum ada metode tercatat"
               />
               <div className="dist-card">
                 <h3>Kesiapan alat</h3>
-                <p className="dist-subtitle">Status toolchain lab</p>
+                <p className="dist-subtitle">Status perangkat lunak host</p>
                 <div className="tool-pills tool-pills-col">
                   <span className={`pill ${dash.toolchain?.adb ? "ok" : "muted"}`}>
-                    ADB {dash.toolchain?.adb ? "siap" : "off"}
+                    USB Android {dash.toolchain?.adb ? "siap" : "tidak aktif"}
                   </span>
                   <span className={`pill ${dash.toolchain?.idevice_id ? "ok" : "muted"}`}>
-                    iOS USB {dash.toolchain?.idevice_id ? "siap" : "off"}
+                    USB iPhone {dash.toolchain?.idevice_id ? "siap" : "tidak aktif"}
                   </span>
                   <span className={`pill ${dash.gpu_available ? "ok" : "muted"}`}>
                     GPU {dash.gpu_available ? "aktif" : "CPU"}
@@ -393,6 +401,7 @@ export function DashboardPage({
               </div>
             </div>
           </details>
+          )}
         </div>
       )}
     </FeaturePageShell>

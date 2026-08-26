@@ -11,26 +11,26 @@ export type TourStep = {
 export const DEMO_TOUR_STEPS: TourStep[] = [
   {
     id: "login",
-    title: "Masuk konsol",
-    body: "Pilih peran demo (operator, analis, pimpinan) lalu lanjutkan.",
+    title: "Masuk",
+    body: "Masuk dengan akun yang diberikan admin instalasi, sesuai peran Anda.",
   },
   {
     id: "intake",
-    title: "Penerimaan kasus",
-    body: "Hubungkan perangkat atau unggah ZIP, pilih kedalaman, jalankan akuisisi.",
+    title: "Penerimaan",
+    body: "Hubungkan HP dengan kabel USB atau unggah arsip perangkat, pilih fokus analisa, lalu jalankan pemeriksaan.",
     tab: "operator",
     target: ".ent-operator",
   },
   {
     id: "flow",
-    title: "Alur lima tahap",
-    body: "Bilah kasus di atas menunjukkan progres SPD dari pengambilan hingga hasil akhir.",
+    title: "Kelengkapan kasus",
+    body: "Bilah kasus di atas menunjukkan identitas, data, tinjauan, dan pengesahan.",
     target: ".ent-case-flow",
   },
   {
     id: "findings",
     title: "Tinjauan analis",
-    body: "Konfirmasi atau tolak temuan. Gunakan J/K/C/R untuk navigasi cepat.",
+    body: "Konfirmasi atau tolak temuan sebelum laporan disahkan pimpinan.",
     tab: "findings",
     target: ".findings-panel",
   },
@@ -56,10 +56,10 @@ export function DemoTour({ step, onNext, onPrev, onClose, onJumpTab }: Props) {
   if (!current) return null;
 
   return (
-    <aside className="ent-demo-tour ent-glass" role="complementary" aria-label="Tur demo">
+    <aside className="ent-demo-tour" role="complementary" aria-label="Panduan singkat">
       <div className="ent-demo-tour-head">
-        <p className="ent-eyebrow gold">
-          Tur demo · {step + 1}/{DEMO_TOUR_STEPS.length}
+        <p className="ent-eyebrow">
+          Panduan · {step + 1}/{DEMO_TOUR_STEPS.length}
         </p>
         <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
           Lewati

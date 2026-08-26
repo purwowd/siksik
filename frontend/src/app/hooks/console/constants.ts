@@ -1,4 +1,6 @@
 import type { SessionSummary } from "@/shared/api/client";
+import { ACTIVE } from "@/shared/constants";
+import { LAB_UI } from "@/shared/lib/labUi";
 
 export const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 export const QUICK_VIDEO_CAP = 80;
@@ -23,14 +25,21 @@ function isStaleTestSession(s: SessionSummary): boolean {
   return label.startsWith("E2E ") || s.status === "cancelled" || s.status === "failed";
 }
 
-/** Pilih sesi awal: URL → localStorage (jika masih valid) → dummy terbanyak temuan. */
+/** Pilih sesi awal: URL → sesi hidup → localStorage (jika masih valid) → sesi selesai terbaru. */
 export function pickBootstrapSession(
   items: SessionSummary[],
   preferId: string | null,
+  opts?: { fromUrl?: boolean },
 ): SessionSummary | undefined {
   if (!items.length) return undefined;
 
+  const live = items.find((s) => ACTIVE.has(s.status) && !isStaleTestSession(s));
   const fromPrefer = preferId ? items.find((s) => s.id === preferId) : undefined;
+
+  if (opts?.fromUrl && fromPrefer && !isStaleTestSession(fromPrefer)) {
+    return fromPrefer;
+  }
+  if (live) return live;
   if (fromPrefer && !isStaleTestSession(fromPrefer)) return fromPrefer;
 
   const completed = items.filter((s) => s.status === "completed");
@@ -39,8 +48,10 @@ export function pickBootstrapSession(
       (a, b) => (b.progress?.findings_count ?? 0) - (a.progress?.findings_count ?? 0),
     );
 
-  const demo = rankByFindings(completed.filter(isLabDemoSession));
-  if (demo[0]) return demo[0];
+  if (LAB_UI) {
+    const demo = rankByFindings(completed.filter(isLabDemoSession));
+    if (demo[0]) return demo[0];
+  }
 
   const best = rankByFindings(completed);
   if (best[0]) return best[0];

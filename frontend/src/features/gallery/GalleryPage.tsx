@@ -1,7 +1,7 @@
-import { FindingsSkeleton } from "@/features/findings/components/FindingsSkeleton";
 import { GalleryList } from "@/features/gallery/components/GalleryList";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { FeaturePageShell } from "@/shared/ui/FeaturePageShell";
+import { isContentLoading } from "@/shared/lib/pageLoad";
 import { FEATURE_EMPTY_NO_SESSION, FEATURE_PAGE_META } from "@/shared/lib/featurePages";
 import type { GalleryAlbum, GalleryItem, Paginated, SessionSummary } from "@/shared/api/client";
 import { ACCESS_FILTER_LABELS, ACCESS_FILTERS } from "@/app/routes";
@@ -43,11 +43,15 @@ export function GalleryPage({
     };
   });
   const empty = FEATURE_EMPTY_NO_SESSION.gallery;
+  const contentLoading = !!session && isContentLoading(loading, data);
+  const accessSet = new Set<string>(ACCESS_FILTERS);
+  const originSelected = !!album && !accessSet.has(album);
 
   return (
     <FeaturePageShell
       meta={FEATURE_PAGE_META.gallery}
       panelClass="findings-panel"
+      loading={contentLoading}
       session={{
         sessionList,
         sessionId: session?.id ?? null,
@@ -56,56 +60,64 @@ export function GalleryPage({
       }}
       toolbarNote={
         <p className="review-progress compact" role="note">
-          Bukan seluruh isi HP — hanya hasil crawl sesi aktif.
+          Bukan seluruh isi HP — hanya media yang diambil pada sesi aktif.
         </p>
       }
       filters={
-        <div className="filter-row gallery-filter-row" role="group" aria-label="Album galeri">
-          <span className="filter-label">Galeri</span>
-          {onRefresh ? (
-            <button
-              type="button"
-              className="chip"
-              disabled={!session || loading}
-              onClick={onRefresh}
-            >
-              Muat ulang
-            </button>
+        <div className="gallery-filters">
+          <div className="filter-row gallery-filter-row" role="group" aria-label="Filter akses">
+            <span className="filter-label">Akses</span>
+            {onRefresh ? (
+              <button
+                type="button"
+                className="chip"
+                disabled={!session || contentLoading}
+                onClick={onRefresh}
+              >
+                Muat ulang
+              </button>
+            ) : null}
+            {accessAlbums.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`chip ${album === item.id ? "active" : ""}`}
+                aria-pressed={album === item.id}
+                onClick={() => setAlbum(item.id)}
+                disabled={contentLoading}
+              >
+                {item.label} {item.count}
+              </button>
+            ))}
+          </div>
+          {originAlbums.length > 0 ? (
+            <div className="field gallery-album-pick">
+              <label htmlFor="gallery-album">Folder perangkat</label>
+              <select
+                id="gallery-album"
+                value={originSelected ? album : ""}
+                disabled={contentLoading || !session}
+                onChange={(e) => setAlbum(e.target.value || "all")}
+              >
+                <option value="">Semua folder</option>
+                {originAlbums.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label} ({item.count})
+                  </option>
+                ))}
+              </select>
+            </div>
           ) : null}
-          {accessAlbums.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`chip ${album === item.id ? "active" : ""}`}
-              aria-pressed={album === item.id}
-              onClick={() => setAlbum(item.id)}
-            >
-              {item.label} {item.count}
-            </button>
-          ))}
-          {originAlbums.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`chip ${album === item.id ? "active" : ""}`}
-              aria-pressed={album === item.id}
-              onClick={() => setAlbum(item.id)}
-            >
-              {item.label} {item.count}
-            </button>
-          ))}
         </div>
       }
     >
       {!session ? (
         <EmptyState title={empty.title} body={empty.body} hint={empty.hint} />
-      ) : loading && !data ? (
-        <FindingsSkeleton />
       ) : !data || data.total === 0 ? (
         <EmptyState
-          title={loading ? "Memuat galeri…" : "Album kosong"}
-          body={loading ? "Memuat media…" : "Tidak ada media pada album / filter ini."}
-          hint={!loading ? "Coba album lain atau tunggu transfer selesai." : undefined}
+          title="Album kosong"
+          body="Tidak ada media pada album / filter ini."
+          hint="Coba album lain atau tunggu transfer selesai."
         />
       ) : (
         <div className={loading ? "list-refreshing" : undefined} aria-busy={loading}>

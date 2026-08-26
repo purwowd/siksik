@@ -3,10 +3,9 @@ export function KeyboardHelpPanel({ open, onClose }: { open: boolean; onClose: (
 
   return (
     <div className="ent-kbd-overlay" role="dialog" aria-modal="true" aria-labelledby="kbd-title">
-      <div className="ent-kbd-panel ent-glass">
+      <div className="ent-kbd-panel">
         <div className="ent-kbd-head">
           <div>
-            <p className="ent-eyebrow">Pintasan analis</p>
             <h2 id="kbd-title">Navigasi cepat temuan</h2>
           </div>
           <button type="button" className="btn btn-ghost" onClick={onClose} aria-label="Tutup">
@@ -37,7 +36,7 @@ export function KeyboardHelpPanel({ open, onClose }: { open: boolean; onClose: (
         </ul>
         <p className="login-hint">Hanya aktif saat fokus tidak di kolom input.</p>
       </div>
-      <button type="button" className="ent-kbd-backdrop" aria-label="Tutup" onClick={onClose} />
+      <button type="button" className="ent-kbd-backdrop" tabIndex={-1} aria-hidden onClick={onClose} />
     </div>
   );
 }

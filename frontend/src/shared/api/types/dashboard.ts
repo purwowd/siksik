@@ -47,4 +47,7 @@ export interface DashboardStats {
   risk_timeline?: RiskTimeline | null;
   timeline_session_id?: string | null;
   timeline_session_label?: string | null;
+  social_traces?: NamedCount[];
+  contact_unique?: number;
+  contact_records?: number;
 }

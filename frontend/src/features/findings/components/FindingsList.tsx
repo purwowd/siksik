@@ -1,6 +1,7 @@
 import { can, type AuthSession, type Finding, type Paginated, type ReviewStatus } from "@/shared/api/client";
 import { Pagination } from "@/shared/ui/Pagination";
 import { FindingOriginBadge } from "./FindingOriginBadge";
+import { displayMediaName, displayPath } from "@/shared/lib/displayPath";
 import { MediaPreview } from "@/features/gallery/components/MediaPreview";
 import { humanLabel } from "@/features/dashboard/lib/dashboardLabels";
 
@@ -110,12 +111,14 @@ export function FindingsList({
                     />
                   </td>
                   <td>
-                    <strong className="finding-label">{f.label}</strong>
+                    <strong className="finding-label" title={f.label}>
+                      {displayMediaName(f.label, f.path)}
+                    </strong>
                     <div className="finding-meta">{humanLabel("category", f.category)}</div>
                   </td>
                   <td>
                     <span className="finding-source">{humanLabel("source", f.source)}</span>
-                    <div className="finding-path">{f.path}</div>
+                    <div className="finding-path" title={f.path}>{displayPath(f.path)}</div>
                   </td>
                   <td>
                     <FindingOriginBadge layer={f.layer_origin} label={f.label} />
@@ -167,7 +170,9 @@ export function FindingsList({
                 />
               </div>
               <div className="finding-card-body">
-                <strong className="finding-label">{f.label}</strong>
+                <strong className="finding-label" title={f.label}>
+                  {displayMediaName(f.label, f.path)}
+                </strong>
                 <div className="finding-meta">
                   <span>{humanLabel("category", f.category)}</span>
                   <span>·</span>
@@ -176,7 +181,7 @@ export function FindingsList({
                   <span>{(f.confidence * 100).toFixed(0)}%</span>
                   <FindingOriginBadge layer={f.layer_origin} label={f.label} />
                 </div>
-                <div className="finding-path">{f.path}</div>
+                <div className="finding-path" title={f.path}>{displayPath(f.path)}</div>
                 <div className={`evidence-body ${open ? "open" : ""}`}>{f.evidence || "—"}</div>
                 {long && (
                   <button

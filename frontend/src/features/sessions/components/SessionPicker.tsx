@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { SessionSummary } from "@/shared/api/client";
 import { ACTIVE } from "@/shared/constants";
-import { humanLabel } from "@/features/dashboard/lib/dashboardLabels";
+import { humanLabel, methodSummary } from "@/features/dashboard/lib/dashboardLabels";
 import { StatusPill } from "@/shared/ui/StatusPill";
 
 type StatusFilter = "all" | "active" | "completed" | "failed";
@@ -20,7 +20,7 @@ function sessionOptionLabel(s: SessionSummary): string {
   const name = sessionTitle(s);
   const findings = s.progress?.findings_count ?? 0;
   const rec = s.recommendation ? ` · ${s.recommendation}` : "";
-  return `${name} · ${findings} temuan · ${s.mode === "full" ? "PENUH" : "CEPAT"}${rec}`;
+  return `${name} · ${findings} temuan${rec}`;
 }
 
 function matchesFilter(s: SessionSummary, filter: StatusFilter): boolean {
@@ -41,7 +41,7 @@ export function SessionPicker({
   value: string | null;
   onChange: (sessionId: string) => void;
   loading?: boolean;
-  /** Laporan / dasbor: tanpa baris filter pencarian. */
+  /** Laporan / ikhtisar: tanpa baris filter pencarian. */
   compact?: boolean;
 }) {
   const [query, setQuery] = useState("");
@@ -86,7 +86,7 @@ export function SessionPicker({
   const activeOutsideFilter = Boolean(
     value && selected && !filtered.some((s) => s.id === value),
   );
-  const selectDisabled = loading || (filtered.length === 0 && !activeOutsideFilter);
+  const selectDisabled = (loading && sessions.length === 0) || (filtered.length === 0 && !activeOutsideFilter);
 
   return (
     <div className={`session-picker session-picker-enhanced${compact ? " session-picker-compact" : ""}`}>
@@ -162,13 +162,15 @@ export function SessionPicker({
           <StatusPill status={selected.status} recommendation={selected.recommendation} />
           {!compact && (
             <>
-              <span className="pill muted">
-                {humanLabel("method", selected.progress?.acquisition_method || "unknown")}
+              <span
+                className="pill muted"
+                title={humanLabel("method", selected.progress?.acquisition_method || "unknown")}
+              >
+                {methodSummary(selected.progress?.acquisition_method || "unknown")}
               </span>
               <span className="pill muted">{selected.progress?.findings_count ?? 0} temuan</span>
             </>
           )}
-          <span className="pill muted mono">{selected.id.slice(0, 8)}</span>
         </div>
       )}
     </div>

@@ -1,6 +1,6 @@
 import { ms, type SessionSummary } from "@/shared/api/client";
 import { StatusPill } from "@/shared/ui/StatusPill";
-import { humanLabel } from "@/features/dashboard/lib/dashboardLabels";
+import { humanLabel, methodSummary } from "@/features/dashboard/lib/dashboardLabels";
 import type { Tab } from "@/shared/types";
 
 type Props = {
@@ -18,9 +18,11 @@ export function DashboardSessionStrip({ session, onOpen }: Props) {
         <StatusPill status={session.status} recommendation={session.recommendation} />
         <div>
           <strong className="dash-session-strip-title">{session.label || session.device_id}</strong>
-          <span className="dash-session-strip-meta">
-            {humanLabel("method", progress?.acquisition_method || "unknown")} ·{" "}
-            {session.mode === "full" ? "Penuh" : "Cepat"} · {findings} temuan
+          <span
+            className="dash-session-strip-meta"
+            title={humanLabel("method", progress?.acquisition_method || "unknown")}
+          >
+            {methodSummary(progress?.acquisition_method || "unknown")} · {findings} temuan
             {session.timing?.t_total_ms ? ` · ${ms(session.timing.t_total_ms)}` : ""}
           </span>
         </div>

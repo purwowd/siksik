@@ -2,10 +2,10 @@ import { expect, test } from "@playwright/test";
 import { DEMO } from "./helpers";
 
 const LANDING = {
-  operator: /\/operator/,
+  operator: /\/penerimaan/,
   analis: /\/temuan/,
   pimpinan: /\/laporan/,
-  admin: /\/operator/,
+  admin: /\/penerimaan/,
 } as const;
 
 async function loginAs(page: import("@playwright/test").Page, role: keyof typeof DEMO) {
@@ -22,13 +22,19 @@ test.describe("SATRIA console smoke", () => {
     await page.goto("/");
     await expect(page.getByRole("heading", { name: /SATRIA/i })).toBeVisible();
     await expect(page.getByRole("button", { name: /Lanjutkan/i })).toBeVisible();
+    await expect(page.getByText(/PoC lab/i)).toHaveCount(0);
+    await expect(page.getByText(/Tur demo/i)).toHaveCount(0);
+    await expect(page.getByText(/Lab pengembangan/i)).toHaveCount(0);
+    await expect(page.getByText(/Hanya untuk petugas/)).toBeVisible();
+    await expect(page.getByLabel(/Akun lab/i)).toHaveCount(0);
   });
 
   test("operator sees only acquisition tab", async ({ page }) => {
     await loginAs(page, "operator");
-    await expect(page.getByRole("tab", { name: /Pengambilan/i })).toBeVisible();
+    await expect(page.getByRole("tab", { name: /Penerimaan/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Panduan singkat/i })).toHaveCount(0);
     await expect(page.getByRole("tab", { name: /Temuan/i })).toHaveCount(0);
-    await expect(page.getByRole("tab", { name: /Dasbor/i })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: /Ikhtisar/i })).toHaveCount(0);
   });
 
   test("analis sees findings and session picker full width", async ({ page }) => {
@@ -48,18 +54,18 @@ test.describe("SATRIA console smoke", () => {
 
   test("pimpinan lands on report tab", async ({ page }) => {
     await loginAs(page, "pimpinan");
-    await expect(page.getByRole("tab", { name: /Hasil Akhir|Laporan/i })).toBeVisible();
-    await expect(page.getByRole("tab", { name: /Pengambilan/i })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: /Laporan/i })).toBeVisible();
+    await expect(page.getByRole("tab", { name: /Penerimaan/i })).toHaveCount(0);
   });
 
   test("admin navigates all primary tabs", async ({ page }) => {
     await loginAs(page, "admin");
-    for (const label of [/Temuan/i, /Galeri/i, /Hasil Akhir|Laporan/i, /Dasbor/i]) {
+    for (const label of [/Temuan/i, /Galeri/i, /Laporan/i, /Ikhtisar/i]) {
       const tab = page.getByRole("tab", { name: label });
       await tab.click();
       await expect(tab).toHaveAttribute("aria-selected", "true");
     }
-    await page.getByRole("tab", { name: /Pengambilan/i }).click();
-    await expect(page).toHaveURL(/\/operator/);
+    await page.getByRole("tab", { name: /Penerimaan/i }).click();
+    await expect(page).toHaveURL(/\/penerimaan/);
   });
 });

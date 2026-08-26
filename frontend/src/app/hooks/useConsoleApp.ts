@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { api, can, type AcquisitionMode, type SessionSummary } from "@/shared/api/client";
+import { api, can, type SessionSummary } from "@/shared/api/client";
 import { ACTIVE } from "@/shared/constants";
 import { type ReviewSummary } from "@/app/hooks/console/constants";
 import { useToastStack } from "@/app/hooks/console/useToastStack";
@@ -11,6 +11,13 @@ import { useSessionWorkspace } from "@/app/hooks/console/useSessionWorkspace";
 import { useAcquisitionControls } from "@/app/hooks/console/useAcquisitionControls";
 import { useReviewActions } from "@/app/hooks/console/useReviewActions";
 import { DEFAULT_GALLERY_ALBUM, type ModuleFilterParam, type ReviewFilterParam } from "@/app/routes";
+import {
+  ALL_DEVICE_SOURCES,
+  DEFAULT_ANALYSIS_SCOPE,
+  type AnalysisScope,
+  type DeviceSourceId,
+  type SocialTargetId,
+} from "@/features/operator/analysisScope";
 
 export function useConsoleApp() {
   const [error, setError] = useState<string | null>(null);
@@ -26,12 +33,15 @@ export function useConsoleApp() {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [reviewSummary, setReviewSummary] = useState<ReviewSummary | null>(null);
   const [, setGlobalPending] = useState(0);
+  const sessionIdForPending = useRef<string | null>(null);
 
-  const [reviewFilter, setReviewFilter] = useState<ReviewFilterParam>("all");
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilterParam>("pending");
   const [moduleFilter, setModuleFilter] = useState<ModuleFilterParam | null>(null);
   const [galleryAlbum, setGalleryAlbum] = useState<string>(DEFAULT_GALLERY_ALBUM);
 
-  const [mode, setMode] = useState<AcquisitionMode>("quick");
+  const [analysisScope, setAnalysisScope] = useState<AnalysisScope>(DEFAULT_ANALYSIS_SCOPE);
+  const [deviceSources, setDeviceSources] = useState<DeviceSourceId[]>([...ALL_DEVICE_SOURCES]);
+  const [socialTargets, setSocialTargets] = useState<SocialTargetId[]>([]);
   const [fileCount] = useState(1200);
   const [acqSource, setAcqSource] = useState<"live" | "zip">("live");
   const [zipFile, setZipFile] = useState<File | null>(null);
@@ -97,15 +107,17 @@ export function useConsoleApp() {
     urlFilterApplied,
   });
 
+  sessionIdForPending.current = session?.id ?? null;
+
   const refreshGlobalPending = useCallback(async () => {
     if (!auth || !can(auth, "dashboard")) return;
     try {
-      const d = await api.dashboard(session?.id);
+      const d = await api.dashboard(sessionIdForPending.current ?? undefined);
       setGlobalPending(d.pending_reviews ?? 0);
     } catch {
       /* optional */
     }
-  }, [auth, session?.id]);
+  }, [auth]);
 
   const refreshSessionListBridge = useCallback(
     (opts?: { soft?: boolean }) => refreshSessionListRef.current(opts),
@@ -116,7 +128,6 @@ export function useConsoleApp() {
     tab,
     session,
     sessionList,
-    setSessionList,
     reviewFilter,
     moduleFilter,
     galleryAlbum,
@@ -209,8 +220,9 @@ export function useConsoleApp() {
     selected: runtime.selected,
     session,
     setSession,
-    mode,
-    setMode,
+    analysisScope,
+    deviceSources,
+    socialTargets,
     fileCount,
     acqSource,
     setAcqSource,
@@ -255,10 +267,6 @@ export function useConsoleApp() {
   });
 
   const topBarActive =
-    queries.findingsLoading ||
-    queries.galleryLoading ||
-    queries.reportLoading ||
-    queries.dashLoading ||
     acquisition.busy ||
     reviewActions.bulkBusy ||
     !!reviewActions.reviewBusyId ||
@@ -324,6 +332,7 @@ export function useConsoleApp() {
     setFocusedFindingId,
     teleRef,
     liveDevices: runtime.liveDevices,
+    devicesLoading: runtime.devicesLoading,
     canStartLive: acquisition.canStartLive,
     canStartZip: acquisition.canStartZip,
     participant,
@@ -337,13 +346,18 @@ export function useConsoleApp() {
     uploadPct: acquisition.uploadPct,
     selected: runtime.selected,
     setSelected: runtime.setSelected,
-    mode,
-    setMode,
+    analysisScope,
+    setAnalysisScope,
+    deviceSources,
+    setDeviceSources,
+    socialTargets,
+    setSocialTargets,
     authorizeNote,
     setAuthorizeNote,
     refreshDevices: runtime.refreshDevices,
     refreshSessionList: workspace.refreshSessionList,
     refreshGallery: queries.refreshGallery,
+    refreshFindings: queries.refreshFindings,
     onPickSession: workspace.onPickSession,
     openSession: workspace.openSession,
     openSessionWithModule: workspace.openSessionWithModule,

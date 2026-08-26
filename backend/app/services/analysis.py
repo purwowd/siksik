@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from app.core.config import settings
 from app.core.db import db, utcnow
@@ -45,8 +45,40 @@ def _skip_heavy_ocr_for_gallery(
     return not media_text.should_try_ocr(path, origin_hint=origin_hint)
 
 
-def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.lower()).strip()
+def _file_meta(row: Any) -> dict[str, Any]:
+    try:
+        value = json.loads(row["meta_json"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def media_siblings_by_record(rows: Sequence[Any]) -> dict[str, Any]:
+    """Map crawl_record_id → source_binary/screenshot file row."""
+    output: dict[str, Any] = {}
+    for row in rows:
+        meta = _file_meta(row)
+        role = str(meta.get("crawl_artifact_role") or "")
+        record_id = str(meta.get("crawl_record_id") or "")
+        mime = str(row["mime"] or "")
+        if not record_id or role not in {"source_binary", "screenshot"}:
+            continue
+        if not (mime.startswith("image/") or mime.startswith("video/")):
+            continue
+        previous = output.get(record_id)
+        previous_role = str(_file_meta(previous).get("crawl_artifact_role") or "") if previous else ""
+        if previous is None or (role == "source_binary" and previous_role != "source_binary"):
+            output[record_id] = row
+    return output
+
+
+def finding_attachment_row(row: Any, siblings: dict[str, Any]) -> Any:
+    """Point crawl-record findings at the media binary when one exists."""
+    meta = _file_meta(row)
+    if str(meta.get("crawl_artifact_role") or "") != "canonical_record":
+        return row
+    sibling = siblings.get(str(meta.get("crawl_record_id") or ""))
+    return sibling if sibling is not None else row
 
 
 def analyze_text_l1_l2(text: str, keywords: list[str]) -> list[dict]:
@@ -384,6 +416,22 @@ async def _analyze_session_body(
         (session_id,),
     )
     findings_count = int(finding_count_row["total"]) if finding_count_row else 0
+    sibling_rows = await db.fetchall(
+        "SELECT id, source, path, mime, meta_json FROM files WHERE session_id = ?",
+        (session_id,),
+    )
+    media_siblings = media_siblings_by_record(sibling_rows)
+    session_row = await db.fetchone(
+        "SELECT progress_json FROM sessions WHERE id = ?",
+        (session_id,),
+    )
+    from app.acquisition.analysis_plan import analysis_plan_from_progress
+
+    try:
+        progress_payload = json.loads(session_row["progress_json"] or "{}") if session_row else {}
+    except (TypeError, json.JSONDecodeError):
+        progress_payload = {}
+    analysis_plan = analysis_plan_from_progress(progress_payload)
 
     # Light inventory/text first (SMS/contacts/JSON), then images, then video.
     # iOS used to OCR all HEIC gallery first → UI stuck at "8/106" for minutes.
@@ -524,6 +572,15 @@ async def _analyze_session_body(
                 meta = json.loads(row["meta_json"] or "{}")
             except (TypeError, json.JSONDecodeError):
                 meta = {}
+            from app.acquisition.media_types import is_agent_self_capture
+
+            if meta.get("acquisition_self_capture") or is_agent_self_capture(
+                str(row["path"] or ""),
+                meta.get("display_name") if isinstance(meta.get("display_name"), str) else None,
+            ):
+                return []
+            if not analysis_plan.allows_file_source(row["source"]):
+                return []
             precomputed = None
             record_id_for_ocr = None
             if meta.get("crawl_artifact_role") == "screenshot":
@@ -615,14 +672,15 @@ async def _analyze_session_body(
                 media_captured_at = cm.get("captured_at")
 
             out: list[tuple] = []
+            target = finding_attachment_row(row, media_siblings)
             for f in results:
                 out.append(
                     (
                         str(uuid.uuid4()),
                         session_id,
-                        row["id"],
-                        row["source"],
-                        row["path"],
+                        target["id"],
+                        target["source"],
+                        target["path"],
                         f["category"],
                         f["label"],
                         f["confidence"],

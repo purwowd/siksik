@@ -7,14 +7,15 @@ import {
   type SessionSummary,
 } from "@/shared/api/client";
 import { FindingsList } from "@/features/findings/components/FindingsList";
-import { FindingsSkeleton } from "@/features/findings/components/FindingsSkeleton";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { FeatureKpiGrid } from "@/shared/ui/FeatureKpiGrid";
 import { FeaturePageShell } from "@/shared/ui/FeaturePageShell";
+import { isContentLoading } from "@/shared/lib/pageLoad";
 import { KeyboardHelpPanel } from "@/features/findings/components/KeyboardHelpPanel";
 import { VerdictNotice } from "@/features/findings/components/VerdictNotice";
 import { isOpenRecommendation, isThreatRecommendation } from "@/shared/constants";
 import { FEATURE_EMPTY_NO_SESSION, FEATURE_PAGE_META } from "@/shared/lib/featurePages";
+import { sessionIsAuthorized } from "@/shared/lib/caseChecklist";
 import { MODULE_FILTER_LABELS } from "@/features/dashboard/lib/moduleFilters";
 import type { ModuleFilterParam, ReviewFilterParam } from "@/app/routes";
 
@@ -27,6 +28,7 @@ type Props = {
   reviewSummary: { pending: number; confirmed: number; rejected: number; total: number } | null;
   onPickSession: (id: string) => void;
   refreshSessionList: () => void;
+  refreshFindings: () => void;
   reviewFilter: ReviewFilterParam;
   setReviewFilter: (v: ReviewFilterParam) => void;
   moduleFilter: ModuleFilterParam | null;
@@ -52,6 +54,7 @@ export function FindingsPage({
   reviewSummary,
   onPickSession,
   refreshSessionList,
+  refreshFindings,
   reviewFilter,
   setReviewFilter,
   moduleFilter,
@@ -68,7 +71,7 @@ export function FindingsPage({
   setFocusedFindingId,
 }: Props) {
   const panelRef = useRef<HTMLElement>(null);
-  const canReview = can(auth, "findings:review");
+  const canReview = can(auth, "findings:review") && !sessionIsAuthorized(session);
   const [kbdOpen, setKbdOpen] = useState(false);
 
   const showVerdict =
@@ -129,6 +132,7 @@ export function FindingsPage({
   const pending = reviewSummary?.pending ?? 0;
   const total = reviewSummary?.total ?? findingsData?.total ?? 0;
   const empty = FEATURE_EMPTY_NO_SESSION.findings;
+  const loading = !!session && isContentLoading(findingsLoading, findingsData);
   const threat =
     isThreatRecommendation(session?.recommendation) || (findingsData?.total ?? 0) > 0;
 
@@ -138,16 +142,19 @@ export function FindingsPage({
       panelRef={panelRef}
       panelClass="findings-panel"
       threat={threat}
+      loading={loading}
       kpis={
+        session && !loading ? (
         <FeatureKpiGrid
           ariaLabel="Metrik tinjauan"
           items={[
-            { label: "Menunggu", value: pending, tone: "warn" },
-            { label: "Dikonfirmasi", value: reviewSummary?.confirmed ?? 0, tone: "bad" },
+            { label: "Sisa antrean", value: pending, tone: "warn" },
+            { label: "Dikonfirmasi", value: reviewSummary?.confirmed ?? 0, tone: (reviewSummary?.confirmed ?? 0) > 0 ? "bad" : "muted" },
             { label: "Ditolak", value: reviewSummary?.rejected ?? 0, tone: "muted" },
             { label: "Total", value: total },
           ]}
         />
+        ) : undefined
       }
       session={{
         sessionList,
@@ -156,6 +163,7 @@ export function FindingsPage({
         onPickSession,
       }}
       toolbarExtra={
+        loading ? undefined : (
         <>
           {showVerdict && session && <VerdictNotice recommendation={session.recommendation} />}
           {reviewSummary && reviewSummary.total > 0 && (
@@ -169,15 +177,17 @@ export function FindingsPage({
             </p>
           )}
         </>
+        )
       }
       filters={
         <>
+          <KeyboardHelpPanel open={kbdOpen} onClose={() => setKbdOpen(false)} />
           <div className="filter-row" role="group" aria-label="Filter verifikasi">
             <span className="filter-label">Filter</span>
             {(
               [
-                ["all", "Semua"],
                 ["pending", "Menunggu"],
+                ["all", "Semua"],
                 ["confirmed", "Dikonfirmasi"],
                 ["rejected", "Ditolak"],
               ] as const
@@ -223,16 +233,17 @@ export function FindingsPage({
             <button
               type="button"
               className="btn btn-ghost filter-refresh"
-              onClick={() => void refreshSessionList()}
+              onClick={() => {
+                void refreshSessionList();
+                refreshFindings();
+              }}
             >
               Muat ulang
             </button>
-            {canReview && focusableItems.length > 0 && (
-              <span className="keyboard-hint-inline" title="J/K pilih · C konfirmasi · R tolak">
-                <kbd>J</kbd>
-                <kbd>K</kbd>
-                <kbd>C</kbd>
-                <kbd>R</kbd>
+            {canReview && (
+              <span className="keyboard-hint-inline queue-kbd" role="note">
+                Antrean: <kbd>J</kbd>/<kbd>K</kbd> pindah · <kbd>C</kbd> konfirmasi ·{" "}
+                <kbd>R</kbd> tolak
               </span>
             )}
           </div>
@@ -249,20 +260,22 @@ export function FindingsPage({
         </>
       }
     >
-      <KeyboardHelpPanel open={kbdOpen} onClose={() => setKbdOpen(false)} />
-
       {!session ? (
         <EmptyState title={empty.title} body={empty.body} hint={empty.hint} />
-      ) : !findingsData && findingsLoading ? (
-        <FindingsSkeleton />
       ) : !findingsData || findingsData.total === 0 ? (
-        findingsLoading ? (
-          <EmptyState title="Memuat temuan…" body="Menarik bukti terflag dari pipeline." />
-        ) : reviewFilter === "pending" ? (
+        reviewFilter === "pending" ? (
           <EmptyState
             title="Antrean kosong"
-            body="Tidak ada temuan menunggu untuk sesi ini."
-            hint="Tidak ada temuan menunggu pada filter ini."
+            body={
+              (reviewSummary?.total ?? 0) > 0
+                ? "Tidak ada temuan menunggu. Buka filter Semua atau Ditolak untuk melihat hasil tinjauan."
+                : "Tidak ada temuan menunggu untuk sesi ini."
+            }
+            hint={
+              (reviewSummary?.total ?? 0) > 0
+                ? "Tinjauan antrean selesai."
+                : "Tidak ada temuan menunggu pada filter ini."
+            }
             tone="ok"
           />
         ) : (

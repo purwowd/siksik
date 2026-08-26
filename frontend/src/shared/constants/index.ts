@@ -1,6 +1,7 @@
 import type { AuthSession } from "@/shared/api/client";
 import { can } from "@/shared/api/client";
 import type { Tab } from "@/shared/types";
+import { LAB_UI } from "@/shared/lib/labUi";
 
 export const ACTIVE = new Set([
   "pending",
@@ -28,26 +29,6 @@ export function isThreatRecommendation(rec?: string | null): boolean {
   return rec === REC_TIDAK_LULUS || rec === REC_MENUNGGU_REVIEW;
 }
 
-export const PIPELINE = [
-  {
-    id: "acquire",
-    label: "Pengambilan Data",
-    match: [
-      "pending",
-      "detecting",
-      "preparing_agent",
-      "awaiting_access",
-      "acquiring",
-      "selecting",
-      "awaiting_review",
-    ],
-  },
-  { id: "content", label: "Analisis Konten", match: ["indexing"] },
-  { id: "cross", label: "Lintas Sumber", match: ["analyzing"] },
-  { id: "integrity", label: "Penilaian Integritas", match: ["completed"] },
-  { id: "final", label: "Hasil Akhir", match: ["completed"] },
-] as const;
-
 export const TAB_PERMS: Record<Tab, string> = {
   operator: "sessions:start",
   dashboard: "dashboard",
@@ -56,13 +37,13 @@ export const TAB_PERMS: Record<Tab, string> = {
   report: "report:read",
 };
 
-/** Urutan nav: Temuan → Galeri → Laporan → Dasbor. */
+/** Menu konsol — nama sama dengan judul halaman. */
 export const TAB_DEFS: { id: Tab; label: string }[] = [
-  { id: "operator", label: "Pengambilan Data" },
+  { id: "operator", label: "Penerimaan" },
   { id: "findings", label: "Temuan" },
   { id: "gallery", label: "Galeri" },
-  { id: "report", label: "Hasil Akhir" },
-  { id: "dashboard", label: "Dasbor Petugas" },
+  { id: "report", label: "Laporan" },
+  { id: "dashboard", label: "Ikhtisar" },
 ];
 
 export function preferredLandingTab(
@@ -80,10 +61,12 @@ export function preferredLandingTab(
   return allowed[0].id;
 }
 
-/** Lab demo usernames only — passwords filled on click for PoC convenience. */
-export const DEMO_ACCOUNTS = [
-  { user: "operator", pass: "Ops@2026", role: "Operator" },
-  { user: "analis", pass: "Analis@2026", role: "Analis" },
-  { user: "pimpinan", pass: "Pimpinan@2026", role: "Pimpinan" },
-  { user: "admin", pass: "Admin@2026", role: "Administrator" },
-];
+/** Hanya ter-bundle saat VITE_SATRIA_LAB_UI=1. */
+export const DEMO_ACCOUNTS = LAB_UI
+  ? [
+      { user: "operator", pass: "Ops@2026", role: "Operator" },
+      { user: "analis", pass: "Analis@2026", role: "Analis" },
+      { user: "pimpinan", pass: "Pimpinan@2026", role: "Pimpinan" },
+      { user: "admin", pass: "Admin@2026", role: "Admin" },
+    ]
+  : [];

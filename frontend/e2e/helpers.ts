@@ -7,10 +7,10 @@ export function resolveApiBase(_uiBase?: string): string {
 }
 
 export const DEMO = {
-  operator: { user: "operator", pass: "Ops@2026" },
-  analis: { user: "analis", pass: "Analis@2026" },
-  pimpinan: { user: "pimpinan", pass: "Pimpinan@2026" },
-  admin: { user: "admin", pass: "Admin@2026" },
+  operator: { user: "operator", pass: process.env.SATRIA_OPERATOR_PASS || "Ops@2026" },
+  analis: { user: "analis", pass: process.env.SATRIA_ANALIS_PASS || "Analis@2026" },
+  pimpinan: { user: "pimpinan", pass: process.env.SATRIA_PIMPINAN_PASS || "Pimpinan@2026" },
+  admin: { user: "admin", pass: process.env.SATRIA_ADMIN_PASS || "Admin@2026" },
 } as const;
 
 export type SessionSummary = {

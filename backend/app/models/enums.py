@@ -14,6 +14,12 @@ class AcquisitionMode(str, Enum):
     FULL = "full"
 
 
+class AnalysisScope(str, Enum):
+    DEVICE = "device"
+    SOCIAL = "social"
+    COMBINED = "combined"
+
+
 class RecoveryState(str, Enum):
     SCANNING = "scanning"
     COMPLETE = "complete"

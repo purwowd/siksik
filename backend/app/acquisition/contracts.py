@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from app.models.schemas import AcquisitionMode, DeviceType, Scenario, SessionStatus
+from app.acquisition.analysis_plan import AnalysisPlan, default_analysis_plan
 
 
 class ProviderKind(str, Enum):
@@ -45,6 +46,7 @@ class AcquisitionContext:
     archive: UploadedArchive | None = None
     request_id: str | None = None
     review_candidates: bool = False
+    analysis_plan: AnalysisPlan = default_analysis_plan()
 
 
 @dataclass(frozen=True, slots=True)

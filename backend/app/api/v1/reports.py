@@ -8,8 +8,10 @@ from app.core.db import db, utcnow
 from app.models.schemas import AuthorizeRequest
 from app.services.auth import require_perm, AuthUser
 from app.services import reports as rpt
-from app.services.reports import build_session_report, report_to_html
+from app.services.reports import build_session_report, canonical_report_digest, report_to_html
 from app.services.recommendation import REC_MENUNGGU_REVIEW
+from app.services.audit import record_audit
+from app.services.sessions import SESSION_LOCKED_DETAIL, authorized_at_from_progress
 
 router = APIRouter()
 logger = logging.getLogger("siksik.auth")
@@ -28,13 +30,19 @@ async def _pending_review_count(session_id: str) -> int:
 @router.get("/sessions/{session_id}/report")
 async def session_report(
     session_id: str,
-    _: Annotated[AuthUser, Depends(require_perm("report:read"))],
+    user: Annotated[AuthUser, Depends(require_perm("report:read"))],
     format: str = Query("json", pattern="^(json|html|print)$"),
 ):
     try:
         report = await build_session_report(session_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
+    await record_audit(
+        session_id=session_id,
+        actor=user.username,
+        action="report_downloaded",
+        detail=format,
+    )
     if format in ("html", "print"):
         html = report_to_html(report, print_mode=(format == "print"))
         return HTMLResponse(html)
@@ -59,13 +67,31 @@ async def authorize_session(
             status_code=403,
             detail="Pengesahan diblokir — masih ada temuan menunggu verifikasi analis",
         )
-    progress = json.loads(row["progress_json"])
+    progress = json.loads(row["progress_json"] or "{}")
+    if authorized_at_from_progress(progress):
+        raise HTTPException(status_code=409, detail=SESSION_LOCKED_DETAIL)
     progress["authorized_by"] = user.username
     progress["authorized_at"] = utcnow()
     progress["authorize_note"] = body.note or ""
+    report = await build_session_report(session_id)
+    progress["report_sha256"] = canonical_report_digest(report)
+    confirmed = await db.fetchone(
+        """
+        SELECT COUNT(*) AS c FROM findings
+        WHERE session_id = ? AND review_status = 'confirmed'
+        """,
+        (session_id,),
+    )
+    progress["authorized_confirmed_findings"] = int(confirmed["c"]) if confirmed else 0
     await db.execute(
         "UPDATE sessions SET progress_json = ?, updated_at = ? WHERE id = ?",
         (json.dumps(progress), utcnow(), session_id),
+    )
+    await record_audit(
+        session_id=session_id,
+        actor=user.username,
+        action="report_authorized",
+        detail=progress["report_sha256"][:16],
     )
     logger.info(
         "session_authorized session_id=%s by=%s",
@@ -81,6 +107,7 @@ async def authorize_session(
         "session_id": session_id,
         "authorized_by": user.username,
         "recommendation": row["recommendation"],
+        "report_sha256": progress["report_sha256"],
     }
 
 

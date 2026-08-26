@@ -196,6 +196,7 @@ class Phase7AndroidAgentRunner:
         started = time.perf_counter()
         required_access, optional_access = special_access_for_inventory_mode(
             context.mode.value,
+            require_accessibility=context.analysis_plan.includes_social,
         )
         await self._bootstrap_service.bootstrap(
             session_id=context.session_id,
@@ -422,11 +423,13 @@ class Phase7AndroidAgentRunner:
         runtime: AgentRuntimeSecrets,
         policy: SelectionPolicyV1,
     ) -> InventoryRunV1:
+        social_packages = list(context.analysis_plan.social_packages)
+        enabled_adapters = context.analysis_plan.inventory_adapters()
         response = await client.start_inventory(
             context.session_id,
             context.mode.value,
             document_grant_id=None,
-            target_packages=list(self._target_packages),
+            target_packages=social_packages,
             request_id=context.request_id,
         )
         run = response.body
@@ -445,7 +448,7 @@ class Phase7AndroidAgentRunner:
             if (
                 visible.state in {"pending", "crawling"}
                 and self._automation is not None
-                and self._target_packages
+                and social_packages
             ):
                 social_labels = {
                     "com.instagram.android": "Instagram",
@@ -483,7 +486,7 @@ class Phase7AndroidAgentRunner:
                         context.mode,
                         reference=datetime.fromisoformat(run.started_at),
                     ).not_before_epoch_ms,
-                    target_packages=self._target_packages,
+                    target_packages=tuple(social_packages),
                     request_id=context.request_id,
                     on_progress=on_social_progress,
                 )
@@ -509,6 +512,8 @@ class Phase7AndroidAgentRunner:
                         request_id=context.request_id,
                     )
             for index, (source, progress) in enumerate(run.source_progress.items()):
+                if source not in enabled_adapters:
+                    continue
                 if progress.state not in {"pending", "crawling"}:
                     continue
                 cursor = progress.resume_cursor

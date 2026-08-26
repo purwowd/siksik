@@ -56,18 +56,9 @@ Services:
 
 Volume data persisten: `sadt-data` → `/app/data` di container API.
 
-### 2. Login demo
+### 2. Login
 
-Buka http://127.0.0.1:5173
-
-| Role | Username | Password default |
-|------|----------|------------------|
-| Operator | `operator` | `Ops@2026` |
-| Analis | `analis` | `Analis@2026` |
-| Pimpinan | `pimpinan` | `Pimpinan@2026` |
-| Admin | `admin` | `Admin@2026` |
-
-Password seed hanya dibuat saat DB kosong. Override lewat env di `docker-compose.yml` atau `.env` (lihat `.env.example`).
+Buka http://127.0.0.1:5173 dan masuk dengan akun instalasi (`setup_lab_panitia.py` atau `SATRIA_SEED_*_PASSWORD` pada first boot). Jangan memakai sandi seed di jaringan produksi. Lihat [`RUNBOOK.md`](./RUNBOOK.md).
 
 ### 3. Verifikasi cepat
 
@@ -183,7 +174,7 @@ adb devices   # harus "device" + authorized
 idevice_id -l
 ```
 
-Tanpa perangkat: gunakan **upload ZIP** di tab Pengambilan Data.
+Tanpa perangkat: gunakan **upload ZIP** di tab Penerimaan.
 
 ### 6. GPU (opsional)
 
@@ -222,13 +213,15 @@ npm run test:e2e
 
 | Tab | Path | Role tipikal |
 |-----|------|--------------|
-| Pengambilan Data | `/operator` | operator |
+| Penerimaan | `/penerimaan` | operator |
 | Temuan | `/temuan` | analis, admin |
 | Galeri | `/galeri` | analis, admin |
 | Laporan | `/laporan` | pimpinan, admin |
-| Dasbor | `/dasbor` | analis, pimpinan, admin |
+| Ikhtisar | `/ikhtisar` | analis, pimpinan, admin |
 
 Query umum: `?sesi=<uuid>&filter=pending&modul=gallery`
+
+Alias: `/operator` → `/penerimaan`, `/dasbor` → `/ikhtisar`.
 
 Detail per halaman: [`docs/PAGES.md`](PAGES.md).
 

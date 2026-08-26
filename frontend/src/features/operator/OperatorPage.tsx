@@ -1,12 +1,28 @@
 import { useEffect, useState, type RefObject } from "react";
-import { ms, type AcquisitionMode, type DeviceInfo, type SessionSummary } from "@/shared/api/client";
+import { ms, type DeviceInfo, type SessionSummary } from "@/shared/api/client";
 import { FeaturePanel } from "@/shared/ui/FeaturePanel";
-import { PipelineTrack } from "@/features/operator/components/PipelineTrack";
 import { StatusPill } from "@/shared/ui/StatusPill";
 import { VerdictNotice } from "@/features/findings/components/VerdictNotice";
 import { ACTIVE, isThreatRecommendation } from "@/shared/constants";
-import { humanLabel } from "@/features/dashboard/lib/dashboardLabels";
+import { humanLabel, methodSummary } from "@/features/dashboard/lib/dashboardLabels";
 import { FEATURE_PAGE_META, OPERATOR_TELEMETRY_META } from "@/shared/lib/featurePages";
+import { occupyingLabel } from "@/shared/lib/caseChecklist";
+import { humanProgressMessage } from "@/shared/lib/humanProgress";
+import { PageLoading } from "@/shared/ui/PageLoading";
+import { LAB_UI } from "@/shared/lib/labUi";
+import { sessionStatusLabel } from "@/shared/lib/sessionStatus";
+import {
+  ANALYSIS_SCOPE_LABEL,
+  ANALYSIS_SCOPE_OPTIONS,
+  DEVICE_SOURCE_OPTIONS,
+  SOCIAL_TARGET_OPTIONS,
+  analysisPlanReady,
+  planForScope,
+  toggleChecked,
+  type AnalysisScope,
+  type DeviceSourceId,
+  type SocialTargetId,
+} from "@/features/operator/analysisScope";
 
 export type ParticipantForm = {
   fullName: string;
@@ -30,15 +46,21 @@ type Props = {
   selected: DeviceInfo | null;
   setSelected: (d: DeviceInfo | null) => void;
   refreshDevices: () => Promise<void>;
-  mode: AcquisitionMode;
-  setMode: (m: AcquisitionMode) => void;
+  devicesLoading?: boolean;
+  analysisScope: AnalysisScope;
+  setAnalysisScope: (scope: AnalysisScope) => void;
+  deviceSources: DeviceSourceId[];
+  setDeviceSources: (sources: DeviceSourceId[]) => void;
+  socialTargets: SocialTargetId[];
+  setSocialTargets: (targets: SocialTargetId[]) => void;
   canStartLive: boolean;
   canStartZip: boolean;
   busy: boolean;
   session: SessionSummary | null;
+  occupying: SessionSummary | null;
   start: () => void;
   startZip: () => void;
-  cancel: () => void;
+  cancel: (sessionId?: string) => void;
   onNavigateTab: (t: "findings" | "report" | "dashboard") => void;
   canFindings: boolean;
   canReport: boolean;
@@ -87,26 +109,46 @@ export function OperatorPage(p: Props) {
     p.participant.registrationNo.trim().length > 0 &&
     (!p.participant.nik.trim() || /^\d{16}$/.test(p.participant.nik.trim()));
   const sourceReady = identityReady && (p.acqSource === "live" ? !!p.selected : p.zipEnabled && !!p.zipFile);
-  const depthReady = sourceReady && !!p.mode;
-  const runReady = identityReady && (p.acqSource === "live" ? p.canStartLive : p.canStartZip);
+  const planReady = analysisPlanReady(p.analysisScope, p.deviceSources, p.socialTargets);
+  const depthReady = sourceReady && planReady;
+  const mutexBlocksStart = !!p.occupying;
+  const runReady =
+    !mutexBlocksStart &&
+    identityReady &&
+    (p.acqSource === "live" ? p.canStartLive : p.canStartZip);
+  const showDeviceChecks = p.analysisScope !== "social";
+  const showSocialChecks = p.analysisScope !== "device";
+  const sessionScope = (progress?.analysis_scope ?? "combined") as AnalysisScope;
+  const needsSocialAccess = sessionScope !== "device";
 
   return (
     <div className="ent-operator">
+      {p.occupying && (
+        <div className="ent-mutex" role="status">
+          <div>
+            <p className="ent-eyebrow">Mesin sedang dipakai</p>
+            <p>
+              Sesi <strong>{occupyingLabel(p.occupying)}</strong> masih berjalan. Satu pemeriksaan
+              per mesin — batalkan dulu atau tunggu selesai.
+            </p>
+          </div>
+          <button
+            className="btn btn-danger"
+            type="button"
+            disabled={p.busy}
+            onClick={() => p.cancel(p.occupying?.id)}
+          >
+            Batalkan sesi aktif
+          </button>
+        </div>
+      )}
       <div className="grid-2">
         <FeaturePanel meta={FEATURE_PAGE_META.operator}>
           <ol className="ent-intake-steps" aria-label="Langkah penerimaan">
-            <li className={identityReady ? "on" : ""}>
-              <span>1</span> Identitas
-            </li>
-            <li className={sourceReady ? "on" : ""}>
-              <span>2</span> Sumber
-            </li>
-            <li className={depthReady ? "on" : ""}>
-              <span>3</span> Kedalaman
-            </li>
-            <li className={runReady ? "on" : ""}>
-              <span>4</span> Jalankan
-            </li>
+            <li className={identityReady ? "on" : ""}>Kasus</li>
+            <li className={sourceReady ? "on" : ""}>Perangkat</li>
+            <li className={depthReady ? "on" : ""}>Cakupan</li>
+            <li className={runReady ? "on" : ""}>Jalankan</li>
           </ol>
           <div className="form-grid">
             <div className="field-group" role="group" aria-labelledby="participant-heading">
@@ -183,33 +225,37 @@ export function OperatorPage(p: Props) {
                 onChange={(e) => p.setAcqSource(e.target.value as "live" | "zip")}
                 disabled={p.busy || active}
               >
-                <option value="live">Perangkat live (ADB / iOS)</option>
+                <option value="live">Perangkat terhubung (USB)</option>
                 <option value="zip" disabled={!p.zipEnabled}>
-                  Unggah ZIP hasil ADB{" "}
-                  {p.zipEnabled ? "(tanpa akuisisi)" : "(dinonaktifkan server)"}
+                  Unggah arsip perangkat{" "}
+                  {p.zipEnabled ? "(tanpa kabel USB)" : "(dinonaktifkan server)"}
                 </option>
               </select>
             </div>
 
             {p.acqSource === "live" && (
               <div className="field">
-                <label id="device-list-label">Perangkat live</label>
+                <label id="device-list-label">Perangkat terhubung</label>
                 <div className="actions field-actions">
                   <button
                     className="btn btn-ghost"
                     type="button"
+                    disabled={p.devicesLoading || p.busy || active}
                     onClick={() => p.refreshDevices().catch(console.error)}
                   >
-                    Pindai ulang USB
+                    {p.devicesLoading ? "Memuat…" : "Pindai ulang USB"}
                   </button>
                 </div>
                 <div className="device-list" role="listbox" aria-labelledby="device-list-label">
-                  {p.liveDevices.length === 0 && (
+                  {p.devicesLoading ? (
+                    <PageLoading />
+                  ) : p.liveDevices.length === 0 ? (
                     <div className="empty empty-soft">
-                      Tidak ada HP — sambungkan USB debug, atau ganti sumber ke Unggah ZIP
+                      Tidak ada HP — sambungkan dengan kabel USB, atau ganti sumber ke unggah arsip
                     </div>
-                  )}
-                  {p.liveDevices.map((d) => {
+                  ) : null}
+                  {!p.devicesLoading &&
+                  p.liveDevices.map((d) => {
                     const selectedRow = p.selected?.device_id === d.device_id;
                     return (
                       <button
@@ -225,7 +271,9 @@ export function OperatorPage(p: Props) {
                           <strong>{d.label}</strong>
                           <small>{d.device_id}</small>
                         </span>
-                        <span className="pill muted">{d.device_type}</span>
+                        <span className="pill muted">
+                          {d.device_type === "ios" ? "iPhone" : d.device_type === "android" ? "Android" : "Perangkat"}
+                        </span>
                       </button>
                     );
                   })}
@@ -235,7 +283,7 @@ export function OperatorPage(p: Props) {
 
             {p.acqSource === "zip" && p.zipEnabled && (
               <div className="field">
-                <label htmlFor="zip-file">Arsip ZIP (hasil adb pull / dump media)</label>
+                <label htmlFor="zip-file">Arsip perangkat (ZIP)</label>
                 <input
                   id="zip-file"
                   type="file"
@@ -262,45 +310,134 @@ export function OperatorPage(p: Props) {
               </div>
             )}
 
-            <div className="field">
-              <label htmlFor="acq-mode">Kedalaman analisa</label>
-              <select
-                id="acq-mode"
-                value={p.mode}
-                onChange={(e) => p.setMode(e.target.value as AcquisitionMode)}
-                disabled={p.busy || active}
-              >
-                <option value="quick">Cepat — sampling lebih ringkas</option>
-                <option value="full">Penuh — cakupan lebih luas</option>
-              </select>
+            <div className="field-group" role="group" aria-labelledby="analysis-scope-heading">
+              <p id="analysis-scope-heading" className="field-group-title">
+                Fokus analisa
+              </p>
+              <div className="analysis-scope-grid" role="radiogroup" aria-labelledby="analysis-scope-heading">
+                {ANALYSIS_SCOPE_OPTIONS.map((option) => {
+                  const selectedScope = p.analysisScope === option.id;
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={selectedScope}
+                      className={`analysis-scope-card ${selectedScope ? "selected" : ""} ${option.id === "combined" ? "slow" : ""}`}
+                      disabled={p.busy || active}
+                      onClick={() => {
+                        p.setAnalysisScope(option.id);
+                        const next = planForScope(option.id);
+                        p.setDeviceSources(next.deviceSources);
+                        p.setSocialTargets(next.socialTargets);
+                      }}
+                    >
+                      <strong>{option.label}</strong>
+                      <small>{option.hint}</small>
+                    </button>
+                  );
+                })}
+              </div>
+              {p.analysisScope === "combined" && (
+                <div className="analysis-scope-warn" role="status">
+                  <strong>Proses akan lebih lama</strong>
+                  <p>
+                    Gabungan menganalisa sumber HP dan crawl sosmed sekaligus. Waktu bisa naik
+                    signifikan jika Instagram, Facebook, dan X semua dicentang. Kurangi checklist
+                    jika waktu terbatas, atau pilih <strong>HP saja</strong> untuk jalur cepat.
+                  </p>
+                </div>
+              )}
+              <p className="field-note">
+                Semakin sedikit yang dicentang, semakin cepat pemeriksaan.
+              </p>
+
+              <details className="operator-advanced">
+                <summary>Atur sumber (opsional)</summary>
+              {showDeviceChecks && (
+                <fieldset className="analysis-check-set" disabled={p.busy || active}>
+                  <legend>Sumber HP</legend>
+                  <div className="analysis-check-grid">
+                    {DEVICE_SOURCE_OPTIONS.map((option) => (
+                      <label key={option.id} className="analysis-check">
+                        <input
+                          type="checkbox"
+                          checked={p.deviceSources.includes(option.id)}
+                          onChange={() => p.setDeviceSources(toggleChecked(p.deviceSources, option.id))}
+                        />
+                        <span>
+                          <strong>{option.label}</strong>
+                          <small>{option.hint}</small>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+              )}
+
+              {showSocialChecks && (
+                <fieldset className="analysis-check-set" disabled={p.busy || active}>
+                  <legend>Akun sosmed</legend>
+                  <div className="analysis-check-grid analysis-check-grid-compact">
+                    {SOCIAL_TARGET_OPTIONS.map((option) => (
+                      <label key={option.id} className="analysis-check">
+                        <input
+                          type="checkbox"
+                          checked={p.socialTargets.includes(option.id)}
+                          onChange={() => p.setSocialTargets(toggleChecked(p.socialTargets, option.id))}
+                        />
+                        <span>
+                          <strong>{option.label}</strong>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+              )}
+
+              {!planReady && (
+                <p className="field-note">
+                  {p.analysisScope === "device"
+                    ? "Centang minimal satu sumber HP."
+                    : p.analysisScope === "social"
+                      ? "Centang minimal satu akun sosmed."
+                      : "Gabungan membutuhkan minimal satu sumber HP dan satu akun sosmed."}
+                </p>
+              )}
+              </details>
             </div>
 
             <div className="actions">
               {p.acqSource === "live" ? (
                 <button
-                  className="btn btn-primary ent-btn-shine"
-                  disabled={!p.canStartLive}
+                  className="btn btn-primary"
+                  disabled={!p.canStartLive || mutexBlocksStart}
+                  title={mutexBlocksStart ? "Mesin sedang dipakai — batalkan sesi aktif dulu" : undefined}
                   onClick={p.start}
                 >
-                  {p.busy ? "Memulai…" : "Jalankan akuisisi"}
+                  {p.busy ? "Memulai…" : "Jalankan pemeriksaan"}
                 </button>
               ) : (
                 <button
-                  className="btn btn-primary ent-btn-shine"
-                  disabled={!p.canStartZip}
+                  className="btn btn-primary"
+                  disabled={!p.canStartZip || mutexBlocksStart}
+                  title={mutexBlocksStart ? "Mesin sedang dipakai — batalkan sesi aktif dulu" : undefined}
                   onClick={p.startZip}
                 >
-                  {p.busy ? "Mengunggah…" : "Analisa ZIP"}
+                  {p.busy ? "Mengunggah…" : "Analisa arsip"}
                 </button>
               )}
               {p.session && ACTIVE.has(p.session.status) && (
-                <button className="btn btn-danger" onClick={p.cancel} disabled={p.busy}>
+                <button className="btn btn-danger" onClick={() => p.cancel()} disabled={p.busy}>
                   Batalkan
                 </button>
               )}
             </div>
             {!identityReady && (
-              <p className="field-note">Isi nama dan no. peserta sebelum menjalankan akuisisi.</p>
+              <p className="field-note">Isi nama dan no. peserta sebelum menjalankan pemeriksaan.</p>
+            )}
+            {identityReady && !planReady && (
+              <p className="field-note">Pilih fokus dan centang sumber yang akan dianalisa.</p>
             )}
           </div>
         </FeaturePanel>
@@ -312,39 +449,51 @@ export function OperatorPage(p: Props) {
         >
           {!p.session ? (
             <div className="standby">
-              <p className="standby-title">Pipeline siap</p>
+              <p className="standby-title">Pemeriksaan siap</p>
               <p className="standby-copy">
-                Isi identitas peserta, pilih perangkat live atau unggah ZIP, lalu jalankan. Live
-                Android otomatis membangun dan memasang APK agent terbaru.
+                Isi identitas peserta, pilih perangkat terhubung atau unggah arsip, lalu jalankan.
               </p>
-              <PipelineTrack />
             </div>
           ) : (
             <>
-              <PipelineTrack status={p.session.status} session={p.session} />
               <div className="tel-live">
                 <StatusPill status={p.session.status} recommendation={p.session.recommendation} />
-                <span className="pill muted">{p.session.mode === "full" ? "Penuh" : "Cepat"}</span>
                 <span className="pill muted">
-                  {humanLabel("method", progress?.acquisition_method || "unknown")}
+                  {ANALYSIS_SCOPE_LABEL[sessionScope] ?? ANALYSIS_SCOPE_LABEL.combined}
                 </span>
+                {LAB_UI && (
+                <span
+                  className="pill muted"
+                  title={humanLabel("method", progress?.acquisition_method || "unknown")}
+                >
+                  {methodSummary(progress?.acquisition_method || "unknown")}
+                </span>
+                )}
                 {p.session.participant?.full_name ? (
                   <span className="pill muted">{p.session.participant.full_name}</span>
-                ) : (
-                  <span className="pill muted">{p.session.device_id}</span>
-                )}
+                ) : null}
               </div>
 
-              {p.session.error && <div className="error-banner spaced">{p.session.error}</div>}
+              {p.session.error && (
+                <div className="error-banner spaced">{humanProgressMessage(p.session.error)}</div>
+              )}
 
               {p.session.status === "awaiting_access" && (
                 <div className="access-hint" role="alert">
-                  <strong>Izin perangkat diperlukan</strong>
+                  <strong>Izin di HP diperlukan</strong>
                   <p>
-                    Di HP calon: aktifkan <strong>Accessibility SATRIA</strong> (wajib). Mode{" "}
-                    <strong>Penuh</strong> juga membutuhkan izin akses semua file. Notification
-                    Listener dicoba otomatis — jika gagal, sesi tetap lanjut parsial.
+                    {needsSocialAccess
+                      ? "Izinkan SATRIA membaca layar untuk crawl sosmed, lalu kembali ke konsol."
+                      : "Mode HP saja biasanya tidak butuh izin aksesibilitas. Jika diminta, izinkan akses file lalu lanjut."}
                   </p>
+                  <details className="operator-tech">
+                    <summary>Bantuan teknis</summary>
+                    <p>
+                    {needsSocialAccess
+                      ? "Aktifkan Accessibility SATRIA. Pemeriksaan mungkin meminta izin semua file. Izin notifikasi dicoba otomatis."
+                      : "Pemeriksaan mungkin meminta izin semua file. Izin notifikasi dicoba otomatis."}
+                    </p>
+                  </details>
                 </div>
               )}
 
@@ -354,7 +503,7 @@ export function OperatorPage(p: Props) {
 
               <div className="progress-wrap">
                 <div className="progress-meta">
-                  <span>{progress?.message}</span>
+                  <span>{humanProgressMessage(progress?.message) || sessionStatusLabel(p.session.status)}</span>
                   <strong>{progress?.percent?.toFixed(0) ?? 0}%</strong>
                 </div>
                 <div className={`bar ${ACTIVE.has(p.session.status) ? "active" : ""}`}>
@@ -364,29 +513,40 @@ export function OperatorPage(p: Props) {
 
               <div className="timing">
                 <div>
-                  Rekam
-                  <strong>
-                    {selectedRecords}
-                    {inventoried ? ` / ${inventoried}` : ""}
-                  </strong>
-                </div>
-                <div>
                   Berkas
                   <strong>{indexedFiles}</strong>
-                </div>
-                <div>
-                  Dianalisis
-                  <strong>{progress?.files_analyzed ?? 0}</strong>
                 </div>
                 <div>
                   Temuan
                   <strong>{progress?.findings_count ?? 0}</strong>
                 </div>
                 <div>
-                  Total waktu
+                  Waktu
                   <strong>{ms(liveTotalMs)}</strong>
                 </div>
               </div>
+              <details className="operator-tech">
+                <summary>Bantuan teknis</summary>
+                <div className="timing">
+                  <div>
+                    Rekam
+                    <strong>
+                      {selectedRecords}
+                      {inventoried ? ` / ${inventoried}` : ""}
+                    </strong>
+                  </div>
+                  <div>
+                    Dianalisis
+                    <strong>{progress?.files_analyzed ?? 0}</strong>
+                  </div>
+                  {progress?.acquisition_method && (
+                    <div>
+                      Metode
+                      <strong>{humanLabel("method", progress.acquisition_method)}</strong>
+                    </div>
+                  )}
+                </div>
+              </details>
 
               {p.session.status === "completed" && (p.canFindings || p.canReport || p.canDashboard) && (
                 <div className="actions actions-spaced">
@@ -414,7 +574,7 @@ export function OperatorPage(p: Props) {
                       type="button"
                       onClick={() => p.onNavigateTab("dashboard")}
                     >
-                      Buka dasbor
+                      Buka ikhtisar
                     </button>
                   )}
                 </div>

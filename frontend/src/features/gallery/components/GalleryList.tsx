@@ -1,6 +1,7 @@
 import type { GalleryItem, Paginated } from "@/shared/api/client";
 import { Pagination } from "@/shared/ui/Pagination";
 import { humanLabel } from "@/features/dashboard/lib/dashboardLabels";
+import { displayMediaName, displayPath, displayStamp } from "@/shared/lib/displayPath";
 import { MediaPreview } from "./MediaPreview";
 
 type Props = {
@@ -10,9 +11,7 @@ type Props = {
 };
 
 function capturedLabel(value: string | null | undefined): string {
-  if (!value) return "—";
-  const stamp = value.replace("T", " ").replace("Z", "");
-  return stamp.slice(0, 16);
+  return displayStamp(value);
 }
 
 export function GalleryList({ sessionId, data, onPage }: Props) {
@@ -41,7 +40,9 @@ export function GalleryList({ sessionId, data, onPage }: Props) {
                   />
                 </td>
                 <td>
-                  <strong className="finding-label">{item.label}</strong>
+                  <strong className="finding-label" title={item.label}>
+                    {displayMediaName(item.label, item.path, item.album)}
+                  </strong>
                   {item.favorite ? <div className="finding-meta">Favorit perangkat</div> : null}
                 </td>
                 <td>
@@ -49,7 +50,7 @@ export function GalleryList({ sessionId, data, onPage }: Props) {
                 </td>
                 <td>
                   <span className="finding-source">{humanLabel("source", item.source)}</span>
-                  <div className="finding-path">{item.path}</div>
+                  <div className="finding-path" title={item.path}>{displayPath(item.path)}</div>
                 </td>
                 <td>{capturedLabel(item.captured_at)}</td>
               </tr>
@@ -70,7 +71,9 @@ export function GalleryList({ sessionId, data, onPage }: Props) {
               />
             </div>
             <div className="finding-card-body">
-              <strong className="finding-label">{item.label}</strong>
+              <strong className="finding-label" title={item.label}>
+                {displayMediaName(item.label, item.path, item.album)}
+              </strong>
               <div className="finding-meta">
                 <span>{item.album}</span>
                 <span>·</span>
@@ -82,7 +85,7 @@ export function GalleryList({ sessionId, data, onPage }: Props) {
                   </>
                 ) : null}
               </div>
-              <div className="finding-path">{item.path}</div>
+              <div className="finding-path" title={item.path}>{displayPath(item.path)}</div>
               <div className="evidence-body">{capturedLabel(item.captured_at)}</div>
             </div>
           </article>

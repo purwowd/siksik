@@ -1,7 +1,6 @@
 import type { Tab } from "@/shared/types";
 
 export type FeaturePageMeta = {
-  eyebrow: string;
   title: string;
   copy: string;
 };
@@ -16,42 +15,37 @@ export type FeatureEmptyMeta = {
 /** Metadata konsisten per tab konsol. */
 export const FEATURE_PAGE_META: Record<Tab, FeaturePageMeta> = {
   operator: {
-    eyebrow: "Tahap 01 · Penerimaan kasus",
-    title: "Pengambilan data",
-    copy: "Hubungkan perangkat yang diizinkan atau unggah ZIP forensik. Pilih kedalaman analisa, lalu jalankan pipeline.",
+    title: "Penerimaan",
+    copy: "Identitas, perangkat, cakupan, lalu jalankan. Satu sesi aktif.",
   },
   findings: {
-    eyebrow: "Tahap 02–04 · Meja analis",
-    title: "Tinjauan temuan",
-    copy: "Konfirmasi atau tolak sinyal terflag. Papan ketik: J/K navigasi · C konfirmasi · R tolak.",
+    title: "Temuan",
+    copy: "Konfirmasi atau tolak setiap temuan sebelum pengesahan.",
   },
   gallery: {
-    eyebrow: "Tahap 02 · Loker bukti",
     title: "Galeri",
-    copy: "Media dan artefak yang sudah masuk sesi — termasuk yang tidak terflag.",
+    copy: "Media yang diambil pada sesi aktif.",
   },
   report: {
-    eyebrow: "Tahap 05 · Keputusan akhir",
-    title: "Laporan kasus & pengesahan",
-    copy: "Ringkasan bukti, profil sosial, dan pengesahan pimpinan — satu meja keputusan.",
+    title: "Laporan",
+    copy: "Ringkasan, PDF, jejak audit. Pimpinan mengesahkan di sini.",
   },
   dashboard: {
-    eyebrow: "Meja komando",
-    title: "Dasbor petugas",
-    copy: "Prioritas antrean, modul analisis sesi, dan tren indikasi — pilih sesi di atas untuk fokus per kasus.",
+    title: "Ikhtisar",
+    copy: "Antrean, modul, dan tren sesi yang dipilih.",
   },
 };
 
 export const FEATURE_EMPTY_NO_SESSION: Record<Exclude<Tab, "operator">, FeatureEmptyMeta> = {
   findings: {
-    title: "Belum ada kasus aktif",
-    body: "Pilih sesi di atas untuk membuka antrean temuan analis.",
-    hint: "Pilih sesi untuk memulai tinjauan analis.",
+    title: "Belum ada kasus dipilih",
+    body: "Pilih sesi di atas untuk membuka antrean temuan.",
+    hint: "Pilih sesi untuk memulai tinjauan.",
   },
   gallery: {
     title: "Belum ada kasus dipilih",
-    body: "Pilih sesi untuk membuka loker bukti media.",
-    hint: "Pilih sesi untuk menelusuri artefak galeri yang diambil.",
+    body: "Pilih sesi untuk melihat media yang diambil.",
+    hint: "Pilih sesi untuk menelusuri galeri.",
   },
   report: {
     title: "Belum ada kasus dipilih",
@@ -59,14 +53,13 @@ export const FEATURE_EMPTY_NO_SESSION: Record<Exclude<Tab, "operator">, FeatureE
     hint: "Pilih kasus selesai untuk mengesahkan rekomendasi.",
   },
   dashboard: {
-    title: "Belum ada sesi dipilih",
-    body: "Pilih sesi calon untuk melihat modul analisis dan statistik agregat.",
-    hint: "Gunakan pemilih sesi di atas atau mulai akuisisi baru.",
+    title: "Belum ada kasus dipilih",
+    body: "Pilih sesi untuk melihat ringkasan pemeriksaan.",
+    hint: "Gunakan pemilih sesi di atas atau mulai pemeriksaan baru.",
   },
 };
 
 export const OPERATOR_TELEMETRY_META: FeaturePageMeta = {
-  eyebrow: "Telemetri langsung",
-  title: "Status pipeline",
-  copy: "Pantau progres akuisisi, indeks, dan analisa secara real-time.",
+  title: "Status pemeriksaan",
+  copy: "Progres pengambilan dan analisa sesi aktif.",
 };

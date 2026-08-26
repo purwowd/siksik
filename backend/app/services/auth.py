@@ -1,4 +1,4 @@
-"""RBAC PoC — roles sesuai panitia: operator, analis, pimpinan, admin."""
+"""RBAC — roles panitia: operator, analis, pimpinan, admin."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import bcrypt
 from fastapi import Depends, Header, HTTPException, Request
 
 from app.core.db import db, utcnow
+from app.services.audit import record_audit
 
 BCRYPT_MARKER = "bcrypt"
 _LOGIN_WINDOW_S = 60.0
@@ -33,7 +34,7 @@ class Role(str, Enum):
     ADMIN = "admin"
 
 
-# Matriks izin PoC
+# Matriks izin workstation
 PERMISSIONS: dict[Role, set[str]] = {
     Role.OPERATOR: {
         "health",
@@ -250,6 +251,11 @@ async def login(
             username.strip().lower(),
             request.client.host if request and request.client else "unknown",
         )
+        await record_audit(
+            action="login_failed",
+            actor=username.strip().lower() or "unknown",
+            detail="invalid_credentials",
+        )
         raise HTTPException(status_code=401, detail="Username atau password salah")
 
     await _upgrade_hash_if_legacy(row["id"], password, row["salt"])
@@ -265,6 +271,11 @@ async def login(
         row["username"],
         row["role"],
         request.client.host if request and request.client else "unknown",
+    )
+    await record_audit(
+        action="login_success",
+        actor=row["username"],
+        detail=row["role"],
     )
     return AuthUser(
         id=row["id"],

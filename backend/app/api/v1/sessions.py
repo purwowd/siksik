@@ -5,18 +5,22 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
+from app.core.db import db
 from app.core.config import settings
 from app.models.schemas import (
     AcquisitionMode,
+    AnalysisScope,
     PaginatedSessions,
     ParticipantInput,
     SessionSummary,
     StartSessionRequest,
     UpdateParticipantRequest,
 )
+from app.acquisition.analysis_plan import build_analysis_plan
 from app.api.deps import pages, clamp_page
 from app.services.auth import require_perm, AuthUser
 from app.services.sessions import sessions
+from app.services.audit import list_session_audit, record_audit
 
 router = APIRouter()
 
@@ -36,6 +40,12 @@ def _participant_from_form(
     )
 
 
+def _csv_form_list(raw: str | None) -> list[str] | None:
+    if raw is None:
+        return None
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 @router.post("/sessions", response_model=SessionSummary)
 async def start_session(
     body: StartSessionRequest,
@@ -45,10 +55,16 @@ async def start_session(
     if wants_sim and not settings.lab_demo_mode and not settings.e2e_simulation:
         raise HTTPException(
             status_code=403,
-            detail="Mode lab/simulator dinonaktifkan. Sambungkan perangkat live atau set SADT_LAB_DEMO_MODE=1.",
+            detail="Mode lab/simulator dinonaktifkan. Sambungkan HP dengan kabel USB atau unggah arsip perangkat.",
         )
     try:
         data = await sessions.create_and_run(body, operator_id=user.id)
+        await record_audit(
+            session_id=data["id"],
+            actor=user.username,
+            action="session_started",
+            detail=f"{body.analysis_scope.value} · {body.mode.value}",
+        )
         return SessionSummary.model_validate(data)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -56,13 +72,15 @@ async def start_session(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-
 @router.post("/sessions/from-zip", response_model=SessionSummary)
 async def start_session_from_zip(
     user: Annotated[AuthUser, Depends(require_perm("sessions:start"))],
-    file: UploadFile = File(..., description="ZIP hasil adb pull / dump media"),
+    file: UploadFile = File(..., description="ZIP arsip perangkat (galeri/dokumen)"),
     mode: AcquisitionMode = Form(AcquisitionMode.QUICK),
     label: str | None = Form(None),
+    analysis_scope: AnalysisScope = Form(AnalysisScope.DEVICE),
+    device_sources: str | None = Form(None),
+    social_targets: str | None = Form(None),
     participant_full_name: str = Form(..., min_length=1),
     participant_registration_no: str = Form(..., min_length=1),
     participant_nik: str | None = Form(None),
@@ -94,6 +112,17 @@ async def start_session_from_zip(
             label=label,
             participant=participant,
             operator_id=user.id,
+            analysis_plan=build_analysis_plan(
+                scope=analysis_scope,
+                device_sources=_csv_form_list(device_sources),
+                social_targets=_csv_form_list(social_targets),
+            ),
+        )
+        await record_audit(
+            session_id=data["id"],
+            actor=user.username,
+            action="session_started",
+            detail=f"zip · {analysis_scope.value} · {mode.value}",
         )
         return SessionSummary.model_validate(data)
     except RuntimeError as exc:
@@ -156,12 +185,29 @@ async def get_session(
 @router.post("/sessions/{session_id}/cancel", response_model=SessionSummary)
 async def cancel_session(
     session_id: str,
-    _: Annotated[AuthUser, Depends(require_perm("sessions:cancel"))],
+    user: Annotated[AuthUser, Depends(require_perm("sessions:cancel"))],
 ) -> SessionSummary:
     try:
-        return SessionSummary.model_validate(await sessions.cancel(session_id))
+        data = await sessions.cancel(session_id)
+        await record_audit(
+            session_id=session_id,
+            actor=user.username,
+            action="session_cancelled",
+        )
+        return SessionSummary.model_validate(data)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
+
+
+@router.get("/sessions/{session_id}/audit")
+async def session_audit(
+    session_id: str,
+    _: Annotated[AuthUser, Depends(require_perm("sessions:read"))],
+) -> list[dict]:
+    row = await db.fetchone("SELECT id FROM sessions WHERE id = ?", (session_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return await list_session_audit(session_id)
 
 
 

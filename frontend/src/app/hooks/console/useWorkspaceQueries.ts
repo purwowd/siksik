@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { DEFAULT_PAGE_SIZE } from "@/shared/ui/Pagination";
 import {
   api,
@@ -17,7 +17,6 @@ type Params = {
   tab: Tab | null;
   session: SessionSummary | null;
   sessionList: SessionSummary[];
-  setSessionList: React.Dispatch<React.SetStateAction<SessionSummary[]>>;
   reviewFilter: ReviewFilterParam;
   moduleFilter: ModuleFilterParam | null;
   galleryAlbum: string;
@@ -37,6 +36,7 @@ export function useWorkspaceQueries(p: Params) {
   const [findingsPage, setFindingsPage] = useState(1);
   const [galleryPage, setGalleryPage] = useState(1);
   const [galleryRefreshToken, setGalleryRefreshToken] = useState(0);
+  const [findingsRefreshToken, setFindingsRefreshToken] = useState(0);
   const [reportFindings, setReportFindings] = useState<Paginated<Finding> | null>(null);
   const [reportData, setReportData] = useState<SessionReport | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
@@ -58,7 +58,6 @@ export function useWorkspaceQueries(p: Params) {
 
   useEffect(() => {
     if (p.tab !== "dashboard") return;
-    setDash(null);
     let cancelled = false;
     setDashLoading(true);
     Promise.all([
@@ -80,11 +79,6 @@ export function useWorkspaceQueries(p: Params) {
         setDashSessions(sessionsRes);
         setDashFindings(findingsRes);
         p.setGlobalPending(d.pending_reviews ?? 0);
-        p.setSessionList((prev) => {
-          const map = new Map(prev.map((s) => [s.id, s]));
-          for (const s of sessionsRes.items) map.set(s.id, s);
-          return Array.from(map.values());
-        });
       })
       .catch((e) => {
         if (!cancelled) p.setError(String(e.message || e));
@@ -95,7 +89,7 @@ export function useWorkspaceQueries(p: Params) {
     return () => {
       cancelled = true;
     };
-  }, [p.tab, dashSessionsPage, dashFindingsPage, p.session?.id, p.setGlobalPending, p.setSessionList, p.setError]);
+  }, [p.tab, dashSessionsPage, dashFindingsPage, p.session?.id, p.setGlobalPending, p.setError]);
 
   useEffect(() => {
     if (p.tab !== "dashboard") return;
@@ -110,6 +104,48 @@ export function useWorkspaceQueries(p: Params) {
   useEffect(() => {
     setReportPage((prev) => (prev === 1 ? prev : 1));
   }, [p.session?.id]);
+
+  useLayoutEffect(() => {
+    const id = p.session?.id;
+    if (!id) {
+      setDash(null);
+      setDashFindings(null);
+      setDashLoading(false);
+      setFindingsData(null);
+      setGalleryData(null);
+      setGalleryAlbums([]);
+      setReportFindings(null);
+      setReportData(null);
+      setFindingsLoading(false);
+      setGalleryLoading(false);
+      setReportLoading(false);
+      return;
+    }
+    setDash(null);
+    setDashFindings(null);
+    setDashLoading(true);
+    setFindingsLoading(true);
+    setGalleryLoading(true);
+    setReportLoading(true);
+    setFindingsData(null);
+    setGalleryData(null);
+    setGalleryAlbums([]);
+    setGalleryPage(1);
+    setReportFindings(null);
+    setReportData(null);
+  }, [p.session?.id]);
+
+  useLayoutEffect(() => {
+    if (!p.session?.id) return;
+    setFindingsData(null);
+    setFindingsLoading(true);
+  }, [p.reviewFilter, p.moduleFilter, p.session?.id]);
+
+  useLayoutEffect(() => {
+    if (!p.session?.id) return;
+    setGalleryData(null);
+    setGalleryLoading(true);
+  }, [p.galleryAlbum, p.session?.id]);
 
   useEffect(() => {
     if (p.tab !== "findings") return;
@@ -137,7 +173,7 @@ export function useWorkspaceQueries(p: Params) {
     return () => {
       cancelled = true;
     };
-  }, [p.tab, p.session?.id, findingsPage, p.reviewFilter, p.moduleFilter, p.setError]);
+  }, [p.tab, p.session?.id, findingsPage, p.reviewFilter, p.moduleFilter, findingsRefreshToken, p.setError]);
 
   useEffect(() => {
     if (p.tab !== "gallery") return;
@@ -167,21 +203,19 @@ export function useWorkspaceQueries(p: Params) {
     return () => {
       cancelled = true;
     };
-  }, [p.tab, p.session?.id, p.session?.status, p.galleryAlbum, galleryPage, galleryRefreshToken, p.setError]);
+  }, [p.tab, p.session?.id, p.galleryAlbum, galleryPage, galleryRefreshToken, p.setError]);
 
   const refreshGallery = useCallback(() => {
+    setGalleryData(null);
+    setGalleryLoading(true);
     setGalleryRefreshToken((t) => t + 1);
   }, []);
 
-  useEffect(() => {
-    setDash(null);
+  const refreshFindings = useCallback(() => {
     setFindingsData(null);
-    setGalleryData(null);
-    setGalleryAlbums([]);
-    setGalleryPage(1);
-    setReportFindings(null);
-    setReportData(null);
-  }, [p.session?.id]);
+    setFindingsLoading(true);
+    setFindingsRefreshToken((t) => t + 1);
+  }, []);
 
   useEffect(() => {
     if (p.tab !== "report" || !p.session?.id) return;
@@ -238,5 +272,6 @@ export function useWorkspaceQueries(p: Params) {
     setReportData,
     resetQueries,
     refreshGallery,
+    refreshFindings,
   };
 }

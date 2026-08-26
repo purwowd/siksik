@@ -13,6 +13,8 @@ _SKIP_SOLO_TOKENS = frozenset(
         "anti",  # anti⊂ganti; pakai frasa "anti pemerintah" / "anti presiden"
         "ganti",  # terlalu umum; pakai frasa "ganti presiden"
         "negara",  # terlalu umum; FP di username intel.negara — pakai "khianat/jual negara"
+        "pemerintah",  # "instansi/sistem pemerintah" di loker ≠ "anti pemerintah"
+        "presiden",  # tokoh netral / "ganti presiden" sebagai frasa; jangan token solo
         "online",
         "anak",
         "ilegal",

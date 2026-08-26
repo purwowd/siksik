@@ -18,7 +18,7 @@ import {
   TERMINAL,
   type ReviewSummary,
 } from "@/app/hooks/console/constants";
-import { parseTabSearch, resolveSessionId, type ReviewFilterParam } from "@/app/routes";
+import { parseTabSearch, urlSessionToFollow, type ReviewFilterParam } from "@/app/routes";
 import { useSessionStream } from "@/features/sessions/hooks/useSessionStream";
 import type { Tab } from "@/shared/types";
 import type { ToastPush } from "@/app/hooks/console/useToastStack";
@@ -71,6 +71,15 @@ type Params = {
 export function useSessionWorkspace(p: Params) {
   const defaultSessionTried = useRef(false);
   const sessionIdRef = useRef<string | null>(null);
+  const pickingRef = useRef<string | null>(null);
+  const sessionListRef = useRef(p.sessionList);
+  sessionListRef.current = p.sessionList;
+  const bootstrapHealthRef = useRef(p.bootstrapHealth);
+  bootstrapHealthRef.current = p.bootstrapHealth;
+  const refreshGlobalPendingRef = useRef(p.refreshGlobalPending);
+  refreshGlobalPendingRef.current = p.refreshGlobalPending;
+  const locationSearchRef = useRef(p.location.search);
+  locationSearchRef.current = p.location.search;
   const prevSessionStatusRef = useRef<string | null>(null);
   const completionToastIds = useRef<Set<string>>(new Set());
   const pollEpochRef = useRef(0);
@@ -114,28 +123,46 @@ export function useSessionWorkspace(p: Params) {
 
   const selectSessionById = useCallback(
     async (id: string) => {
-      const s = await api.session(id);
-      p.setSession(s);
-      p.querySetters.setFindingsPage(1);
-      p.querySetters.setReportPage(1);
-      try {
-        localStorage.setItem(SESSION_STORAGE_KEY, id);
-      } catch {
-        /* ignore */
+      pickingRef.current = id;
+      sessionIdRef.current = id;
+      p.setReviewSummary(null);
+      const hinted = sessionListRef.current.find((item) => item.id === id);
+      if (hinted) {
+        p.setSession(hinted);
+        p.querySetters.setFindingsPage(1);
+        p.querySetters.setReportPage(1);
       }
-      void refreshReviewSummary(id);
-      return s;
+      try {
+        const s = await api.session(id);
+        if (sessionIdRef.current !== id) return s;
+        p.setSession((curr) => (curr?.id === id || !curr ? s : curr));
+        p.querySetters.setFindingsPage(1);
+        p.querySetters.setReportPage(1);
+        try {
+          localStorage.setItem(SESSION_STORAGE_KEY, id);
+        } catch {
+          /* ignore */
+        }
+        void refreshReviewSummary(id);
+        return s;
+      } finally {
+        if (pickingRef.current === id) pickingRef.current = null;
+      }
     },
-    [p.setSession, p.querySetters, refreshReviewSummary],
+    [p.setSession, p.setReviewSummary, p.querySetters, refreshReviewSummary],
   );
 
   const resetWorkspace = useCallback(() => {
+    pickingRef.current = null;
+    sessionIdRef.current = null;
+    defaultSessionTried.current = false;
     p.setSession(null);
     p.setReviewSummary(null);
     p.setSessionList([]);
   }, [p.setSession, p.setReviewSummary, p.setSessionList]);
 
   useEffect(() => {
+    if (pickingRef.current) return;
     sessionIdRef.current = p.session?.id ?? null;
   }, [p.session?.id]);
 
@@ -148,17 +175,17 @@ export function useSessionWorkspace(p: Params) {
 
   useEffect(() => {
     if (!p.auth) return;
+    let cancelled = false;
     defaultSessionTried.current = false;
-    void p.refreshGlobalPending();
-    void p.bootstrapHealth();
+    void bootstrapHealthRef.current();
     refreshSessionList()
       .then(async (items) => {
-        if (defaultSessionTried.current || !items) return;
+        if (cancelled || defaultSessionTried.current || !items) return;
         defaultSessionTried.current = true;
         if (sessionIdRef.current) return;
 
-        const { sesi } = parseTabSearch(p.location.search);
-        const fromUrl = sesi ? resolveSessionId(sesi, items) : null;
+        const { sesi } = parseTabSearch(locationSearchRef.current);
+        const fromUrl = urlSessionToFollow(sesi, items, null, false);
         let preferId: string | null = fromUrl;
         if (!preferId) {
           try {
@@ -167,7 +194,7 @@ export function useSessionWorkspace(p: Params) {
             preferId = null;
           }
         }
-        const preferred = pickBootstrapSession(items, preferId);
+        const preferred = pickBootstrapSession(items, preferId, { fromUrl: !!fromUrl });
         if (preferred) {
           try {
             await selectSessionById(preferred.id);
@@ -179,19 +206,26 @@ export function useSessionWorkspace(p: Params) {
       .catch(() => {
         /* list optional on first paint */
       });
-  }, [p.auth, refreshSessionList, selectSessionById, p.refreshGlobalPending, p.location.search, p.bootstrapHealth]);
+    return () => {
+      cancelled = true;
+    };
+  }, [p.auth, refreshSessionList, selectSessionById]);
 
   useEffect(() => {
-    if (!p.auth || p.sessionList.length === 0) return;
+    if (!p.auth || sessionListRef.current.length === 0) return;
     const { sesi } = parseTabSearch(p.location.search);
-    if (!sesi) return;
-    const resolved = resolveSessionId(sesi, p.sessionList);
-    if (resolved && resolved !== p.session?.id) {
-      void selectSessionById(resolved).catch(() => {
+    const follow = urlSessionToFollow(
+      sesi,
+      sessionListRef.current,
+      sessionIdRef.current,
+      pickingRef.current !== null,
+    );
+    if (follow) {
+      void selectSessionById(follow).catch(() => {
         p.setError("Sesi dari URL tidak ditemukan");
       });
     }
-  }, [p.auth, p.location.search, p.sessionList, p.session?.id, selectSessionById, p.setError]);
+  }, [p.auth, p.location.search, p.sessionList.length, selectSessionById, p.setError]);
 
   useEffect(() => {
     if (!p.session?.id) {
@@ -232,9 +266,9 @@ export function useSessionWorkspace(p: Params) {
       } else {
         p.pushToast("Analisa selesai · tidak ada temuan", "ok", { ttlMs: 4000 });
       }
-      void p.refreshGlobalPending();
+      void refreshGlobalPendingRef.current();
     }
-  }, [p.session, p.auth, p.pushToast, p.goToTab, p.refreshGlobalPending]);
+  }, [p.session, p.auth, p.pushToast, p.goToTab]);
 
   useEffect(() => {
     if (!p.session || !ACTIVE.has(p.session.status)) return;
@@ -315,7 +349,7 @@ export function useSessionWorkspace(p: Params) {
             }
           }
           void refreshReviewSummary(s.id).catch(() => undefined);
-          void p.refreshGlobalPending();
+          void refreshGlobalPendingRef.current();
         }
         if (!ACTIVE.has(s.status)) {
           stopped = true;
@@ -354,7 +388,7 @@ export function useSessionWorkspace(p: Params) {
           }
           void refreshSessionList({ soft: true });
           void refreshReviewSummary(s.id);
-          void p.refreshGlobalPending();
+          void refreshGlobalPendingRef.current();
         }
       } catch {
         if (!stopped) {
@@ -385,7 +419,6 @@ export function useSessionWorkspace(p: Params) {
     p.setSession,
     refreshSessionList,
     refreshReviewSummary,
-    p.refreshGlobalPending,
     p.setError,
   ]);
 
@@ -408,8 +441,12 @@ export function useSessionWorkspace(p: Params) {
   );
 
   async function onPickSession(id: string) {
+    if (id === sessionIdRef.current) return;
     try {
       p.setError(null);
+      pickingRef.current = id;
+      sessionIdRef.current = id;
+      if (p.tab) p.goToTab(p.tab, { sesi: id });
       await selectSessionById(id);
     } catch (e) {
       p.setError(e instanceof Error ? e.message : "Gagal memuat sesi");

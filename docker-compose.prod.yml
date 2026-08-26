@@ -8,9 +8,10 @@
 services:
   api:
     env_file:
-      - deploy/env/docker-panitia.generated.env
+      - deploy/env/production.env.example
     environment:
       SADT_API_HOST: "0.0.0.0"
+      SADT_LAB_DEMO_MODE: "0"
     ports: !reset []
 
   ui:

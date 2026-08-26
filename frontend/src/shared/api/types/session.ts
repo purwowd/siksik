@@ -66,6 +66,11 @@ export interface SessionProgress {
   ios_cache_captured?: number;
   ios_deleted_metadata_captured?: number;
   ios_library_warning_count?: number;
+  analysis_scope?: import("./common").AnalysisScope | null;
+  device_sources?: string[];
+  social_targets?: string[];
+  report_sha256?: string | null;
+  authorized_confirmed_findings?: number | null;
 }
 
 export interface TimingBreakdown {

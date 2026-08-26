@@ -23,6 +23,15 @@ export interface SocialReportAccount {
   items: SocialReportItem[];
 }
 
+export interface DeviceIdentityHint {
+  names: string[];
+  emails: string[];
+  phones: string[];
+  organizations: string[];
+  nik_candidates: string[];
+  sources: { name: string; kind: string; label: string }[];
+}
+
 export interface SessionReport {
   generated_at: string;
   social_accounts: SocialReportAccount[];
@@ -30,5 +39,11 @@ export interface SessionReport {
     total_items: number;
     truncated: boolean;
     maximum_items: number;
+  };
+  device_identity?: DeviceIdentityHint;
+  metrics?: {
+    contact_unique?: number;
+    contact_records?: number;
+    sms_by_direction?: Record<string, number>;
   };
 }

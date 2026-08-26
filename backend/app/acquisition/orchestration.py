@@ -13,6 +13,7 @@ from pathlib import Path
 
 from app.acquisition.adb import AsyncAdbTransport
 from app.acquisition.contracts import AcquisitionContext, AcquisitionResult, UploadedArchive
+from app.acquisition.analysis_plan import default_analysis_plan
 from app.acquisition.errors import AcquisitionError, ErrorCategory
 from app.acquisition.file_identity import stable_file_id
 from app.acquisition.indexing import hash_file, index_staging
@@ -528,6 +529,7 @@ async def acquire_dispatch(
     file_count: int,
     on_progress,
     review_candidates: bool = False,
+    analysis_plan=None,
 ) -> tuple[Path, int, float, str]:
     agent_runner = None
     if settings.android_agent_enabled:
@@ -550,12 +552,14 @@ async def acquire_dispatch(
         simulated=simulated,
         request_id=current_request_id(),
         review_candidates=review_candidates,
+        analysis_plan=analysis_plan or default_analysis_plan(),
     )
     result = await registry.acquire(context)
     if (
         settings.android_recovery_enabled
         and device_type == DeviceType.ANDROID
         and not simulated
+        and context.analysis_plan.includes_recovery
     ):
         from app.acquisition.android_recovery import AndroidRecoveryService
         from app.acquisition.android_recovery.service import cleanup_recovery_staging
@@ -619,6 +623,7 @@ async def acquire_dispatch(
     if (
         settings.gmail_acquisition_enabled
         and (device_type == DeviceType.ANDROID or simulated)
+        and context.analysis_plan.scope.value != "social"
         and not ((result.staging / "email").is_dir() and any((result.staging / "email").iterdir()))
     ):
         from app.acquisition.gmail_service import GmailAcquisitionService

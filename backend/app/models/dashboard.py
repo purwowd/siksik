@@ -57,8 +57,9 @@ class DashboardStats(ResponseModel):
     toolchain: dict[str, bool] = Field(default_factory=dict)
     gpu_available: bool = False
     risk_timeline: RiskTimeline | None = None
-    timeline_session_id: str | None = None
-    timeline_session_label: str | None = None
+    social_traces: list[NamedCount] = Field(default_factory=list)
+    contact_unique: int = Field(default=0, ge=0)
+    contact_records: int = Field(default=0, ge=0)
 
 
 class HealthOut(ResponseModel):

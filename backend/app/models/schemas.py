@@ -6,6 +6,7 @@ from app.models.dashboard import DashboardStats, HealthOut, NamedCount, RiskTime
 from app.models.device import AgentBootstrapRequest, AgentBootstrapStatus, DeviceInfo
 from app.models.enums import (
     AcquisitionMode,
+    AnalysisScope,
     AgentBootstrapState,
     DeviceType,
     Layer,
@@ -30,6 +31,7 @@ from app.models.session import (
 
 __all__ = [
     "AcquisitionMode",
+    "AnalysisScope",
     "AgentBootstrapRequest",
     "AgentBootstrapState",
     "AgentBootstrapStatus",

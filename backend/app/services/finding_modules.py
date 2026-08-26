@@ -8,7 +8,7 @@ MODULE_SOURCE_SQL: dict[str, tuple[str, tuple]] = {
         AND (
             LOWER(f.source) IN (
                 'gallery','dcim','download','image','video','media_image','media_video',
-                'recovered_trash','ios_hidden','ios_recently_deleted','ios_recovered_cache',
+                'recovered_trash','recovered_cache','ios_hidden','ios_recently_deleted','ios_recovered_cache',
                 'ios_deleted_metadata'
             )
             OR LOWER(f.path) LIKE '%gallery%'
@@ -29,6 +29,9 @@ MODULE_SOURCE_SQL: dict[str, tuple[str, tuple]] = {
             OR LOWER(f.path) LIKE '%instagram%'
             OR LOWER(f.path) LIKE '%facebook%'
             OR LOWER(f.path) LIKE '%twitter%'
+            OR LOWER(f.path) LIKE '%barcelona%'
+            OR LOWER(f.path) LIKE '%threads%'
+            OR LOWER(f.path) LIKE '%whatsapp%'
         )
         """,
         (),

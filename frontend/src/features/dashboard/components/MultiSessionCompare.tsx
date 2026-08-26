@@ -44,7 +44,7 @@ export function MultiSessionCompare({ lulus, menunggu, tidak, totalSessions }: P
           )}
         </div>
       ) : (
-        <p className="dash-empty">Jalankan akuisisi atau pilih sesi untuk mengisi proporsi ini.</p>
+        <p className="dash-empty">Jalankan pemeriksaan atau pilih sesi untuk mengisi proporsi ini.</p>
       )}
 
       <div className="ent-multi-legend">

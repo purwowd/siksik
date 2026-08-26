@@ -13,11 +13,6 @@ export function AnalysisColumn({ card, onDrillDown }: Props) {
     <article
       className={`satria-col availability-${card.availability}${locked ? " is-locked" : ""}`}
     >
-      {locked && (
-        <span className="satria-lock-badge" aria-hidden title="Modul belum aktif">
-          🔒
-        </span>
-      )}
       <header className="satria-col-head">
         <h3>{card.title}</h3>
         <p>{card.subtitle}</p>
@@ -42,15 +37,10 @@ export function AnalysisColumn({ card, onDrillDown }: Props) {
         <button
           type="button"
           className="btn btn-ghost btn-sm satria-drill-btn"
-          onClick={() => onDrillDown(card.id)}
+          onClick={() => onDrillDown?.(card.id)}
         >
-          Lihat temuan modul →
+          Lihat temuan modul
         </button>
-      )}
-      {locked && (
-        <p className="satria-planned-note">
-          Modul belum aktif pada PoC ini.
-        </p>
       )}
     </article>
   );

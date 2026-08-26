@@ -1,6 +1,5 @@
-import { Navigate, NavLink, Route, Routes } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { can } from "@/shared/api/client";
-import { Breadcrumb } from "@/features/sessions/components/Breadcrumb";
 import { LoginScreen } from "@/features/auth/components/LoginScreen";
 import { CaseFlowBar } from "@/features/sessions/components/CaseFlowBar";
 import { DemoTour, DEMO_TOUR_STEPS } from "@/features/sessions/components/DemoTour";
@@ -14,24 +13,42 @@ import { GalleryPage } from "@/features/gallery/GalleryPage";
 import { buildTabUrl, pathFromTab } from "@/app/routes";
 import type { ConsoleAppViewModel } from "@/app/hooks/useConsoleApp.types";
 import { BrandLogo } from "@/shared/ui/BrandLogo";
+import { LAB_UI } from "@/shared/lib/labUi";
+import { APP_VERSION } from "@/shared/lib/appVersion";
+import { occupyingSession } from "@/shared/lib/caseChecklist";
+import { isContentLoading } from "@/shared/lib/pageLoad";
+import { roleLabel } from "@/shared/lib/roleLabel";
+
+function PreserveSearchRedirect({ to }: { to: string }) {
+  const { search } = useLocation();
+  return <Navigate to={`${to}${search}`} replace />;
+}
 
 export function AppShell(props: ConsoleAppViewModel) {
   const {
     auth, loginUser, loginPass, loginBusy, setLoginUser, setLoginPass, doLogin,
-    location, tab, allowedTabs, landingTab, goToTab, session, sessionList, sessionsLoading,
-    dash, dashSessions, dashFindings, setDashSessionsPage, setDashFindingsPage,
+    tab, allowedTabs, landingTab, goToTab, session, sessionList, sessionsLoading,
+    dash, dashLoading, dashSessions, dashFindings, setDashSessionsPage, setDashFindingsPage,
     findingsData, galleryData, galleryAlbums, findingsLoading, galleryLoading,
     setFindingsPage, setGalleryPage, reviewFilter, moduleFilter, galleryAlbum,
-    reportFindings, reportData, reportLoading,     reviewSummary, error, setError, toasts, dismissToast, pushToast,
+    reportFindings, reportData, reportLoading, reviewSummary, error, setError, toasts, dismissToast, pushToast,
     tourActive, setTourActive, tourStep, setTourStep, busy, reviewBusyId, bulkBusy,
     expandedEvidence, setExpandedEvidence, focusedFindingId, setFocusedFindingId, teleRef,
-    liveDevices, canStartLive, canStartZip,
+    liveDevices, devicesLoading, canStartLive, canStartZip,
     participant, setParticipant,
     acqSource, setAcqSource, zipEnabled, zipFile, setZipFile, zipMaxMb, uploadPct, selected, setSelected,
-    mode, setMode, authorizeNote, setAuthorizeNote, refreshDevices, refreshSessionList, refreshGallery, onPickSession,
+    analysisScope, setAnalysisScope, deviceSources, setDeviceSources, socialTargets, setSocialTargets,
+    authorizeNote, setAuthorizeNote, refreshDevices, refreshSessionList, refreshGallery, refreshFindings, onPickSession,
     openSession, openSessionWithModule, changeReviewFilter, changeModuleFilter, changeGalleryAlbum,
     start, startZip, cancel, review, bulkReview, doLogout, setSession, setReportPage, topBarActive,
   } = props;
+
+  const occupying = occupyingSession(sessionList, session);
+  const contentLoading =
+    (tab === "dashboard" && isContentLoading(dashLoading, dash)) ||
+    (tab === "findings" && !!session && isContentLoading(findingsLoading, findingsData)) ||
+    (tab === "gallery" && !!session && isContentLoading(galleryLoading, galleryData)) ||
+    (tab === "report" && !!session && isContentLoading(reportLoading, reportData));
 
   if (!auth) {
     return (
@@ -44,10 +61,14 @@ export function AppShell(props: ConsoleAppViewModel) {
           error={error}
           onUserChange={setLoginUser}
           onPassChange={setLoginPass}
-          onPickDemo={(user, pass) => {
-            setLoginUser(user);
-            setLoginPass(pass);
-          }}
+          onPickDemo={
+            LAB_UI
+              ? (user, pass) => {
+                  setLoginUser(user);
+                  setLoginPass(pass);
+                }
+              : undefined
+          }
           onSubmit={doLogin}
         />
       </>
@@ -57,47 +78,10 @@ export function AppShell(props: ConsoleAppViewModel) {
   return (
     <div className="app-shell wide ent-shell">
       <TopLoadingBar active={topBarActive} />
-      <header className="ent-topbar ent-glass-bar">
+      <header className="ent-cmdbar">
         <div className="ent-brand">
           <BrandLogo size="sm" />
         </div>
-        <div className="ent-user">
-          <div className="ent-user-text">
-            <strong>{auth.display_name}</strong>
-            <span>
-              {auth.username} · {auth.role}
-            </span>
-          </div>
-          <button className="btn btn-ghost ent-logout" type="button" onClick={() => void doLogout()}>
-            Keluar
-          </button>
-          <button
-            className="btn btn-ghost btn-sm"
-            type="button"
-            onClick={() => {
-              setTourActive(true);
-              setTourStep(0);
-            }}
-          >
-            Tur demo
-          </button>
-        </div>
-      </header>
-
-      {tourActive && (
-        <DemoTour
-          step={tourStep}
-          onNext={() => {
-            if (tourStep >= DEMO_TOUR_STEPS.length - 1) setTourActive(false);
-            else setTourStep((s) => s + 1);
-          }}
-          onPrev={() => setTourStep((s) => Math.max(0, s - 1))}
-          onClose={() => setTourActive(false)}
-          onJumpTab={(t) => goToTab(t)}
-        />
-      )}
-
-      <div className="ent-nav-row">
         <nav className="tabs ent-tabs" role="tablist" aria-label="Navigasi konsol">
           {allowedTabs.map((t) => (
             <NavLink
@@ -114,17 +98,61 @@ export function AppShell(props: ConsoleAppViewModel) {
             >
               {t.label}
               {t.id === "findings" && session && (reviewSummary?.pending ?? 0) > 0 && (
-                <span className="tab-badge" aria-label={`${reviewSummary?.pending} temuan pending`}>
+                <span className="tab-badge" aria-label={`${reviewSummary?.pending} temuan menunggu`}>
                   {reviewSummary?.pending}
                 </span>
               )}
             </NavLink>
           ))}
         </nav>
-        <Breadcrumb pathname={location.pathname} session={session} />
-      </div>
+        <div className="ent-cmd-end">
+          <p className="ent-cmd-meta">
+            <span>{roleLabel(auth.role)}</span>
+            <span>v{APP_VERSION}</span>
+          </p>
+          <div className="ent-user">
+            <div className="ent-user-text">
+              <strong>{auth.display_name}</strong>
+              <span>{auth.username}</span>
+            </div>
+            <button className="btn btn-ghost ent-logout" type="button" onClick={() => void doLogout()}>
+              Keluar
+            </button>
+            {LAB_UI && (
+            <button
+              className="btn btn-ghost btn-sm"
+              type="button"
+              onClick={() => {
+                setTourActive(true);
+                setTourStep(0);
+              }}
+            >
+              Panduan singkat
+            </button>
+            )}
+          </div>
+        </div>
+      </header>
 
-      <CaseFlowBar session={session} />
+      {LAB_UI && tourActive && (
+        <DemoTour
+          step={tourStep}
+          onNext={() => {
+            if (tourStep >= DEMO_TOUR_STEPS.length - 1) setTourActive(false);
+            else setTourStep((s) => s + 1);
+          }}
+          onPrev={() => setTourStep((s) => Math.max(0, s - 1))}
+          onClose={() => setTourActive(false)}
+          onJumpTab={(t) => goToTab(t)}
+        />
+      )}
+
+      <CaseFlowBar
+        session={session}
+        role={auth.role}
+        pending={reviewSummary?.pending ?? 0}
+        loading={contentLoading}
+      />
 
       {error && (
         <div className="error-banner dismissible" role="alert">
@@ -148,7 +176,7 @@ export function AppShell(props: ConsoleAppViewModel) {
 
         {can(auth, "sessions:start") && (
           <Route
-            path="/operator"
+            path="/penerimaan"
             element={
               <OperatorPage
                 teleRef={teleRef}
@@ -165,15 +193,21 @@ export function AppShell(props: ConsoleAppViewModel) {
                 selected={selected}
                 setSelected={setSelected}
                 refreshDevices={refreshDevices}
-                mode={mode}
-                setMode={setMode}
+                devicesLoading={devicesLoading}
+                analysisScope={analysisScope}
+                setAnalysisScope={setAnalysisScope}
+                deviceSources={deviceSources}
+                setDeviceSources={setDeviceSources}
+                socialTargets={socialTargets}
+                setSocialTargets={setSocialTargets}
                 canStartLive={canStartLive}
                 canStartZip={canStartZip}
                 busy={busy}
                 session={session}
+                occupying={occupying}
                 start={() => void start()}
                 startZip={() => void startZip()}
-                cancel={() => void cancel()}
+                cancel={(id) => void cancel(id)}
                 onNavigateTab={goToTab}
                 canFindings={can(auth, "findings:read")}
                 canReport={can(auth, "report:read")}
@@ -182,10 +216,13 @@ export function AppShell(props: ConsoleAppViewModel) {
             }
           />
         )}
+        {can(auth, "sessions:start") && (
+          <Route path="/operator" element={<PreserveSearchRedirect to="/penerimaan" />} />
+        )}
 
         {can(auth, "dashboard") && (
           <Route
-            path="/dasbor"
+            path="/ikhtisar"
             element={
               <DashboardPage
                 session={session}
@@ -193,6 +230,7 @@ export function AppShell(props: ConsoleAppViewModel) {
                 sessionsLoading={sessionsLoading && sessionList.length === 0}
                 onPickSession={(id) => void onPickSession(id)}
                 dash={dash}
+                dashLoading={dashLoading}
                 dashSessions={dashSessions}
                 dashFindings={dashFindings}
                 setDashSessionsPage={setDashSessionsPage}
@@ -201,9 +239,13 @@ export function AppShell(props: ConsoleAppViewModel) {
                 onModuleDrillDown={(modul) => {
                   if (session?.id) void openSessionWithModule(session.id, modul);
                 }}
+                showLabDiagnostics={auth.role === "admin"}
               />
             }
           />
+        )}
+        {can(auth, "dashboard") && (
+          <Route path="/dasbor" element={<PreserveSearchRedirect to="/ikhtisar" />} />
         )}
 
         {can(auth, "findings:read") && (
@@ -219,6 +261,7 @@ export function AppShell(props: ConsoleAppViewModel) {
                 reviewSummary={reviewSummary}
                 onPickSession={(id) => void onPickSession(id)}
                 refreshSessionList={() => void refreshSessionList()}
+                refreshFindings={refreshFindings}
                 reviewFilter={reviewFilter}
                 setReviewFilter={changeReviewFilter}
                 moduleFilter={moduleFilter}

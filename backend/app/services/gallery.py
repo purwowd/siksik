@@ -158,6 +158,8 @@ SOURCE_ALBUMS = {
     "media_audio": "Audio",
     "email": "Email",
     "gmail": "Email",
+    "recovered_cache": "Pratinjau cache",
+    "recovered_trash": "Sampah terhapus",
 }
 
 
@@ -238,6 +240,10 @@ def is_gallery_media(*, source: str, mime: str, path: str, role: str | None) -> 
     role_l = (role or "").casefold()
     if role_l in EXCLUDE_ROLES:
         return False
+    from app.acquisition.media_types import is_agent_self_capture
+
+    if is_agent_self_capture(path):
+        return False
     if role_l == "canonical_record":
         return source_l in STRUCTURED_SOURCES
     ext = Path(path).suffix.lower()
@@ -306,6 +312,13 @@ def gallery_meta_from_canonical(payload: dict[str, Any]) -> dict[str, Any]:
         str(display_name or ""),
         path_hint,
     )
+    from app.acquisition.source_app_hints import inferred_album_label
+
+    inferred = inferred_album_label(
+        directory_hint=directory_hint if isinstance(directory_hint, str) else None,
+        display_name=display_name if isinstance(display_name, str) else None,
+        path=path_hint,
+    )
     return {
         "directory_hint": directory_hint if isinstance(directory_hint, str) else None,
         "display_name": display_name if isinstance(display_name, str) else None,
@@ -313,7 +326,8 @@ def gallery_meta_from_canonical(payload: dict[str, Any]) -> dict[str, Any]:
         "date_added": metadata.get("date_added"),
         "date_modified": metadata.get("date_modified"),
         "date_taken": metadata.get("date_taken") or metadata.get("capture_time"),
-        "album": album_leaf(
+        "album": inferred
+        or album_leaf(
             directory_hint if isinstance(directory_hint, str) else None,
             str(display_name or ""),
             str(payload.get("source_kind") or ""),
@@ -343,8 +357,19 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         if isinstance(meta.get("display_name"), str) and meta.get("display_name")
         else Path(path).name
     )
+    from app.acquisition.media_types import is_agent_self_capture
+
+    if meta.get("acquisition_self_capture") or is_agent_self_capture(path, display_name):
+        return None
+    from app.acquisition.source_app_hints import inferred_album_label
+
+    inferred = inferred_album_label(
+        directory_hint=directory_hint,
+        display_name=display_name,
+        path=path,
+    )
     source_label = SOURCE_ALBUMS.get(source.casefold())
-    label = source_label or album_leaf(directory_hint, path, source)
+    label = inferred or source_label or album_leaf(directory_hint, path, source)
     if (
         source_label is None
         and _semantic_album(directory_hint, path) is None

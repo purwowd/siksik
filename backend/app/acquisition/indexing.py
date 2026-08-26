@@ -10,7 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.acquisition.file_identity import stable_file_id
-from app.acquisition.media_types import _is_junk_media_path, guess_mime
+from app.acquisition.media_types import (
+    _is_junk_media_path,
+    guess_mime,
+    is_agent_self_capture,
+)
 from app.core.branding import is_crawl_record_mime
 from app.core.config import settings
 from app.core.db import db
@@ -111,13 +115,16 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
             artifact = crawl_artifacts.get(rel)
             recovered = recovered_artifacts.get(rel)
             ios_artifact = ios_library_artifacts.get(rel)
-            source = (
-                artifact["source_kind"]
-                if artifact is not None
-                else ios_artifact.source
-                if ios_artifact is not None
-                else Path(rel).parts[0] if Path(rel).parts else "other"
-            )
+            if recovered is not None:
+                from app.acquisition.android_recovery.paths import recovery_file_source
+
+                source = recovery_file_source(recovered.source)
+            elif artifact is not None:
+                source = artifact["source_kind"]
+            elif ios_artifact is not None:
+                source = ios_artifact.source
+            else:
+                source = Path(rel).parts[0] if Path(rel).parts else "other"
             digest = (
                 artifact["sha256"]
                 if artifact is not None
@@ -191,11 +198,20 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                     }
                 )
             from app.services.gallery import album_leaf, looks_favorite
+            from app.acquisition.source_app_hints import infer_source_app, inferred_album_label
 
-            if not meta.get("album"):
-                hint = meta.get("directory_hint")
+            hint = meta.get("directory_hint") if isinstance(meta.get("directory_hint"), str) else None
+            display = meta.get("display_name") if isinstance(meta.get("display_name"), str) else None
+            inferred_album = inferred_album_label(
+                directory_hint=hint,
+                display_name=display,
+                path=rel,
+            )
+            if inferred_album:
+                meta["album"] = inferred_album
+            elif not meta.get("album"):
                 meta["album"] = album_leaf(
-                    hint if isinstance(hint, str) else None,
+                    hint,
                     rel,
                     str(source),
                 )
@@ -233,6 +249,35 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         ),
                     }
                 )
+                if record.source_kind == "contact":
+                    from app.acquisition.contact_identity import (
+                        contact_cluster_keys,
+                        contact_emails,
+                        contact_phones,
+                    )
+
+                    meta["contact_phones"] = contact_phones(record.metadata)
+                    meta["contact_emails"] = contact_emails(record.metadata)
+                    meta["contact_cluster_keys"] = contact_cluster_keys(record.metadata)
+            if not meta.get("source_app"):
+                inferred_app = infer_source_app(
+                    directory_hint=meta.get("directory_hint")
+                    if isinstance(meta.get("directory_hint"), str)
+                    else None,
+                    display_name=meta.get("display_name")
+                    if isinstance(meta.get("display_name"), str)
+                    else None,
+                    path=rel,
+                )
+                if inferred_app:
+                    meta["source_app"] = inferred_app
+                    meta["source_app_inferred"] = True
+            display_for_capture = (
+                meta.get("display_name") if isinstance(meta.get("display_name"), str) else None
+            )
+            if is_agent_self_capture(rel, display_for_capture):
+                meta["acquisition_self_capture"] = True
+            analyzed = 1 if meta.get("acquisition_self_capture") else 0
             file_id = (
                 existing_file_ids.get(rel)
                 or (
@@ -250,7 +295,7 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                 p.stat().st_size,
                 digest,
                 "pulled",
-                0,
+                analyzed,
                 json.dumps(meta),
             )
 
@@ -272,6 +317,9 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
         )
 
     if files:
+        from app.acquisition.contact_identity import annotate_contact_file_rows
+
+        files = annotate_contact_file_rows(files)
         await db.executemany(
             """
             INSERT INTO files (id, session_id, source, path, mime, size_bytes, sha256, pull_status, analyzed, meta_json)

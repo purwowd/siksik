@@ -34,6 +34,7 @@ export function useReviewActions(p: Params) {
 
   const review = useCallback(
     async (id: string, review_status: "confirmed" | "rejected") => {
+      if (p.session?.progress?.authorized_at) return;
       if (reviewBusyId || bulkBusy) return;
       setReviewBusyId(id);
       try {
@@ -84,13 +85,18 @@ export function useReviewActions(p: Params) {
   const bulkReview = useCallback(
     async (review_status: "confirmed" | "rejected") => {
       if (!p.session?.id || !p.reviewSummary?.pending) return;
+      if (p.session.progress?.authorized_at) return;
       const total = p.reviewSummary.pending;
-      const verb = review_status === "confirmed" ? "konfirmasi" : "tolak";
+      const verb = review_status === "confirmed" ? "mengonfirmasi" : "menolak";
       const capNote =
         total > 500
-          ? `\n\nCatatan: antrean menampilkan hingga 500 temuan per halaman; bulk akan memproses semua pending di sesi.`
+          ? `\n\nCatatan: antrean menampilkan hingga 500 temuan per halaman; tindakan ini memproses semua yang menunggu di sesi.`
           : "";
-      if (!window.confirm(`Yakin ingin ${verb} semua ${total} temuan pending?${capNote}`)) {
+      if (
+        !window.confirm(
+          `Tindakan ini tercatat di jejak audit.\n\nYakin ingin ${verb} semua ${total} temuan yang menunggu?${capNote}`,
+        )
+      ) {
         return;
       }
       setBulkBusy(true);
@@ -103,7 +109,7 @@ export function useReviewActions(p: Params) {
         void p.refreshSessionList({ soft: true });
         void p.refreshGlobalPending();
         p.pushToast(
-          `${result.updated} temuan di-${verb}`,
+          `${result.updated} temuan ${review_status === "confirmed" ? "dikonfirmasi" : "ditolak"}`,
           review_status === "confirmed" ? "warn" : "ok",
           { ttlMs: 4000, dedupe: true },
         );

@@ -40,11 +40,26 @@ _JUNK_BASENAMES = frozenset(
     }
 )
 _MEDIA_EXT = IMG_EXT | VID_EXT | AUDIO_EXT | TEXT_EXT | DOC_EXT
+_AGENT_SELF_CAPTURE_STEMS = frozenset({"sadt_shot", "satria_shot", "siksik_shot"})
 
 
 def looks_favorite_path(path_str: str) -> bool:
     value = path_str.casefold()
     return any(token in value for token in ("favorite", "favourite", "favorit"))
+
+
+def is_agent_self_capture(
+    path_str: str | None = None,
+    display_name: str | None = None,
+) -> bool:
+    """Screenshots of the SATRIA console captured during acquisition."""
+    for raw in (path_str, display_name):
+        if not raw:
+            continue
+        stem = Path(str(raw).replace("\\", "/")).stem.casefold()
+        if stem in _AGENT_SELF_CAPTURE_STEMS:
+            return True
+    return False
 
 
 def _is_junk_media_path(path_str: str) -> bool:

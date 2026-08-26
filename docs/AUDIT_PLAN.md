@@ -1,7 +1,7 @@
 # SATRIA — Rencana Audit Komprehensif
 
 Checklist audit per halaman, fitur, logic, API, dan pipeline.  
-**Versi:** Agustus 2026 · **Lingkup:** PoC lab (host + Docker)
+**Versi:** Agustus 2026 · **Lingkup:** workstation on-prem (host + Docker)
 
 ---
 
@@ -23,7 +23,7 @@ Checklist audit per halaman, fitur, logic, API, dan pipeline.
 | **Host lab** | `python run.py --reload` | `npm run dev` | ADB live mungkin tersedia |
 | **Docker** | `docker compose up --build` | proxy Vite | Perangkat live kosong; pakai ZIP |
 
-**Akun demo:** `operator` · `analis` · `pimpinan` · `admin` (lihat `docs/RUNNING.md`)
+**Akun:** `operator` · `analis` · `pimpinan` · `admin` (sandi instalasi — lihat `docs/RUNNING.md` / `docs/RUNBOOK.md`; picker demo hanya jika `VITE_SATRIA_LAB_UI=1`)
 
 ---
 
@@ -33,7 +33,7 @@ Checklist audit per halaman, fitur, logic, API, dan pipeline.
 Fase A  Lingkungan + auth + shell global
 Fase B  Operator (akuisisi) — sumber data untuk sisa alur
 Fase C  Temuan + Galeri (analis)
-Fase D  Dasbor + drill-down
+Fase D  Ikhtisar + drill-down
 Fase E  Laporan + otorisasi (pimpinan)
 Fase F  Backend API & pipeline (otomatis + spot-check)
 Fase G  Regresi + dokumentasi + sign-off
@@ -51,7 +51,7 @@ Estimasi manual penuh: **4–6 jam** (1 auditor) atau **2–3 jam** (2 orang par
 |---|-----|------|-------|
 | A1 | Form login render | Buka `/` | ☐ |
 | A2 | Validasi error | User/sandi salah → banner error | ☐ |
-| A3 | Demo role picker | Klik tiap role → field terisi | ☐ |
+| A3 | Role picker lab | Hanya lab UI: klik role → field terisi. Produksi: form kosong | ☐ |
 | A4 | Login sukses | Redirect ke tab landing role | ☐ |
 | A5 | Logo & wordmark | `SatriaMark` SVG, tanpa animasi putar | ☐ |
 | A6 | Responsif | 375 / 768 / 1280 — stack tunggal, tidak overflow | ☐ |
@@ -62,14 +62,14 @@ Estimasi manual penuh: **4–6 jam** (1 auditor) atau **2–3 jam** (2 orang par
 
 | # | Cek | Cara | Pass? |
 |---|-----|------|-------|
-| A7 | Topbar | Logo + SATRIA + user + Keluar + Tur demo | ☐ |
+| A7 | Topbar | Logo + SATRIA + user + versi + Keluar; Panduan singkat hanya lab UI | ☐ |
 | A8 | Tab visibility RBAC | Login per role → hanya tab yang diizinkan | ☐ |
 | A9 | Breadcrumb | Label tab + sesi aktif | ☐ |
 | A10 | Case flow bar | Stepper 5 tahap, progress sesi | ☐ |
 | A11 | Toast & error banner | Trigger error API → toast/banner muncul | ☐ |
 | A12 | Top loading bar | Request panjang → bar aktif | ☐ |
 | A13 | Logout | Keluar → kembali login, state reset | ☐ |
-| A14 | Tur demo | Buka/tutup, navigasi step | ☐ |
+| A14 | Panduan singkat | Lab UI: buka/tutup, navigasi step. Produksi: tidak tampil | ☐ |
 | A15 | Responsif tabs | ≤720px scroll horizontal tabs | ☐ |
 
 **Logic hooks:** `useConsoleApp` (composer) · `useConsoleNavigation` · `useToastStack` · `useRuntimeHealth`
@@ -78,17 +78,17 @@ Estimasi manual penuh: **4–6 jam** (1 auditor) atau **2–3 jam** (2 orang par
 
 | Tab | operator | analis | pimpinan | admin |
 |-----|:--------:|:------:|:--------:|:-----:|
-| Pengambilan | ✓ | — | — | ✓ |
+| Penerimaan | ✓ | — | — | ✓ |
 | Temuan | — | ✓ | ✓ | ✓ |
 | Galeri | — | ✓ | ✓ | ✓ |
 | Laporan | — | ✓ | ✓ | ✓ |
-| Dasbor | — | ✓ | ✓ | ✓ |
+| Ikhtisar | — | ✓ | ✓ | ✓ |
 
 Operator tidak punya `findings:read` / `report:read` — hanya akuisisi.
 
 ---
 
-## 3. Fase B — Pengambilan Data (`/operator`)
+## 3. Fase B — Penerimaan (`/penerimaan`)
 
 **File:** `OperatorPage.tsx` · `useAcquisitionControls` · `useSessionStream` · backend `acquisition/orchestration.py`
 
@@ -98,7 +98,7 @@ Operator tidak punya `findings:read` / `report:read` — hanya akuisisi.
 |---|-----|-------|
 | B1 | Grid 2 panel (intake + telemetri) | ☐ |
 | B2 | Responsif ≤900px → 1 kolom | ☐ |
-| B3 | Pipeline track visual sesuai status sesi | ☐ |
+| B3 | Tidak ada pipeline track (sudah dihapus) | ☐ |
 | B4 | Tidak ada panel readiness/toolchain (sudah dihapus) | ☐ |
 
 ### 3.2 Fitur akuisisi
@@ -106,7 +106,7 @@ Operator tidak punya `findings:read` / `report:read` — hanya akuisisi.
 | # | Cek | Host | Docker | Pass? |
 |---|-----|------|--------|-------|
 | B5 | Refresh perangkat | Daftar ADB (jika ada) | Kosong / expected | ☐ |
-| B6 | Pilih perangkat + mode quick/full | Start sesi | N/A live | ☐ |
+| B6 | Pilih perangkat + cakupan HP | Start sesi | N/A live | ☐ |
 | B7 | Upload ZIP + start | Start dari ZIP | Start dari ZIP | ☐ |
 | B8 | Progress streaming | SSE/poll update progress | Same | ☐ |
 | B9 | Cancel sesi | Status cancelled | Same | ☐ |
@@ -184,7 +184,7 @@ Operator tidak punya `findings:read` / `report:read` — hanya akuisisi.
 
 ---
 
-## 6. Fase D — Dasbor (`/dasbor`)
+## 6. Fase D — Ikhtisar (`/ikhtisar`)
 
 **File:** `DashboardPage.tsx` · `satriaModules.ts` · `AnalysisColumn.tsx` · backend `dashboard/stats.py`
 

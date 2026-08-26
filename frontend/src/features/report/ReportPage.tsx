@@ -15,8 +15,11 @@ import { ParticipantIdentityEditor } from "@/features/report/components/Particip
 import { VerdictNotice } from "@/features/findings/components/VerdictNotice";
 import { REC_MENUNGGU_REVIEW, isThreatRecommendation } from "@/shared/constants";
 import { FEATURE_EMPTY_NO_SESSION, FEATURE_PAGE_META } from "@/shared/lib/featurePages";
-import { humanLabel } from "@/features/dashboard/lib/dashboardLabels";
+import { isContentLoading } from "@/shared/lib/pageLoad";
+import { sessionIsAuthorized } from "@/shared/lib/caseChecklist";
+import { humanLabel, methodSummary } from "@/features/dashboard/lib/dashboardLabels";
 import { Pagination } from "@/shared/ui/Pagination";
+import { displayMediaName, displayPath, displayStamp } from "@/shared/lib/displayPath";
 
 const REVIEW_LABEL = {
   pending: "Menunggu",
@@ -77,30 +80,33 @@ export function ReportPage({
 }: Props) {
   const progress = session?.progress;
   const canAuthorize = can(auth, "report:authorize");
-  const canEditParticipant = can(auth, "sessions:update_participant");
+  const authorized = sessionIsAuthorized(session);
+  const canEditParticipant = can(auth, "sessions:update_participant") && !authorized;
   const awaitingReview = session?.recommendation === REC_MENUNGGU_REVIEW;
   const blockAuthorize = awaitingReview || (reviewSummary?.pending ?? 0) > 0;
   const empty = FEATURE_EMPTY_NO_SESSION.report;
+  const loading = !!session && isContentLoading(reportLoading, reportData);
 
   return (
     <FeaturePageShell
       meta={FEATURE_PAGE_META.report}
       panelClass="report-panel findings-panel"
       threat={isThreatRecommendation(session?.recommendation)}
+      loading={loading}
       kpis={
-        session ? (
+        session && !loading ? (
           <FeatureKpiGrid
             ariaLabel="Metrik keputusan"
             items={[
               { label: "Menunggu", value: reviewSummary?.pending ?? 0, tone: "warn" },
-              { label: "Dikonfirmasi", value: reviewSummary?.confirmed ?? 0, tone: "bad" },
+              { label: "Dikonfirmasi", value: reviewSummary?.confirmed ?? 0, tone: (reviewSummary?.confirmed ?? 0) > 0 ? "bad" : "muted" },
               {
                 label: "Ditolak",
                 value: reviewSummary?.rejected ?? 0,
                 tone: "muted",
               },
               {
-                label: "Sinyal",
+                label: "Temuan",
                 value: progress?.findings_count ?? reportFindings?.total ?? 0,
               },
             ]}
@@ -122,6 +128,7 @@ export function ReportPage({
           <ParticipantIdentityEditor
             session={session}
             canEdit={canEditParticipant}
+            deviceIdentity={reportData?.device_identity}
             onSaved={(s) => {
               setSession(s);
               refreshSessionList();
@@ -158,11 +165,9 @@ export function ReportPage({
                 )}
                 <div>
                   <dt>Metode</dt>
-                  <dd>{humanLabel("method", progress?.acquisition_method || "unknown")}</dd>
-                </div>
-                <div>
-                  <dt>Mode</dt>
-                  <dd>{session.mode === "full" ? "Penuh" : "Cepat"}</dd>
+                    <dd title={humanLabel("method", progress?.acquisition_method || "unknown")}>
+                      {methodSummary(progress?.acquisition_method || "unknown")}
+                    </dd>
                 </div>
               </dl>
             </div>
@@ -171,34 +176,6 @@ export function ReportPage({
               <div className="report-export" role="group" aria-label="Ekspor laporan">
                 <span className="report-export-label">Ekspor</span>
                 <div className="report-export-btns">
-                  <button
-                    className="report-chip"
-                    type="button"
-                    onClick={() =>
-                      api
-                        .openReport(session.id, "html", session.participant)
-                        .then(() => onToast("Laporan HTML disimpan / dibuka", "ok"))
-                        .catch((e) =>
-                          setError(e instanceof Error ? e.message : "Gagal buka laporan"),
-                        )
-                    }
-                  >
-                    HTML
-                  </button>
-                  <button
-                    className="report-chip"
-                    type="button"
-                    onClick={() =>
-                      api
-                        .openReport(session.id, "json", session.participant)
-                        .then(() => onToast("Laporan JSON disimpan", "ok"))
-                        .catch((e) =>
-                          setError(e instanceof Error ? e.message : "Gagal unduh JSON"),
-                        )
-                    }
-                  >
-                    JSON
-                  </button>
                   <button
                     className="report-chip"
                     type="button"
@@ -220,10 +197,41 @@ export function ReportPage({
                   >
                     PDF / Cetak
                   </button>
+                  <button
+                    className="report-chip"
+                    type="button"
+                    onClick={() =>
+                      api
+                        .openReport(session.id, "html", session.participant)
+                        .then(() => onToast("Laporan HTML disimpan / dibuka", "ok"))
+                        .catch((e) =>
+                          setError(e instanceof Error ? e.message : "Gagal buka laporan"),
+                        )
+                    }
+                  >
+                    HTML
+                  </button>
+                  {auth.role === "admin" && (
+                    <button
+                      className="report-chip"
+                      type="button"
+                      title="Ekspor teknis"
+                      onClick={() =>
+                        api
+                          .openReport(session.id, "json", session.participant)
+                          .then(() => onToast("Laporan JSON disimpan", "ok"))
+                          .catch((e) =>
+                            setError(e instanceof Error ? e.message : "Gagal unduh JSON"),
+                          )
+                      }
+                    >
+                      Ekspor teknis
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {canAuthorize && session.status === "completed" && (
+              {canAuthorize && session.status === "completed" && !authorized && (
                 <div className="authorize-box">
                   {blockAuthorize && (
                     <div className="error-banner authorize-block" role="alert">
@@ -290,10 +298,8 @@ export function ReportPage({
           <section className="report-main">
             <h3 className="dash-section-title">Ringkasan temuan</h3>
             <p className="dash-section-copy">Indikasi terflag + status verifikasi analis.</p>
-            {reportLoading && !reportFindings ? (
-              <div className="empty">Memuat ringkasan temuan…</div>
-            ) : !reportFindings || reportFindings.total === 0 ? (
-              <div className="empty">{reportLoading ? "Memuat…" : "Tidak ada temuan"}</div>
+            {!reportFindings || reportFindings.total === 0 ? (
+              <div className="empty">Tidak ada temuan</div>
             ) : (
               <div className={reportLoading ? "list-refreshing" : undefined} aria-busy={reportLoading}>
                 <div className="findings-desktop">
@@ -304,13 +310,15 @@ export function ReportPage({
                         <th>Asal</th>
                         <th>Keyakinan</th>
                         <th>Verifikasi</th>
-                        <th>Path</th>
+                        <th>Berkas</th>
                       </tr>
                     </thead>
                     <tbody>
                       {reportFindings.items.map((f) => (
                         <tr key={f.id} className="hit-row">
-                          <td className="finding-label">{f.label}</td>
+                          <td className="finding-label" title={f.label}>
+                            {displayMediaName(f.label, f.path)}
+                          </td>
                           <td>
                             <FindingOriginBadge layer={f.layer_origin} label={f.label} />
                             <div className="finding-meta">{humanLabel("source", f.source)}</div>
@@ -329,7 +337,7 @@ export function ReportPage({
                               {REVIEW_LABEL[f.review_status]}
                             </span>
                           </td>
-                          <td className="finding-path">{f.path}</td>
+                          <td className="finding-path" title={f.path}>{displayPath(f.path)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -338,7 +346,9 @@ export function ReportPage({
                 <div className="findings-cards report-cards">
                   {reportFindings.items.map((f) => (
                     <article key={f.id} className="finding-card">
-                      <strong className="finding-label">{f.label}</strong>
+                      <strong className="finding-label" title={f.label}>
+                        {displayMediaName(f.label, f.path)}
+                      </strong>
                       <div className="finding-meta">
                         <FindingOriginBadge layer={f.layer_origin} label={f.label} />
                         <span>· {humanLabel("source", f.source)}</span>
@@ -355,7 +365,7 @@ export function ReportPage({
                           {REVIEW_LABEL[f.review_status]}
                         </span>
                       </div>
-                      <div className="finding-path">{f.path}</div>
+                      <div className="finding-path" title={f.path}>{displayPath(f.path)}</div>
                     </article>
                   ))}
                 </div>
@@ -373,9 +383,7 @@ export function ReportPage({
             <p className="dash-section-copy">
               Profil dan aktivitas sosial yang dikoleksi — bukan temuan.
             </p>
-            {reportLoading && !reportData ? (
-              <EmptyState title="Memuat berkas sosial…" body="Memuat data akun & aktivitas." />
-            ) : !reportData || reportData.social_accounts.length === 0 ? (
+            {!reportData || reportData.social_accounts.length === 0 ? (
               <p className="report-muted-note">Tidak ada data akun sosial terverifikasi pada sesi ini.</p>
             ) : (
               <div>
@@ -407,12 +415,12 @@ export function ReportPage({
                       <span className="report-meta-label">Link profil</span>
                       {account.profile_links.length > 0 ? (
                         account.profile_links.map((link) => (
-                          <span className="finding-path" key={link}>
+                          <span className="report-link" key={link} title={link}>
                             {link}
                           </span>
                         ))
                       ) : (
-                        <span className="finding-path">—</span>
+                        <span className="report-link">—</span>
                       )}
                     </div>
 
@@ -431,7 +439,7 @@ export function ReportPage({
                               {account.items.map((item) => (
                                 <tr key={item.record_id}>
                                   <td>{item.scope_label}</td>
-                                  <td>{item.observed_at || "—"}</td>
+                                  <td>{displayStamp(item.observed_at)}</td>
                                   <td className="evidence-body">{item.preview_text || "—"}</td>
                                 </tr>
                               ))}
@@ -442,7 +450,7 @@ export function ReportPage({
                           {account.items.map((item) => (
                             <article className="finding-card" key={item.record_id}>
                               <strong className="finding-label">{item.scope_label}</strong>
-                              <div className="finding-meta">{item.observed_at || "—"}</div>
+                              <div className="finding-meta">{displayStamp(item.observed_at)}</div>
                               <div className="evidence-body">{item.preview_text || "—"}</div>
                             </article>
                           ))}

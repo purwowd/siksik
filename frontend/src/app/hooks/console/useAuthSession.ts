@@ -13,7 +13,7 @@ type Params = {
 
 export function useAuthSession({ setError, onLogoutReset, urlFilterApplied }: Params) {
   const [auth, setAuth] = useState<AuthSession | null>(() => loadAuth());
-  const [loginUser, setLoginUser] = useState("operator");
+  const [loginUser, setLoginUser] = useState("");
   const [loginPass, setLoginPass] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
   const navigate = useNavigate();

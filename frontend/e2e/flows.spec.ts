@@ -12,7 +12,7 @@ async function loginAs(page: import("@playwright/test").Page, role: keyof typeof
   await page.getByLabel(/Nama pengguna/i).fill(cred.user);
   await page.getByLabel(/Kata sandi/i).fill(cred.pass);
   await page.getByRole("button", { name: /Lanjutkan/i }).click();
-  await expect(page).toHaveURL(/\/(operator|temuan|laporan|dasbor)/, { timeout: 20_000 });
+  await expect(page).toHaveURL(/\/(penerimaan|operator|temuan|laporan|ikhtisar|dasbor)/, { timeout: 20_000 });
 }
 
 test.describe.serial("SATRIA workflow hardening", () => {

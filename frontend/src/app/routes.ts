@@ -3,16 +3,22 @@ import type { Tab } from "@/shared/types";
 
 /** URL path per menu — bahasa Indonesia untuk operator lapangan. */
 export const TAB_PATHS: Record<Tab, string> = {
-  operator: "/operator",
+  operator: "/penerimaan",
   findings: "/temuan",
   gallery: "/galeri",
   report: "/laporan",
-  dashboard: "/dasbor",
+  dashboard: "/ikhtisar",
 };
 
 const PATH_TO_TAB = Object.fromEntries(
   (Object.entries(TAB_PATHS) as [Tab, string][]).map(([tab, path]) => [path, tab]),
 ) as Record<string, Tab>;
+
+/** URL lama — tetap dikenali, lalu diarahkan ke path kanonik. */
+const PATH_ALIASES: Record<string, Tab> = {
+  "/operator": "operator",
+  "/dasbor": "dashboard",
+};
 
 export type ReviewFilterParam = "all" | ReviewStatus;
 export type ModuleFilterParam = "gallery" | "social" | "email" | "whatsapp" | "forensic";
@@ -35,7 +41,7 @@ export function pathFromTab(tab: Tab): string {
 
 export function tabFromPath(pathname: string): Tab | null {
   const base = pathname.split("?")[0].replace(/\/+$/, "") || "/";
-  return PATH_TO_TAB[base] ?? null;
+  return PATH_TO_TAB[base] ?? PATH_ALIASES[base] ?? null;
 }
 
 const MODULE_RE = /^(gallery|social|email|whatsapp|forensic)$/;
@@ -94,4 +100,17 @@ export function resolveSessionId(
   if (exact) return exact.id;
   const pref = sessions.find((s) => s.id.startsWith(querySesi));
   return pref?.id ?? null;
+}
+
+/** Ikuti ?sesi= hanya jika tidak sedang ganti sesi, dan URL beda dari yang sudah dipilih. */
+export function urlSessionToFollow(
+  querySesi: string | null,
+  sessions: { id: string }[],
+  intendedId: string | null,
+  picking: boolean,
+): string | null {
+  if (picking || !querySesi) return null;
+  const resolved = resolveSessionId(querySesi, sessions);
+  if (!resolved || resolved === intendedId) return null;
+  return resolved;
 }

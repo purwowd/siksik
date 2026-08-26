@@ -128,7 +128,9 @@ async def test_reject_concurrent_sessions(client: AsyncClient, monkeypatch: pyte
         },
     )
     assert second.status_code == 409
-    assert "Sesi lain" in second.json()["detail"]
+    detail = second.json()["detail"]
+    assert "masih berjalan" in detail
+    assert "Peserta Tes" in detail
     await wait_session(client, first.json()["id"])
 
 
@@ -298,5 +300,78 @@ async def test_authorize_blocked_until_review_complete(client: AsyncClient, anon
     )
     assert ok.status_code == 200
     assert ok.json()["authorized_by"] == "pimpinan"
+    assert ok.json().get("report_sha256")
     session = (await client.get(f"/api/v1/sessions/{sid}")).json()
     assert session["progress"]["authorized_by"] == "pimpinan"
+    assert session["progress"]["report_sha256"]
+
+
+@pytest.mark.api
+async def test_authorized_session_is_frozen(client: AsyncClient, anon_client: AsyncClient):
+    res = await client.post(
+        "/api/v1/sessions",
+        json={
+            "device_id": "sim-android-01",
+            "device_type": "android",
+            "mode": "quick",
+            "scenario": "lulus",
+            "file_count": 40,
+            "participant": {"full_name": "Peserta Kunci", "registration_no": "TEST-LOCK-001"},
+            "label": "Authorize freeze",
+            "force_simulated": True,
+        },
+    )
+    assert res.status_code == 200, res.text
+    sid = res.json()["id"]
+    await wait_session(client, sid)
+
+    findings = (await client.get(f"/api/v1/sessions/{sid}/findings?page_size=500")).json()
+    items = findings.get("items") or []
+    for item in items:
+        if item.get("review_status") == "pending":
+            await client.patch(
+                f"/api/v1/findings/{item['id']}",
+                json={"review_status": "rejected"},
+            )
+
+    login = await anon_client.post(
+        "/api/v1/auth/login",
+        json={"username": "pimpinan", "password": "Pimpinan@2026"},
+    )
+    headers = {"Authorization": f"Bearer {login.json()['token']}"}
+    ok = await anon_client.post(
+        f"/api/v1/sessions/{sid}/authorize",
+        headers=headers,
+        json={"note": "Disahkan sekali"},
+    )
+    assert ok.status_code == 200, ok.text
+
+    again = await anon_client.post(
+        f"/api/v1/sessions/{sid}/authorize",
+        headers=headers,
+        json={"note": "Coba ulang"},
+    )
+    assert again.status_code == 409
+
+    identity = await client.patch(
+        f"/api/v1/sessions/{sid}/participant",
+        json={
+            "participant": {
+                "full_name": "Nama Diubah",
+                "registration_no": "TEST-LOCK-001",
+            }
+        },
+    )
+    assert identity.status_code == 409
+
+    if items:
+        review = await client.patch(
+            f"/api/v1/findings/{items[0]['id']}",
+            json={"review_status": "confirmed"},
+        )
+        assert review.status_code == 409
+        bulk = await client.post(
+            f"/api/v1/sessions/{sid}/findings/bulk-review",
+            json={"review_status": "confirmed"},
+        )
+        assert bulk.status_code == 409

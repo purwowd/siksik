@@ -113,16 +113,9 @@ python scripts/apply_env_preset.py lab.panitia  # host panitia (tanpa sim dummy)
 
 ### 4.1 Akun default (DB kosong)
 
-Saat **pertama kali** API start dan tabel `users` kosong, sistem membuat 4 akun seed:
+Saat **pertama kali** API start dan tabel `users` kosong, sistem membuat 4 akun seed (`operator`, `analis`, `pimpinan`, `admin`).
 
-| Role | Username | Password default | Tab utama |
-|------|----------|------------------|-----------|
-| Operator | `operator` | `Ops@2026` | Pengambilan Data |
-| Analis | `analis` | `Analis@2026` | Temuan |
-| Pimpinan | `pimpinan` | `Pimpinan@2026` | Laporan |
-| Admin | `admin` | `Admin@2026` | Semua tab |
-
-Override sebelum DB dibuat — set di `backend/.env`:
+Sandi seed **wajib** di-set lewat env sebelum first boot produksi:
 
 ```env
 SATRIA_SEED_OPERATOR_PASSWORD=...
@@ -130,6 +123,8 @@ SATRIA_SEED_ANALIS_PASSWORD=...
 SATRIA_SEED_PIMPINAN_PASSWORD=...
 SATRIA_SEED_ADMIN_PASSWORD=...
 ```
+
+Produksi panitia: `python scripts/setup_lab_panitia.py` lalu simpan file kredensial lokal (gitignored). Rotasi: `python scripts/rotate_lab_passwords.py --from-env`. Lihat juga [`RUNBOOK.md`](./RUNBOOK.md).
 
 > **Penting:** Password seed **hanya dipakai saat DB kosong**. Jika DB sudah ada, ubah password lewat script rotate (§4.3).
 
@@ -226,7 +221,7 @@ docker compose up --build
 # UI http://127.0.0.1:5173 · API http://127.0.0.1:8000
 ```
 
-**Batasan Docker:** tidak ada USB/ADB; gunakan **upload ZIP** di tab Pengambilan Data.
+**Batasan Docker:** tidak ada USB/ADB; gunakan **upload ZIP** di tab Penerimaan.
 
 Stop + reset data: `docker compose down -v`
 
@@ -325,7 +320,7 @@ Tidak mengubah `LAB_DEMO_MODE` di `.env`.
 # 1) Login API
 curl -s -X POST http://127.0.0.1:8000/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"Admin@2026"}' | python3 -m json.tool
+  -d '{"username":"admin","password":"<sandi-instalasi>"}' | python3 -m json.tool
 
 # 2) Health (ganti TOKEN)
 curl -s http://127.0.0.1:8000/api/v1/health -H "Authorization: Bearer TOKEN"
@@ -343,7 +338,7 @@ cd frontend && npm run test && npm run build
 **Checklist UI:**
 
 1. Login admin → semua 5 tab terlihat
-2. Login operator → hanya tab Pengambilan Data
+2. Login operator → hanya tab Penerimaan
 3. Operator: isi identitas → ZIP atau sim → pipeline selesai
 4. Analis: review temuan → rekomendasi berubah
 5. Pimpinan: Laporan → export PDF/HTML → Sahkan
@@ -354,13 +349,15 @@ cd frontend && npm run test && npm run build
 
 | Tab | Path | Role |
 |-----|------|------|
-| Pengambilan Data | `/operator` | operator, admin |
+| Penerimaan | `/penerimaan` | operator, admin |
 | Temuan | `/temuan` | analis, pimpinan, admin |
 | Galeri | `/galeri` | analis, pimpinan, admin |
 | Laporan | `/laporan` | pimpinan, admin (+ analis baca) |
-| Dasbor | `/dasbor` | analis, pimpinan, admin |
+| Ikhtisar | `/ikhtisar` | analis, pimpinan, admin |
 
 Query: `?sesi=<uuid>&filter=pending&modul=gallery`
+
+Alias: `/operator` → `/penerimaan`, `/dasbor` → `/ikhtisar`.
 
 ---
 

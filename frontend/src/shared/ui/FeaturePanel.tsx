@@ -18,7 +18,6 @@ export function FeaturePanel({ meta, threat, className, panelRef, children }: Pr
       className={`panel ent-panel${threat ? " threat" : ""}${className ? ` ${className}` : ""}`}
     >
       <div className="ent-panel-head">
-        <p className="ent-eyebrow">{meta.eyebrow}</p>
         <PanelTitle title={meta.title} />
         {meta.copy ? <p className="ent-panel-copy">{meta.copy}</p> : null}
       </div>

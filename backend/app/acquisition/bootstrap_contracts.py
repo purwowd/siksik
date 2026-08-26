@@ -140,27 +140,27 @@ STATE_PERCENT = {
 }
 
 STATE_MESSAGES = {
-    AgentRuntimeState.DETECT_DEVICE: "Mendeteksi perangkat Android",
-    AgentRuntimeState.VALIDATE_DEVICE: "Memvalidasi kesiapan perangkat",
-    AgentRuntimeState.RESOLVE_OR_BUILD_AGENT: "Build APK Android agent terbaru",
-    AgentRuntimeState.INSPECT_INSTALLED_PACKAGE: "Memeriksa package Android agent",
-    AgentRuntimeState.INSTALL_OR_UPDATE: "Memasang Android agent terbaru ke perangkat",
+    AgentRuntimeState.DETECT_DEVICE: "Mendeteksi HP Android",
+    AgentRuntimeState.VALIDATE_DEVICE: "Memvalidasi kesiapan HP",
+    AgentRuntimeState.RESOLVE_OR_BUILD_AGENT: "Menyiapkan aplikasi SATRIA di HP",
+    AgentRuntimeState.INSPECT_INSTALLED_PACKAGE: "Memeriksa aplikasi SATRIA di HP",
+    AgentRuntimeState.INSTALL_OR_UPDATE: "Memasang aplikasi SATRIA di HP",
     AgentRuntimeState.AWAITING_INSTALL_APPROVAL: (
-        "Menunggu persetujuan instalasi USB pada perangkat"
+        "Menunggu persetujuan instalasi USB pada HP"
     ),
-    AgentRuntimeState.APPLY_RUNTIME_PERMISSIONS: "Menerapkan izin runtime Android agent",
+    AgentRuntimeState.APPLY_RUNTIME_PERMISSIONS: "Mengatur izin di HP",
     AgentRuntimeState.AWAITING_RUNTIME_PERMISSION: (
-        "Menunggu izin penyimpanan pada perangkat"
+        "Menunggu izin penyimpanan pada HP"
     ),
-    AgentRuntimeState.VERIFY_SPECIAL_ACCESS: "Memverifikasi special access Android",
-    AgentRuntimeState.AWAITING_ACCESS: "Menunggu konfirmasi akses pada perangkat",
-    AgentRuntimeState.START_AGENT: "Menjalankan Android agent",
-    AgentRuntimeState.CREATE_FORWARD: "Membuat koneksi ADB lokal",
-    AgentRuntimeState.AUTHENTICATE_AND_NEGOTIATE: "Memverifikasi sesi Android agent",
-    AgentRuntimeState.READY: "Android agent siap",
-    AgentRuntimeState.FAILED: "Persiapan Android agent gagal",
-    AgentRuntimeState.CANCELLED: "Persiapan Android agent dibatalkan",
-    AgentRuntimeState.CLOSED: "Sesi Android agent ditutup",
+    AgentRuntimeState.VERIFY_SPECIAL_ACCESS: "Memeriksa izin lanjutan di HP",
+    AgentRuntimeState.AWAITING_ACCESS: "Menunggu konfirmasi akses pada HP",
+    AgentRuntimeState.START_AGENT: "Menjalankan aplikasi SATRIA di HP",
+    AgentRuntimeState.CREATE_FORWARD: "Menghubungkan HP ke konsol",
+    AgentRuntimeState.AUTHENTICATE_AND_NEGOTIATE: "Memverifikasi koneksi HP",
+    AgentRuntimeState.READY: "Aplikasi SATRIA di HP siap",
+    AgentRuntimeState.FAILED: "Persiapan aplikasi di HP gagal",
+    AgentRuntimeState.CANCELLED: "Persiapan aplikasi di HP dibatalkan",
+    AgentRuntimeState.CLOSED: "Koneksi HP ditutup",
 }
 
 SPECIAL_ACCESS_WAIT_MESSAGES = {
@@ -202,11 +202,16 @@ def runtime_permissions_for_api(api_level: int) -> tuple[RuntimePermissionRequir
 
 def special_access_for_inventory_mode(
     mode: str,
+    *,
+    require_accessibility: bool = True,
 ) -> tuple[tuple[SpecialAccessKind, ...], tuple[SpecialAccessKind, ...]]:
     if mode not in {"quick", "full"}:
         raise ValueError("Android inventory mode is invalid")
-    optional = (
+    optional = [
         SpecialAccessKind.MANAGE_ALL_FILES,
         SpecialAccessKind.NOTIFICATION_LISTENER,
-    )
-    return (SpecialAccessKind.ACCESSIBILITY,), optional
+    ]
+    if require_accessibility:
+        return (SpecialAccessKind.ACCESSIBILITY,), tuple(optional)
+    optional.append(SpecialAccessKind.ACCESSIBILITY)
+    return (), tuple(optional)

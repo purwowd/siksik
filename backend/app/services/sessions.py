@@ -68,6 +68,73 @@ async def _ensure_unique_registration(
     return payload
 
 
+_LIVE_STATUSES = (
+    "pending",
+    "detecting",
+    "preparing_agent",
+    "awaiting_access",
+    "acquiring",
+    "selecting",
+    "awaiting_review",
+    "indexing",
+    "analyzing",
+)
+
+SESSION_LOCKED_DETAIL = (
+    "Sesi sudah disahkan — identitas, temuan, dan pengesahan tidak bisa diubah."
+)
+
+
+def authorized_at_from_progress(progress_json: Any) -> str | None:
+    try:
+        progress = (
+            progress_json
+            if isinstance(progress_json, dict)
+            else json.loads(progress_json or "{}")
+        )
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(progress, dict):
+        return None
+    value = str(progress.get("authorized_at") or "").strip()
+    return value or None
+
+
+async def require_unlocked_session(session_id: str) -> None:
+    row = await db.fetchone(
+        "SELECT progress_json FROM sessions WHERE id = ?",
+        (session_id,),
+    )
+    if not row:
+        raise KeyError("Session not found")
+    if authorized_at_from_progress(row["progress_json"]):
+        raise RuntimeError(SESSION_LOCKED_DETAIL)
+
+
+async def _require_workstation_idle() -> None:
+    placeholders = ",".join("?" * len(_LIVE_STATUSES))
+    active = await db.fetchone(
+        f"""
+        SELECT label, participant_json FROM sessions
+        WHERE status IN ({placeholders})
+        LIMIT 1
+        """,
+        _LIVE_STATUSES,
+    )
+    if not active:
+        return
+    name = (active["label"] or "").strip()
+    try:
+        participant = json.loads(active["participant_json"] or "{}")
+        name = str(participant.get("full_name") or name).strip() or name
+    except (TypeError, json.JSONDecodeError):
+        pass
+    raise RuntimeError(
+        f"Sesi {name or 'lain'} masih berjalan. Batalkan atau tunggu selesai "
+        "— satu pemeriksaan per mesin."
+    )
+
+
 class SessionManager:
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task] = {}
@@ -81,20 +148,7 @@ class SessionManager:
         operator_id: str | None = None,
     ) -> dict[str, Any]:
         async with self._lock:
-            active = await db.fetchone(
-                """
-                SELECT id FROM sessions
-                WHERE status IN (
-                    'pending','detecting','preparing_agent','awaiting_access',
-                    'acquiring','selecting','awaiting_review','indexing','analyzing'
-                )
-                LIMIT 1
-                """
-            )
-            if active:
-                raise RuntimeError(
-                    "Sesi lain masih berjalan. Selesaikan / batalkan dulu (satu perangkat per sesi)."
-                )
+            await _require_workstation_idle()
 
             session_id = str(uuid.uuid4())
             device_id = req.device_id or (
@@ -108,6 +162,7 @@ class SessionManager:
             participant = await _ensure_unique_registration(req.participant)
             now = utcnow()
             progress = acq.empty_progress(SessionStatus.PENDING)
+            progress.update(req.analysis_plan().to_progress())
             timing = acq.empty_timing()
 
             await db.execute(
@@ -151,22 +206,10 @@ class SessionManager:
         label: str | None = None,
         participant: ParticipantInput,
         operator_id: str | None = None,
+        analysis_plan=None,
     ) -> dict[str, Any]:
         async with self._lock:
-            active = await db.fetchone(
-                """
-                SELECT id FROM sessions
-                WHERE status IN (
-                    'pending','detecting','preparing_agent','awaiting_access',
-                    'acquiring','selecting','awaiting_review','indexing','analyzing'
-                )
-                LIMIT 1
-                """
-            )
-            if active:
-                raise RuntimeError(
-                    "Sesi lain masih berjalan. Selesaikan / batalkan dulu (satu perangkat per sesi)."
-                )
+            await _require_workstation_idle()
 
             session_id = str(uuid.uuid4())
             device_id = f"zip:{original_name[:40]}"
@@ -177,7 +220,11 @@ class SessionManager:
             )
             participant_payload = await _ensure_unique_registration(participant)
             now = utcnow()
+            from app.acquisition.analysis_plan import default_analysis_plan
+
+            plan = analysis_plan or default_analysis_plan()
             progress = acq.empty_progress(SessionStatus.PENDING)
+            progress.update(plan.to_progress())
             timing = acq.empty_timing()
 
             await db.execute(
@@ -228,6 +275,8 @@ class SessionManager:
         row = await db.fetchone("SELECT * FROM sessions WHERE id = ?", (session_id,))
         if not row:
             raise KeyError("Session not found")
+        if authorized_at_from_progress(row["progress_json"]):
+            raise RuntimeError(SESSION_LOCKED_DETAIL)
         payload = await _ensure_unique_registration(
             participant,
             exclude_session_id=session_id,
@@ -244,6 +293,13 @@ class SessionManager:
             """,
             (json.dumps(payload, ensure_ascii=False), label, now, session_id),
         )
+        if str(row["status"] or "") == "completed":
+            try:
+                from app.services.reports import save_session_report
+
+                await save_session_report(session_id)
+            except Exception:
+                pass
         return await self.get(session_id)
 
     async def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -314,11 +370,14 @@ class SessionManager:
                 **fields,
             )
 
+        from app.acquisition.analysis_plan import analysis_plan_from_progress
         from app.acquisition.bootstrap import agent_bootstrap
         from app.acquisition.bootstrap_contracts import special_access_for_inventory_mode
 
+        plan = analysis_plan_from_progress(json.loads(row["progress_json"] or "{}"))
         required_access, optional_access = special_access_for_inventory_mode(
             str(row["mode"]),
+            require_accessibility=plan.includes_social,
         )
 
         return await agent_bootstrap.bootstrap(
@@ -437,6 +496,7 @@ class SessionManager:
                 file_count=req.file_count,
                 on_progress=on_progress,
                 review_candidates=req.review_candidates,
+                analysis_plan=req.analysis_plan(),
             )
             await self._update(
                 session_id,

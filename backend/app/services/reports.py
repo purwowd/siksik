@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
@@ -7,29 +8,45 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.acquisition.social_ocr import repair_ocr_link_text
+from app.acquisition.source_app_hints import SOCIAL_PACKAGE_LABELS, infer_source_app
+from app.acquisition.device_identity import hints_from_document, merge_device_identity_hints
 from app.core.branding import PRODUCT_FULL_NAME, PRODUCT_NAME, PRODUCT_TAGLINE
 from app.core.config import settings
 from app.core.db import db
 
-SOCIAL_PACKAGES = {
-    "com.instagram.android": "Instagram",
-    "com.twitter.android": "X / Twitter",
-    "com.facebook.katana": "Facebook",
-}
+SOCIAL_PACKAGES = dict(SOCIAL_PACKAGE_LABELS)
 SOCIAL_SCOPES = {
     "own_profile": "Profil akun",
     "own_posts": "Postingan akun",
     "own_tweets": "Tweet akun",
-    "own_tweets": "Tweet akun",
-    "own_story_archive": "Arsip story",
     "own_story_archive": "Arsip story",
     "own_comments": "Komentar akun",
-    "own_comments": "Komentar akun",
     "own_replies": "Balasan akun",
-    "own_replies": "Balasan akun",
+    "device_media": "Media di perangkat",
 }
 MAX_SOCIAL_REPORT_ITEMS = 500
 MAX_SOCIAL_PREVIEW_CHARS = 2_000
+
+
+def canonical_report_digest(report: dict) -> str:
+    """Stable SHA-256 over the decision payload (not timestamps)."""
+    session = report.get("session") if isinstance(report.get("session"), dict) else {}
+    body = {
+        "session_id": session.get("id"),
+        "recommendation": session.get("recommendation"),
+        "participant": session.get("participant"),
+        "findings": report.get("findings"),
+        "breakdown": report.get("breakdown"),
+        "metrics": {
+            key: value
+            for key, value in (report.get("metrics") or {}).items()
+            if key not in {"timing", "progress"}
+        },
+    }
+    raw = json.dumps(body, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 REPORT_CATEGORY_LABELS = {
     "ketelanjangan": "Ketelanjangan / konten eksplisit",
     "konten_visual": "Konten visual berisiko",
@@ -40,12 +57,16 @@ REPORT_CATEGORY_LABELS = {
     "audio": "Audio / rekaman",
     "video": "Video",
     "politik": "Konten politik",
+    "anti_pemerintah": "Indikasi anti pemerintah",
+    "anti pemerintah": "Indikasi anti pemerintah",
     "makar": "Indikasi makar",
     "senjata": "Senjata / bom",
     "lainnya": "Lainnya",
 }
 REPORT_SOURCE_LABELS = {
     "image": "Foto / screenshot",
+    "media/image": "Foto / screenshot",
+    "media image": "Foto / screenshot",
     "video": "Video",
     "audio": "Audio",
     "document": "Dokumen",
@@ -54,25 +75,27 @@ REPORT_SOURCE_LABELS = {
     "dcim": "Kamera HP",
     "download": "Folder unduhan",
     "recovered_trash": "Sampah / media terhapus",
+    "recovered_cache": "Pratinjau cache galeri",
     "ios_hidden": "Photos Tersembunyi (iOS)",
     "ios_recently_deleted": "Baru Dihapus (iOS)",
     "ios_recovered_cache": "Cache / preview Photos (iOS)",
     "ios_deleted_metadata": "Jejak hapus permanen Photos (iOS)",
 }
 REPORT_METHOD_LABELS = {
-    "adb": "USB Android (ADB)",
-    "adb_pull": "USB Android (ADB)",
-    "android_agent_inventory_complete": "Inventaris Android selesai",
-    "android_agent_inventory_partial": "Inventaris Android sebagian",
+    "adb": "USB Android",
+    "adb_pull": "USB Android",
+    "android_agent": "Aplikasi SATRIA di HP",
+    "android_agent_inventory_complete": "Inventaris HP selesai",
+    "android_agent_inventory_partial": "Inventaris HP sebagian",
     "preprocessing_complete": "Pra-pemrosesan selesai",
     "preprocessing_partial": "Pra-pemrosesan sebagian",
     "selection_confirmed": "Seleksi terkonfirmasi",
-    "android_agent_direct_manifest": "Transfer agen Android",
-    "android_agent_direct_manifest_resumed": "Transfer agen Android dilanjutkan",
-    "android_recovery_quick_complete": "Recovery sampah Android (Cepat)",
-    "android_recovery_quick_partial": "Recovery sampah Android (Cepat, sebagian)",
-    "android_recovery_full_complete": "Recovery sampah Android (Penuh)",
-    "android_recovery_full_partial": "Recovery sampah Android (Penuh, sebagian)",
+    "android_agent_direct_manifest": "Transfer dari HP",
+    "android_agent_direct_manifest_resumed": "Transfer dari HP dilanjutkan",
+    "android_recovery_quick_complete": "Recovery sampah Android",
+    "android_recovery_quick_partial": "Recovery sampah Android (sebagian)",
+    "android_recovery_full_complete": "Recovery sampah Android",
+    "android_recovery_full_partial": "Recovery sampah Android (sebagian)",
     "ios_afc_media": "Media dan recovery Photos iOS",
     "ios_photo_library_recovery": "Hidden/deleted/cache Photos iOS",
     "zip_upload": "Unggah ZIP",
@@ -331,7 +354,27 @@ def _report_method(value: object) -> str:
         label = _report_label(raw_part, REPORT_METHOD_LABELS)
         if label not in parts:
             parts.append(label)
-    return " + ".join(parts)
+    if len(parts) <= 2:
+        return " · ".join(parts)
+    primary = next(
+        (
+            part
+            for part in parts
+            if any(token in part for token in ("USB", "Transfer dari HP", "Unggah", "Aplikasi SATRIA"))
+        ),
+        parts[0],
+    )
+    secondary = next(
+        (
+            part
+            for part in reversed(parts)
+            if part != primary and ("Recovery" in part or "Photos iOS" in part)
+        ),
+        None,
+    )
+    if primary and secondary:
+        return f"{primary} · {secondary}"
+    return primary
 
 
 def _record_metadata(record: dict) -> dict:
@@ -885,10 +928,51 @@ def _archive_social_preview(text: object) -> str | None:
     return None
 
 
-def _social_item_preview(scope: str, text: object) -> str | None:
+def _record_source_app(record: dict) -> str | None:
+    existing = record.get("source_app")
+    if isinstance(existing, str) and existing in SOCIAL_PACKAGES:
+        return existing
+    metadata = _record_metadata(record)
+    inferred = infer_source_app(
+        directory_hint=metadata.get("directory_hint")
+        if isinstance(metadata.get("directory_hint"), str)
+        else None,
+        display_name=metadata.get("display_name")
+        if isinstance(metadata.get("display_name"), str)
+        else None,
+        path=str(record.get("source_locator") or "") or None,
+    )
+    if inferred in SOCIAL_PACKAGES:
+        return inferred
+    if isinstance(existing, str) and existing in SOCIAL_PACKAGES:
+        return existing
+    return None
+
+
+def _record_social_scope(record: dict, package_name: str) -> str | None:
+    metadata = _record_metadata(record)
+    scope = metadata.get("social_scope") or record.get("social_scope")
+    if scope in SOCIAL_SCOPES and scope != "device_media":
+        return str(scope)
+    if record.get("source_kind") in {"media_image", "media_video"} and package_name:
+        return "device_media"
+    return None
+
+
+def _social_item_preview(scope: str, record: dict) -> str | None:
+    if scope == "device_media":
+        metadata = _record_metadata(record)
+        name = metadata.get("display_name")
+        if isinstance(name, str) and name.strip():
+            hint = metadata.get("directory_hint")
+            if isinstance(hint, str) and hint.strip():
+                return f"{name.strip()} · {hint.strip()}"
+            return name.strip()
     if scope == "own_story_archive":
-        return _archive_social_preview(text) or _social_preview(text)
-    return _social_preview(text)
+        return _archive_social_preview(record.get("normalized_text")) or _social_preview(
+            record.get("normalized_text")
+        )
+    return _social_preview(record.get("normalized_text"))
 
 
 def _apply_social_enrichment(record: dict, row) -> dict:
@@ -948,7 +1032,8 @@ async def _load_social_records(session_id: str) -> list[dict]:
         "e.metadata_json AS host_metadata_json FROM crawl_records r "
         "LEFT JOIN social_snapshot_enrichments e "
         "ON e.crawl_id = r.crawl_id AND e.record_id = r.record_id "
-        "WHERE r.session_id = ? AND r.source_kind = 'visible_ui' "
+        "WHERE r.session_id = ? AND r.source_kind IN "
+        "('visible_ui', 'media_image', 'media_video') "
         "ORDER BY r.ingested_at, r.record_id",
         (session_id,),
     )
@@ -984,17 +1069,100 @@ async def _load_social_records(session_id: str) -> list[dict]:
     return records
 
 
+async def _session_inventory_counts(session_id: str) -> dict:
+    contact_rows = await db.fetchall(
+        """
+        SELECT meta_json FROM files
+        WHERE session_id = ? AND LOWER(source) = 'contact'
+        """,
+        (session_id,),
+    )
+    contact_records = len(contact_rows)
+    unique = 0
+    names: set[str] = set()
+    for row in contact_rows:
+        try:
+            meta = json.loads(row["meta_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            meta = {}
+        display = str(meta.get("display_name") or "").strip().casefold()
+        if display:
+            names.add(display)
+        if not meta.get("contact_duplicate"):
+            unique += 1
+    if unique == 0 and contact_records:
+        unique = contact_records
+    sms_rows = await db.fetchall(
+        """
+        SELECT json_extract(canonical_json, '$.metadata.direction') AS direction,
+               COUNT(*) AS c
+        FROM crawl_records
+        WHERE session_id = ? AND source_kind = 'sms'
+        GROUP BY 1
+        """,
+        (session_id,),
+    )
+    sms = {str(row["direction"] or "unknown"): int(row["c"]) for row in sms_rows}
+    recovery_rows = await db.fetchall(
+        """
+        SELECT source, COUNT(*) AS c FROM files
+        WHERE session_id = ? AND source IN ('recovered_trash', 'recovered_cache')
+        GROUP BY source
+        """,
+        (session_id,),
+    )
+    recovery = {str(row["source"]): int(row["c"]) for row in recovery_rows}
+    return {
+        "contact_records": contact_records,
+        "contact_unique": unique,
+        "contact_unique_names": len(names),
+        "sms_by_direction": sms,
+        "recovery_cache": recovery.get("recovered_cache", 0),
+        "recovery_trash": recovery.get("recovered_trash", 0),
+    }
+
+
+async def _session_device_identity(session_id: str) -> dict:
+    rows = await db.fetchall(
+        """
+        SELECT f.meta_json, cr.normalized_text
+        FROM files f
+        LEFT JOIN crawl_records cr
+          ON cr.session_id = f.session_id
+         AND cr.record_id = json_extract(f.meta_json, '$.crawl_record_id')
+        WHERE f.session_id = ? AND LOWER(f.source) = 'document'
+        """,
+        (session_id,),
+    )
+    items = []
+    for row in rows:
+        try:
+            meta = json.loads(row["meta_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            meta = {}
+        display = meta.get("display_name") if isinstance(meta.get("display_name"), str) else None
+        hint = hints_from_document(
+            display_name=display,
+            normalized_text=row["normalized_text"]
+            if isinstance(row["normalized_text"], str)
+            else None,
+        )
+        if hint:
+            items.append(hint)
+    return merge_device_identity_hints(items)
+
+
 async def _social_report_data(session_id: str) -> tuple[list[dict], int, bool]:
     accounts: dict[str, dict] = {}
     all_items: list[dict] = []
     for record in await _load_social_records(session_id):
-        package_name = record.get("source_app")
+        package_name = _record_source_app(record)
         if package_name not in SOCIAL_PACKAGES:
             continue
-        metadata = _record_metadata(record)
-        scope = metadata.get("social_scope")
+        scope = _record_social_scope(record, package_name)
         if scope not in SOCIAL_SCOPES:
             continue
+        metadata = _record_metadata(record)
         account = accounts.setdefault(
             package_name,
             {
@@ -1044,7 +1212,7 @@ async def _social_report_data(session_id: str) -> tuple[list[dict], int, bool]:
             "scope": scope,
             "scope_label": SOCIAL_SCOPES[scope],
             "observed_at": record.get("observed_at"),
-            "preview_text": _social_item_preview(scope, record.get("normalized_text")),
+            "preview_text": _social_item_preview(scope, record),
         }
         account["items"].append(item)
         all_items.append(item)
@@ -1056,6 +1224,8 @@ async def _social_report_data(session_id: str) -> tuple[list[dict], int, bool]:
         account["items"].sort(key=lambda value: str(value.get("observed_at") or ""))
         account["items"] = account["items"][:remaining]
         remaining -= len(account["items"])
+        if not account.get("display_name") and account["scope_counts"].get("device_media"):
+            account["display_name"] = "Jejak di galeri HP"
     return ordered_accounts, total, total > MAX_SOCIAL_REPORT_ITEMS
 
 
@@ -1075,6 +1245,8 @@ async def build_session_report(session_id: str) -> dict:
     progress = json.loads(row["progress_json"])
     timing = json.loads(row["timing_json"])
     social_accounts, social_total, social_truncated = await _social_report_data(session_id)
+    inventory = await _session_inventory_counts(session_id)
+    device_identity = await _session_device_identity(session_id)
     participant = None
     try:
         raw_participant = row["participant_json"]
@@ -1119,13 +1291,24 @@ async def build_session_report(session_id: str) -> dict:
             "authorized_by": progress.get("authorized_by"),
             "authorized_at": progress.get("authorized_at"),
             "authorize_note": progress.get("authorize_note"),
+            "report_sha256": progress.get("report_sha256"),
+            "authorized_confirmed_findings": progress.get("authorized_confirmed_findings"),
             "participant": participant,
         },
+        "device_identity": device_identity,
         "metrics": {
             "files": files["c"] if files else 0,
             "bytes": files["bytes"] if files else 0,
             "findings": len(findings),
             "social_records": social_total,
+            "contact_records": inventory["contact_records"],
+            "contact_unique": inventory["contact_unique"],
+            "contact_unique_names": inventory["contact_unique_names"],
+            "sms_by_direction": inventory["sms_by_direction"],
+            "recovery": {
+                "cache": inventory["recovery_cache"],
+                "trash": inventory["recovery_trash"],
+            },
             "timing": timing,
             "progress": progress,
         },
@@ -1178,13 +1361,13 @@ def _review_pill(status: str | None) -> str:
     return f'<span class="{css}">{_esc(label)}</span>'
 
 
-def _mode_label(mode: object) -> str:
-    key = "" if mode is None else str(mode).strip().lower()
-    if key == "full":
-        return "Penuh"
-    if key == "quick":
-        return "Cepat"
-    return key or "—"
+def _device_type_label(value: object) -> str:
+    key = "" if value is None else str(value).strip().lower()
+    if key == "android":
+        return "Android"
+    if key in {"ios", "iphone"}:
+        return "iPhone"
+    return str(value or "—")
 
 
 def _short_text(value: object, limit: int = 120) -> str:
@@ -1196,17 +1379,75 @@ def _short_text(value: object, limit: int = 120) -> str:
     return text[: max(1, limit - 1)] + "…"
 
 
+_HASH_FILE = re.compile(r"^[a-f0-9]{16,}(?:\.[a-z0-9]{1,8})?$", re.I)
+_HASH_STEM = re.compile(r"^(?:record_)?[a-f0-9]{8,}(?:_[a-f0-9]{6,})?$", re.I)
+_MEDIA_KIND = {
+    ".jpg": "Foto",
+    ".jpeg": "Foto",
+    ".png": "Foto",
+    ".webp": "Foto",
+    ".heic": "Foto",
+    ".gif": "Foto",
+    ".bmp": "Foto",
+    ".mp4": "Video",
+    ".mov": "Video",
+    ".webm": "Video",
+    ".mkv": "Video",
+    ".mp3": "Audio",
+    ".m4a": "Audio",
+    ".pdf": "Dokumen",
+}
+
+
+def _opaque_file_name(name: str) -> bool:
+    base = name.strip()
+    if not base:
+        return False
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    return bool(_HASH_FILE.match(base) or _HASH_STEM.match(stem))
+
+
 def _short_path(value: object, limit: int = 52) -> str:
     path = str(value or "").strip() or "—"
     if path == "—":
         return path
-    base = path.rsplit("/", 1)[-1]
+    parts = [part for part in path.replace("\\", "/").split("/") if part]
+    base = parts[-1] if parts else path
+    if _opaque_file_name(base):
+        ext = ""
+        if "." in base:
+            ext = "." + base.rsplit(".", 1)[-1].lower()
+        kind = _MEDIA_KIND.get(ext, "Berkas")
+        parent = parts[-2] if len(parts) >= 2 else ""
+        return f"{parent}/{kind}" if parent else kind
     # Path teknis .imgmeta/.vidmeta — tampilkan nama berkas saja
     if base.endswith((".imgmeta", ".vidmeta", ".json")) or len(path) > limit:
         return base if len(base) <= limit else base[: max(1, limit - 1)] + "…"
     if len(path) <= limit:
         return path
     return f"…/{base}" if len(base) < limit else base[: max(1, limit - 1)] + "…"
+
+
+def _finding_display_label(finding: dict) -> str:
+    label = str(finding.get("label") or "").strip()
+    path = str(finding.get("path") or "").strip()
+    if label and not _opaque_file_name(label):
+        return label
+    if path:
+        return _short_path(path)
+    return label or "—"
+
+
+_CLIP_TAG = re.compile(r"\[clip:[^\]]+\]", re.I)
+_SCORE_TAG = re.compile(r"\bp=\d+(?:\.\d+)?(?:\s*\(neg=\d+(?:\.\d+)?\))?", re.I)
+_ARTIFACT_ID = re.compile(r"record_[a-f0-9]{8,}(?:__[a-z0-9_]+)?", re.I)
+
+
+def _human_evidence(text: str) -> str:
+    cleaned = _CLIP_TAG.sub(" ", text)
+    cleaned = _SCORE_TAG.sub(" ", cleaned)
+    cleaned = _ARTIFACT_ID.sub(" ", cleaned)
+    return _short_text(cleaned, 100)
 
 
 def _format_generated_at(value: object) -> str:
@@ -1230,19 +1471,19 @@ def _executive_summary(
 ) -> str:
     if recommendation == "LULUS":
         if total == 0:
-            return "Tidak ada sinyal indikasi pada sesi ini. Rekomendasi sistem: LULUS."
+            return "Tidak ada temuan pada sesi ini. Rekomendasi sistem: LULUS."
         return (
-            f"Dari {total} sinyal, {confirmed} dikonfirmasi dan {rejected} ditolak. "
+            f"Dari {total} temuan, {confirmed} dikonfirmasi dan {rejected} ditolak. "
             "Rekomendasi sistem: LULUS."
         )
     if recommendation == "MENUNGGU REVIEW":
         return (
             f"Masih ada {pending} temuan menunggu verifikasi analis "
-            f"(total sinyal {total}). Pengesahan belum dapat dilakukan."
+            f"(total temuan {total}). Pengesahan belum dapat dilakukan."
         )
     if recommendation == "TIDAK LULUS":
         return (
-            f"{confirmed} temuan dikonfirmasi analis dari {total} sinyal "
+            f"{confirmed} temuan dikonfirmasi analis dari {total} temuan "
             f"({rejected} ditolak, {pending} menunggu). Rekomendasi sistem: TIDAK LULUS."
         )
     return "Rekomendasi belum tersedia untuk sesi ini."
@@ -1256,9 +1497,9 @@ def _finding_evidence(finding: dict) -> str:
             try:
                 evidence = json.loads(raw)
             except (TypeError, ValueError, json.JSONDecodeError):
-                return _short_text(raw, 100)
+                return _human_evidence(raw)
         else:
-            return _short_text(raw, 100)
+            return _human_evidence(raw)
 
     if isinstance(evidence, dict):
         name = str(evidence.get("name") or evidence.get("file") or "").strip()
@@ -1270,31 +1511,49 @@ def _finding_evidence(finding: dict) -> str:
             tag_bits = [tags.strip()]
 
         parts: list[str] = []
-        if name:
+        if name and not _ARTIFACT_ID.search(name):
             parts.append(name)
         if tag_bits:
-            parts.append(", ".join(tag_bits))
+            clean_tags = [
+                t for t in tag_bits
+                if "clip" not in t.lower() and not t.lower().startswith("p=")
+            ]
+            if clean_tags:
+                parts.append(", ".join(clean_tags))
         keyframes = evidence.get("keyframes")
         if keyframes not in (None, "", 0) and not tag_bits:
             parts.append(f"{keyframes} keyframe")
         if parts:
-            return _short_text(" · ".join(parts), 100)
+            return _human_evidence(" · ".join(parts))
         for key in ("snippet", "text", "ocr", "summary"):
             if evidence.get(key):
-                return _short_text(evidence.get(key), 100)
+                return _human_evidence(str(evidence.get(key)))
         return "—"
 
-    return _short_text(evidence, 100)
+    return _human_evidence(str(evidence))
 
 
 def _social_account_html(account: dict) -> str:
     username = account.get("username")
     user_suffix = f" · @{_esc(username)}" if username else ""
+    gallery_only = (
+        not username
+        and not account.get("bio")
+        and int((account.get("scope_counts") or {}).get("device_media") or 0) > 0
+    )
+    if gallery_only:
+        count = int((account.get("scope_counts") or {}).get("device_media") or 0)
+        detail = (
+            f"<p class=\"muted\">{count} berkas di galeri / screenshot "
+            "(bukan profil yang terverifikasi).</p>"
+        )
+    else:
+        detail = f"<p>{_esc(_short_text(account.get('bio') or 'Bio tidak terbaca', 220))}</p>"
     return (
         "<article class=\"account-card\">"
         f"<h3>{_esc(_social_account_heading(account))}</h3>"
         f"<p class=\"muted\">{_esc(account.get('display_name') or '—')}{user_suffix}</p>"
-        f"<p>{_esc(_short_text(account.get('bio') or 'Bio tidak terbaca', 220))}</p>"
+        f"{detail}"
         f"<p class=\"links\">{_esc(', '.join(account.get('profile_links', [])) or '—')}</p>"
         "</article>"
     )
@@ -1324,7 +1583,7 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
 
     findings_rows = "".join(
         "<tr>"
-        f"<td>{_esc(f.get('label'))}</td>"
+        f"<td>{_esc(_finding_display_label(f))}</td>"
         f"<td>{_esc(_report_label(f.get('source'), REPORT_SOURCE_LABELS))}</td>"
         f"<td>{float(f.get('confidence') or 0):.0%}</td>"
         f"<td>{_review_pill(f.get('review_status'))}</td>"
@@ -1372,14 +1631,40 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
         evidence_stats += (
             f"<li><span>Berkas dianalisis</span><strong>{_esc(analyzed)}</strong></li>"
         )
+    contact_unique = int(m.get("contact_unique") or 0)
+    contact_records = int(m.get("contact_records") or 0)
+    if contact_records:
+        evidence_stats += (
+            "<li><span>Kontak</span>"
+            f"<strong>{_esc(contact_unique)} unik · {_esc(contact_records)} rekam</strong></li>"
+        )
+    sms_dir = m.get("sms_by_direction") if isinstance(m.get("sms_by_direction"), dict) else {}
+    sms_total = sum(int(v or 0) for v in sms_dir.values())
+    if sms_total:
+        received = int(sms_dir.get("received") or 0)
+        sent = int(sms_dir.get("sent") or 0)
+        evidence_stats += (
+            "<li><span>SMS</span>"
+            f"<strong>{_esc(sms_total)} · {received} masuk · {sent} terkirim</strong></li>"
+        )
 
+    recovery = m.get("recovery") if isinstance(m.get("recovery"), dict) else {}
     recovery_metric = ""
-    if progress.get("recovery_state"):
-        state_label = _report_label(progress["recovery_state"], RECOVERY_STATE_LABELS)
+    cache_n = int(recovery.get("cache") or 0)
+    trash_n = int(recovery.get("trash") or 0)
+    if cache_n or trash_n or progress.get("recovery_state"):
+        state_label = _report_label(progress.get("recovery_state"), RECOVERY_STATE_LABELS)
+        parts = []
+        if trash_n:
+            parts.append(f"{trash_n} sampah")
+        if cache_n:
+            parts.append(f"{cache_n} pratinjau cache")
+        if not parts:
+            parts.append(f"{progress.get('recovery_captured', 0)} item")
         recovery_metric = (
-            "<li><span>Recovery sampah Android</span>"
-            f"<strong>{_esc(progress.get('recovery_captured', 0))} item · "
-            f"{_esc(state_label)}</strong></li>"
+            "<li><span>Recovery Android</span>"
+            f"<strong>{_esc(' · '.join(parts))}"
+            f"{(' · ' + state_label) if progress.get('recovery_state') else ''}</strong></li>"
         )
 
     ios_library_metric = ""
@@ -1404,11 +1689,34 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
     if has_participant:
         nik_val = str(participant.get("nik") or "").strip() or "—"
         org_val = str(participant.get("organization") or "").strip() or "—"
+        device_identity = report.get("device_identity") if isinstance(report.get("device_identity"), dict) else {}
+        operator_name = str(participant.get("full_name") or "").strip()
+        hint_names = [
+            str(name)
+            for name in (device_identity.get("names") or [])
+            if str(name).strip() and str(name).casefold() != operator_name.casefold()
+        ]
+        hint_row = ""
+        if hint_names:
+            source_label = ""
+            sources = device_identity.get("sources") or []
+            if sources and isinstance(sources[0], dict):
+                source_label = str(sources[0].get("label") or "")
+            hint_row = (
+                "<div><span>Nama di perangkat</span>"
+                f"<strong>{_esc(hint_names[0])}"
+                f"{(' · ' + _esc(source_label)) if source_label else ''}</strong></div>"
+            )
+        if nik_val == "—" and device_identity.get("nik_candidates"):
+            nik_val = f"{device_identity['nik_candidates'][0]} (dari dokumen, belum diverifikasi)"
+        if org_val == "—" and device_identity.get("organizations"):
+            org_val = f"{device_identity['organizations'][0]} (dari dokumen)"
         identity_section = f"""
 <section class="panel">
   <h2>Identitas peserta seleksi</h2>
   <div class="meta-grid">
     <div><span>Nama lengkap</span><strong>{_esc(participant.get('full_name') or '—')}</strong></div>
+    {hint_row}
     <div><span>No. peserta / registrasi</span><strong>{_esc(participant.get('registration_no') or '—')}</strong></div>
     <div><span>NIK</span><strong>{_esc(nik_val)}</strong></div>
     <div><span>Instansi / formasi</span><strong>{_esc(org_val)}</strong></div>
@@ -1423,12 +1731,9 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
 </section>
 
 <section class="panel">
-  <h2>Detail teknis akuisisi</h2>
+  <h2>Pengambilan data</h2>
   <div class="meta-grid">
-    <div><span>Sesi</span><strong><code title="{_esc(s.get('id'))}">{_esc(str(s.get('id', ''))[:8])}</code></strong></div>
-    <div><span>Label sesi</span><strong>{_esc(s.get('label'))}</strong></div>
-    <div><span>ID perangkat</span><strong>{_esc(s.get('device_id'))} ({_esc(s.get('device_type'))})</strong></div>
-    <div><span>Mode</span><strong>{_esc(_mode_label(s.get('mode')))}</strong></div>
+    <div><span>Jenis perangkat</span><strong>{_esc(_device_type_label(s.get('device_type')))}</strong></div>
     <div><span>Cara ambil data</span><strong>{_esc(_report_method(s.get('acquisition_method')))}</strong></div>
   </div>
 </section>
@@ -1441,10 +1746,8 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
     Identitas peserta belum diisi saat akuisisi. Detail teknis sesi ditampilkan di bawah.
   </p>
   <div class="meta-grid">
-    <div><span>Sesi</span><strong><code title="{_esc(s.get('id'))}">{_esc(str(s.get('id', ''))[:8])}</code></strong></div>
     <div><span>Label / perangkat</span><strong>{_esc(s.get('label'))}</strong></div>
-    <div><span>ID perangkat</span><strong>{_esc(s.get('device_id'))} ({_esc(s.get('device_type'))})</strong></div>
-    <div><span>Mode</span><strong>{_esc(_mode_label(s.get('mode')))}</strong></div>
+    <div><span>Jenis perangkat</span><strong>{_esc(_device_type_label(s.get('device_type')))}</strong></div>
     <div><span>Cara ambil data</span><strong>{_esc(_report_method(s.get('acquisition_method')))}</strong></div>
     <div><span>Rekomendasi</span><strong>{rec_badge}</strong></div>
   </div>
@@ -1469,7 +1772,7 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
         "<tr>"
         f"<td>{_esc(account.get('platform'))}</td>"
         f"<td>{_esc(item.get('scope_label'))}</td>"
-        f"<td>{_esc(item.get('observed_at') or '—')}</td>"
+        f"<td>{_esc(_format_generated_at(item.get('observed_at')) if item.get('observed_at') else '—')}</td>"
         f"<td class=\"preview\">{_esc(_short_text(item.get('preview_text'), 160))}</td>"
         "</tr>"
         for account in social_accounts
@@ -1485,7 +1788,18 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
             f"<p><span class=\"pill ok\">Disahkan</span> "
             f"<strong>{_esc(s['authorized_by'])}</strong>{when}</p>"
             f"<p class=\"note\">{_esc(s.get('authorize_note') or '—')}</p>"
-            "</section>"
+            + (
+                f"<p class=\"note mono\">SHA-256 laporan: {_esc(s.get('report_sha256'))}"
+                + (
+                    f" · temuan dikonfirmasi: {_esc(s.get('authorized_confirmed_findings'))}"
+                    if s.get("authorized_confirmed_findings") is not None
+                    else ""
+                )
+                + "</p>"
+                if s.get("report_sha256")
+                else ""
+            )
+            + "</section>"
         )
     else:
         authorize_block = (
@@ -1533,11 +1847,16 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
         else ""
     )
     generated = _format_generated_at(report.get("generated_at"))
+    report_subject = (
+        str((participant or {}).get("full_name") or "").strip()
+        or str(s.get("label") or "").strip()
+        or "Laporan"
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="id"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>{_esc(PRODUCT_NAME)} · Laporan · {_esc(str(s.get('id', ''))[:8])}</title>
+<title>{_esc(PRODUCT_NAME)} · Laporan · {_esc(report_subject)}</title>
 <style>
 :root {{
   --ink: #1a1a1a;
@@ -1607,9 +1926,9 @@ header.cover {{
   border-bottom: 1px solid var(--line);
 }}
 .letterhead-brand .brand {{
-  font-size: 1rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  font-size: 1.15rem;
+  letter-spacing: 0;
+  text-transform: none;
   color: var(--brand);
   font-weight: 800;
   margin: 0;
@@ -1652,7 +1971,7 @@ header.cover {{
   background: rgba(155, 28, 46, 0.04);
 }}
 .screen-doc .summary {{ background: rgba(224, 69, 85, 0.08); }}
-.summary strong {{ display: block; margin-bottom: 4px; font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; }}
+.summary strong {{ display: block; margin-bottom: 4px; font-size: 0.78rem; font-weight: 700; letter-spacing: 0; text-transform: none; }}
 .doc-footer {{
   margin-top: 18px;
   padding-top: 10px;
@@ -1732,6 +2051,7 @@ table.data {{
   width: 100%;
   border-collapse: collapse;
   font-size: 0.8rem;
+  table-layout: fixed;
 }}
 table.data th, table.data td {{
   border-bottom: 1px solid var(--line);
@@ -1746,10 +2066,15 @@ table.data th {{
   color: var(--muted);
 }}
 code {{ font-size: 0.74rem; }}
-.evidence {{ max-width: 280px; }}
-.path-cell {{ max-width: 140px; }}
-.path-cell code {{ white-space: normal; word-break: break-word; overflow-wrap: anywhere; }}
-.preview {{ white-space: pre-wrap; max-width: 420px; }}
+.evidence {{ max-width: 220px; }}
+.path-cell {{ max-width: 120px; }}
+.path-cell code {{
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}}
+.preview {{ white-space: pre-wrap; max-width: 280px; }}
 .pill {{
   display: inline-block;
   padding: 2px 8px;
@@ -1826,7 +2151,11 @@ footer {{
   table.data th, table.data td {{ border-color: #ccc !important; padding: 5px 6px; }}
   .meta-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }}
   .meta-grid code {{ word-break: break-all !important; white-space: normal !important; }}
-  .path-cell code {{ white-space: normal; word-break: break-all; }}
+  .path-cell code {{
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }}
   .doc-footer {{
     border-top-color: #111 !important;
     color: #444 !important;
@@ -1847,8 +2176,7 @@ footer {{
     </div>
     <div class="letterhead-meta">
       <strong>Dokumen internal panitia</strong>
-      {letterhead_participant}Sesi {_esc(str(s.get('id', ''))[:8])}<br/>
-      {_esc(generated)}
+      {letterhead_participant}{_esc(generated)}
     </div>
   </div>
   <div class="cover-body">
@@ -1901,7 +2229,6 @@ footer {{
   <div class="confidential">Rahasia — hanya untuk keperluan panitia seleksi</div>
   <div class="meta-line">
     <span>{_esc(PRODUCT_NAME)}</span>
-    <span>Sesi {_esc(str(s.get('id', ''))[:8])}</span>
     <span>Dibuat {_esc(generated)}</span>
   </div>
 </footer>

@@ -2,9 +2,9 @@ import {
   reportExportFilename,
   type ReportExportIdentity,
 } from "@/shared/lib/reportExportName";
-import { authHeaders, BASE, getAuthToken, req } from "./http";
+import { authHeaders, BASE, getAuthToken, humanApiError, req } from "./http";
 import type { AuthSession } from "./types/auth";
-import type { Role, AcquisitionMode, DeviceType, Paginated, ReviewStatus, Scenario } from "./types/common";
+import type { Role, AcquisitionMode, AnalysisScope, DeviceType, Paginated, ReviewStatus, Scenario } from "./types/common";
 import type { DashboardStats } from "./types/dashboard";
 import type { DeviceInfo } from "./types/device";
 import type { GalleryAlbum, GalleryItem } from "./types/gallery";
@@ -42,10 +42,24 @@ export const api = {
   sessions: (page = 1, pageSize = 10) =>
     req<Paginated<SessionSummary>>(`/sessions?page=${page}&page_size=${pageSize}`),
   session: (id: string) => req<SessionSummary>(`/sessions/${id}`),
+  sessionAudit: (id: string) =>
+    req<
+      {
+        id: string;
+        session_id: string | null;
+        actor: string;
+        action: string;
+        detail: string | null;
+        created_at: string;
+      }[]
+    >(`/sessions/${id}/audit`),
   startSession: (body: {
     device_id?: string;
     device_type: DeviceType;
     mode: AcquisitionMode;
+    analysis_scope?: AnalysisScope;
+    device_sources?: string[];
+    social_targets?: string[];
     scenario: Scenario;
     file_count: number;
     label?: string;
@@ -80,6 +94,9 @@ export const api = {
     file: File,
     opts?: {
       mode?: AcquisitionMode;
+      analysis_scope?: AnalysisScope;
+      device_sources?: string[];
+      social_targets?: string[];
       label?: string;
       participant?: {
         full_name: string;
@@ -94,6 +111,9 @@ export const api = {
       const form = new FormData();
       form.append("file", file);
       form.append("mode", opts?.mode || "quick");
+      form.append("analysis_scope", opts?.analysis_scope || "device");
+      if (opts?.device_sources?.length) form.append("device_sources", opts.device_sources.join(","));
+      if (opts?.social_targets?.length) form.append("social_targets", opts.social_targets.join(","));
       if (opts?.label) form.append("label", opts.label);
       if (opts?.participant) {
         form.append("participant_full_name", opts.participant.full_name);
@@ -121,11 +141,7 @@ export const api = {
             return;
           }
           const detail = body.detail;
-          reject(
-            new Error(
-              typeof detail === "string" ? detail : JSON.stringify(detail || xhr.statusText),
-            ),
-          );
+          reject(new Error(humanApiError(xhr.status, detail ?? xhr.statusText)));
         } catch (e) {
           reject(e instanceof Error ? e : new Error(xhr.statusText));
         }
@@ -187,9 +203,7 @@ export const api = {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(
-        typeof err.detail === "string" ? err.detail : JSON.stringify(err.detail || res.statusText),
-      );
+      throw new Error(humanApiError(res.status, err.detail ?? res.statusText));
     }
 
     if (format === "print") {

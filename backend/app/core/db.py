@@ -524,6 +524,25 @@ async def _migration_finding_review_audit(conn: aiosqlite.Connection) -> None:
         await conn.execute("ALTER TABLE findings ADD COLUMN reviewed_at TEXT")
 
 
+async def _migration_audit_events(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            actor TEXT NOT NULL,
+            action TEXT NOT NULL,
+            detail TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_session ON audit_events(session_id, created_at)"
+    )
+
+
 MIGRATIONS: tuple[tuple[int, str, MigrationHandler], ...] = (
     (1, "finding_media_dates", _migration_finding_media_dates),
     (2, "agent_runtimes", _migration_agent_runtimes),
@@ -535,6 +554,7 @@ MIGRATIONS: tuple[tuple[int, str, MigrationHandler], ...] = (
     (8, "media_tickets", _migration_media_tickets),
     (9, "session_participant", _migration_session_participant),
     (10, "finding_review_audit", _migration_finding_review_audit),
+    (11, "audit_events", _migration_audit_events),
 )
 
 

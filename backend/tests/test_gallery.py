@@ -26,6 +26,16 @@ def test_album_leaf_uses_last_path_segment() -> None:
     assert album_leaf("Download", "x.jpg", "gallery") == "Download"
     assert album_leaf("DCIM/Camera", "x.jpg", "gallery") == "Camera"
     assert album_key("Screenshots") == "screenshots"
+    from app.acquisition.source_app_hints import inferred_album_label
+
+    assert (
+        inferred_album_label(
+            directory_hint="DCIM/Screenshots",
+            display_name="Screenshot_2026-07-01-22-37-55-172_com.instagram.barcelona.jpg",
+            path="media_image/a.jpg",
+        )
+        == "Threads (screenshot)"
+    )
 
 
 def test_favorite_tokens_match_directory_hint() -> None:

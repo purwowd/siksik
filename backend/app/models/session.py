@@ -7,6 +7,7 @@ from pydantic import Field, field_validator
 from app.models.base import RequestModel, ResponseModel
 from app.models.enums import (
     AcquisitionMode,
+    AnalysisScope,
     AgentBootstrapState,
     DeviceType,
     RecoveryState,
@@ -62,6 +63,9 @@ class StartSessionRequest(RequestModel):
     device_id: str | None = Field(default=None, max_length=512)
     device_type: DeviceType = DeviceType.ANDROID
     mode: AcquisitionMode = AcquisitionMode.QUICK
+    analysis_scope: AnalysisScope = AnalysisScope.DEVICE
+    device_sources: list[str] = Field(default_factory=list)
+    social_targets: list[str] = Field(default_factory=list)
     scenario: Scenario = Scenario.LULUS
     file_count: int = Field(default=1200, ge=1, le=1_000_000)
     label: str | None = Field(default=None, max_length=256)
@@ -75,6 +79,15 @@ class StartSessionRequest(RequestModel):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    def analysis_plan(self):
+        from app.acquisition.analysis_plan import build_analysis_plan
+
+        return build_analysis_plan(
+            scope=self.analysis_scope,
+            device_sources=self.device_sources,
+            social_targets=self.social_targets,
+        )
 
 
 class UpdateParticipantRequest(RequestModel):
@@ -141,6 +154,11 @@ class SessionProgress(ResponseModel):
     ios_cache_captured: int | None = Field(default=None, ge=0)
     ios_deleted_metadata_captured: int | None = Field(default=None, ge=0)
     ios_library_warning_count: int | None = Field(default=None, ge=0)
+    analysis_scope: str | None = None
+    device_sources: list[str] | None = None
+    social_targets: list[str] | None = None
+    report_sha256: str | None = None
+    authorized_confirmed_findings: int | None = Field(default=None, ge=0)
 
 
 class TimingBreakdown(ResponseModel):

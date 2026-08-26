@@ -1,4 +1,4 @@
-/** Shared chrome — MOD codes disembunyikan dari UI demo (ops lab). */
+/** Judul halaman fitur. */
 
 export function PanelTitle({ title }: { title: string }) {
   return (

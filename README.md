@@ -5,7 +5,7 @@ Platform Analisis & Seleksi Calon ASN.
 **Motto:** Deteksi Dini — Analisis Mendalam — Keputusan Akurat  
 **Nilai:** Integritas — Kompetensi — Loyalitas
 
-Proof of Concept (runtime legacy: SADT/SIKSIK): akuisisi selektif + analisis bertingkat (gallery-first) di **satu workstation/server NVIDIA GPU**, satu sesi aktif per waktu.
+Workstation on-prem (runtime legacy: SADT/SIKSIK): akuisisi selektif + analisis bertingkat (gallery-first) di **satu workstation/server NVIDIA GPU**, satu sesi aktif per waktu.
 
 ---
 
@@ -21,6 +21,7 @@ Proof of Concept (runtime legacy: SADT/SIKSIK): akuisisi selektif + analisis ber
 | [`docs/LAB_HOST.md`](docs/LAB_HOST.md) | ADB/USB, iOS, GPU |
 | [`docs/PAGES.md`](docs/PAGES.md) | Cek UI per tab & role |
 | [`docs/HARDENING.md`](docs/HARDENING.md) | TLS, backup, produksi |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Operasi panitia: start, backup, sandi, batal sesi |
 
 ### Quick start (web dev)
 
@@ -32,7 +33,7 @@ python run.py --reload
 
 # Terminal 2
 cd frontend && npm install && npm run dev
-# → http://127.0.0.1:5173  ·  login: admin / Admin@2026
+# → http://127.0.0.1:5173  ·  masuk dengan akun instalasi
 ```
 
 ### Quick start (desktop dev)
@@ -43,16 +44,11 @@ cd ../desktop && npm install && ./dev.sh
 # → window SATRIA  ·  backend :8000  ·  UI :5175
 ```
 
-### Akun lab & password
+### Akun instalasi
 
-| Role | User | Password default* |
-|------|------|-------------------|
-| Admin | `admin` | `Admin@2026` |
-| Operator | `operator` | `Ops@2026` |
-| Analis | `analis` | `Analis@2026` |
-| Pimpinan | `pimpinan` | `Pimpinan@2026` |
+Produksi: `cd backend && python scripts/setup_lab_panitia.py` — kredensial ditulis ke file lokal yang **tidak** di-commit (`backend/data/lab-panitia-credentials.txt`).
 
-\*Hanya saat DB kosong. Produksi: `cd backend && python scripts/setup_lab_panitia.py` → kredensial di `backend/data/lab-panitia-credentials.txt`.
+Lab kosong (hanya first boot): set `SATRIA_SEED_*_PASSWORD` di `.env` sebelum API pertama kali jalan. Jangan menyebarkan sandi seed di dokumen publik. Rotasi: `python scripts/rotate_lab_passwords.py --from-env`.
 
 ---
 
@@ -142,7 +138,7 @@ cd frontend && npm install && npm run dev -- --host 127.0.0.1 --port 5173
 
 UI: http://127.0.0.1:5173
 
-**Route UI:** `/operator` · `/temuan` · `/laporan` · `/dasbor` — query `?sesi=<uuid|8char>&filter=pending` untuk share sesi aktif.
+**Route UI:** `/penerimaan` · `/temuan` · `/galeri` · `/laporan` · `/ikhtisar` — query `?sesi=<uuid|8char>&filter=pending` untuk share sesi aktif. `/operator` dan `/dasbor` dialihkan ke path baru.
 
 ---
 
@@ -265,7 +261,7 @@ SADT_LAB_DEMO_MODE=0
 ```bash
 TOKEN=$(curl -s -X POST http://127.0.0.1:8000/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"Admin@2026"}' | python -c "import sys,json; print(json.load(sys.stdin)['token'])")
+  -d '{"username":"admin","password":"<sandi-instalasi>"}' | python -c "import sys,json; print(json.load(sys.stdin)['token'])")
 
 curl -s http://127.0.0.1:8000/api/v1/health -H "Authorization: Bearer $TOKEN"
 # Cek: gpu_available=true, vision.ocr.available=true, analysis_engine mengandung ocr=1
@@ -439,7 +435,7 @@ SADT_GPU_QWEN_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
 | Role | Login | Akses |
 |------|-------|--------|
 | operator | `operator` | Akuisisi / ZIP |
-| analis | `analis` | Dasbor, review |
+| analis | `analis` | Temuan, Galeri, Laporan, Ikhtisar |
 | pimpinan | `pimpinan` | Laporan, sahkan |
 | admin | `admin` | Semua |
 

@@ -48,8 +48,8 @@ backend/data/
 *.sqlite
 *.sqlite3
 
-# Staging / reports / dumps
-**/staging/
+# Staging dumps (backend data/ already ignored). Do not use **/staging/ —
+# that also hid android-agent/.../agent/staging Kotlin sources.
 **/reports/
 **/synthetic/
 *.zip

@@ -1,5 +1,6 @@
 export type DeviceType = "android" | "ios" | "simulated";
 export type AcquisitionMode = "quick" | "full";
+export type AnalysisScope = "device" | "social" | "combined";
 export type Scenario = "lulus" | "tidak_lulus";
 export type Role = "operator" | "analis" | "pimpinan" | "admin";
 export type SessionStatus =

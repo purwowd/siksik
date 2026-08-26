@@ -20,6 +20,11 @@ function fromParticipant(p?: ParticipantIdentity | null): FormState {
 type Props = {
   session: SessionSummary;
   canEdit: boolean;
+  deviceIdentity?: {
+    names?: string[];
+    organizations?: string[];
+    sources?: { name: string; kind: string; label: string }[];
+  } | null;
   onSaved: (s: SessionSummary) => void;
   onError: (message: string) => void;
   onToast: (message: string, tone?: "ok" | "warn" | "info") => void;
@@ -28,6 +33,7 @@ type Props = {
 export function ParticipantIdentityEditor({
   session,
   canEdit,
+  deviceIdentity,
   onSaved,
   onError,
   onToast,
@@ -35,6 +41,12 @@ export function ParticipantIdentityEditor({
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState<FormState>(() => fromParticipant(session.participant));
+  const operatorName = (session.participant?.full_name || "").trim().toLowerCase();
+  const deviceHint = (deviceIdentity?.names || []).find(
+    (name) => name.trim() && name.trim().toLowerCase() !== operatorName,
+  );
+  const deviceOrg = (deviceIdentity?.organizations || [])[0];
+  const deviceSource = deviceIdentity?.sources?.[0]?.label;
 
   useEffect(() => {
     setForm(fromParticipant(session.participant));
@@ -98,6 +110,13 @@ export function ParticipantIdentityEditor({
         ) : (
           <p className="field-note">Belum diisi — lengkapi sebelum mencetak laporan resmi.</p>
         )}
+        {deviceHint ? (
+          <p className="field-note">
+            Nama di perangkat: <strong>{deviceHint}</strong>
+            {deviceOrg ? ` · ${deviceOrg}` : ""}
+            {deviceSource ? ` (${deviceSource})` : ""} — tidak menimpa isian operator.
+          </p>
+        ) : null}
       </section>
     );
   }
