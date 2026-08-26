@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
@@ -29,6 +30,27 @@ SOCIAL_SCOPES = {
 MAX_SOCIAL_REPORT_ITEMS = 500
 MAX_SOCIAL_PREVIEW_CHARS = 2_000
 MAX_WHATSAPP_REPORT_MESSAGES = 500
+
+
+def canonical_report_digest(report: dict) -> str:
+    """Stable SHA-256 over the decision payload (not timestamps)."""
+    session = report.get("session") if isinstance(report.get("session"), dict) else {}
+    body = {
+        "session_id": session.get("id"),
+        "recommendation": session.get("recommendation"),
+        "participant": session.get("participant"),
+        "findings": report.get("findings"),
+        "breakdown": report.get("breakdown"),
+        "metrics": {
+            key: value
+            for key, value in (report.get("metrics") or {}).items()
+            if key not in {"timing", "progress"}
+        },
+    }
+    raw = json.dumps(body, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 REPORT_CATEGORY_LABELS = {
     "ketelanjangan": "Ketelanjangan / konten eksplisit",
     "konten_visual": "Konten visual berisiko",

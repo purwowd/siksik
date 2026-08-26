@@ -8,4 +8,6 @@ router = route_group(
     "update_session_participant",
     "session_stream",
     "cancel_session",
+    "session_audit",
+    "refresh_session_mapping_endpoint",
 )

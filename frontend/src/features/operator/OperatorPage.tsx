@@ -1,5 +1,11 @@
 import { useEffect, useState, type RefObject } from "react";
-import { ms, type AcquisitionMode, type DeviceInfo, type SessionSummary } from "@/shared/api/client";
+import {
+  ms,
+  type AcquisitionMode,
+  type AnalysisScope,
+  type DeviceInfo,
+  type SessionSummary,
+} from "@/shared/api/client";
 import { FeaturePanel } from "@/shared/ui/FeaturePanel";
 import { PipelineTrack } from "@/features/operator/components/PipelineTrack";
 import { StatusPill } from "@/shared/ui/StatusPill";
@@ -7,6 +13,14 @@ import { VerdictNotice } from "@/features/findings/components/VerdictNotice";
 import { ACTIVE, isThreatRecommendation } from "@/shared/constants";
 import { humanLabel } from "@/features/dashboard/lib/dashboardLabels";
 import { FEATURE_PAGE_META, OPERATOR_TELEMETRY_META } from "@/shared/lib/featurePages";
+import {
+  ANALYSIS_SCOPE_OPTIONS,
+  DEVICE_SOURCE_OPTIONS,
+  SOCIAL_TARGET_OPTIONS,
+  analysisPlanReady,
+  planForScope,
+  toggleChecked,
+} from "@/features/operator/analysisScope";
 
 export type ParticipantForm = {
   fullName: string;
@@ -32,6 +46,12 @@ type Props = {
   refreshDevices: () => Promise<void>;
   mode: AcquisitionMode;
   setMode: (m: AcquisitionMode) => void;
+  analysisScope: AnalysisScope;
+  setAnalysisScope: (scope: AnalysisScope) => void;
+  deviceSources: string[];
+  setDeviceSources: (sources: string[]) => void;
+  socialTargets: string[];
+  setSocialTargets: (targets: string[]) => void;
   canStartLive: boolean;
   canStartZip: boolean;
   busy: boolean;
@@ -49,6 +69,9 @@ export function OperatorPage(p: Props) {
   const progress = p.session?.progress;
   const timing = p.session?.timing;
   const active = !!p.session && ACTIVE.has(p.session.status);
+  const planReady = analysisPlanReady(p.analysisScope, p.deviceSources, p.socialTargets);
+  const showDeviceChecks = p.analysisScope !== "social";
+  const showSocialChecks = p.analysisScope !== "device";
   const [clockMs, setClockMs] = useState(() => Date.now());
 
   useEffect(() => {
@@ -273,6 +296,104 @@ export function OperatorPage(p: Props) {
                 <option value="quick">Cepat — sampling lebih ringkas</option>
                 <option value="full">Penuh — cakupan lebih luas</option>
               </select>
+            </div>
+
+            <div className="field-group" role="group" aria-labelledby="analysis-scope-heading">
+              <p id="analysis-scope-heading" className="field-group-title">
+                Fokus analisa
+              </p>
+              <div
+                className="analysis-scope-grid"
+                role="radiogroup"
+                aria-labelledby="analysis-scope-heading"
+              >
+                {ANALYSIS_SCOPE_OPTIONS.map((option) => {
+                  const selectedScope = p.analysisScope === option.id;
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={selectedScope}
+                      className={`analysis-scope-card ${selectedScope ? "selected" : ""} ${option.id === "combined" ? "slow" : ""}`}
+                      disabled={p.busy || active}
+                      onClick={() => {
+                        p.setAnalysisScope(option.id);
+                        const next = planForScope(option.id);
+                        p.setDeviceSources(next.deviceSources);
+                        p.setSocialTargets(next.socialTargets);
+                      }}
+                    >
+                      <strong>{option.label}</strong>
+                      <small>{option.hint}</small>
+                    </button>
+                  );
+                })}
+              </div>
+              {p.analysisScope === "combined" && (
+                <div className="analysis-scope-warn" role="status">
+                  <strong>Proses akan lebih lama</strong>
+                  <p>
+                    Gabungan menganalisa sumber HP dan crawl sosmed sekaligus. Kurangi checklist
+                    jika waktu terbatas, atau pilih <strong>HP saja</strong> untuk jalur cepat.
+                  </p>
+                </div>
+              )}
+              <details className="operator-advanced">
+                <summary>Atur sumber (opsional)</summary>
+                {showDeviceChecks && (
+                  <fieldset className="analysis-check-set" disabled={p.busy || active}>
+                    <legend>Sumber HP</legend>
+                    <div className="analysis-check-grid">
+                      {DEVICE_SOURCE_OPTIONS.map((option) => (
+                        <label key={option.id} className="analysis-check">
+                          <input
+                            type="checkbox"
+                            checked={p.deviceSources.includes(option.id)}
+                            onChange={() =>
+                              p.setDeviceSources(toggleChecked(p.deviceSources, option.id))
+                            }
+                          />
+                          <span>
+                            <strong>{option.label}</strong>
+                            <small>{option.hint}</small>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
+                )}
+                {showSocialChecks && (
+                  <fieldset className="analysis-check-set" disabled={p.busy || active}>
+                    <legend>Akun sosmed</legend>
+                    <div className="analysis-check-grid analysis-check-grid-compact">
+                      {SOCIAL_TARGET_OPTIONS.map((option) => (
+                        <label key={option.id} className="analysis-check">
+                          <input
+                            type="checkbox"
+                            checked={p.socialTargets.includes(option.id)}
+                            onChange={() =>
+                              p.setSocialTargets(toggleChecked(p.socialTargets, option.id))
+                            }
+                          />
+                          <span>
+                            <strong>{option.label}</strong>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
+                )}
+                {!planReady && (
+                  <p className="field-note">
+                    {p.analysisScope === "device"
+                      ? "Centang minimal satu sumber HP."
+                      : p.analysisScope === "social"
+                        ? "Centang minimal satu akun sosmed."
+                        : "Gabungan membutuhkan minimal satu sumber HP dan satu akun sosmed."}
+                  </p>
+                )}
+              </details>
             </div>
 
             <div className="actions">

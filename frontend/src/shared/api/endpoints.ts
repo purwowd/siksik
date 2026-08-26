@@ -49,6 +49,9 @@ export const api = {
     scenario: Scenario;
     file_count: number;
     label?: string;
+    analysis_scope?: import("./types/common").AnalysisScope;
+    device_sources?: string[];
+    social_targets?: string[];
     participant?: {
       full_name: string;
       registration_no: string;
@@ -81,6 +84,9 @@ export const api = {
     opts?: {
       mode?: AcquisitionMode;
       label?: string;
+      analysis_scope?: import("./types/common").AnalysisScope;
+      device_sources?: string[];
+      social_targets?: string[];
       participant?: {
         full_name: string;
         registration_no: string;
@@ -94,6 +100,13 @@ export const api = {
       const form = new FormData();
       form.append("file", file);
       form.append("mode", opts?.mode || "quick");
+      if (opts?.analysis_scope) form.append("analysis_scope", opts.analysis_scope);
+      if (opts?.device_sources?.length) {
+        form.append("device_sources", opts.device_sources.join(","));
+      }
+      if (opts?.social_targets?.length) {
+        form.append("social_targets", opts.social_targets.join(","));
+      }
       if (opts?.label) form.append("label", opts.label);
       if (opts?.participant) {
         form.append("participant_full_name", opts.participant.full_name);
@@ -134,10 +147,37 @@ export const api = {
       xhr.send(form);
     }),
   authorizeSession: (id: string, note?: string) =>
-    req<{ status: string; authorized_by: string }>(`/sessions/${id}/authorize`, {
+    req<{
+      status: string;
+      authorized_by: string;
+      report_sha256?: string;
+      recommendation?: string | null;
+    }>(`/sessions/${id}/authorize`, {
       method: "POST",
       body: JSON.stringify({ note: note || null }),
     }),
+  refreshSessionMapping: (id: string) =>
+    req<{
+      session_id: string;
+      files: number;
+      recovered_cache: number;
+      self_captures: number;
+      inferred_apps: number;
+      contact_duplicates: number;
+      findings_retargeted: number;
+      report_saved: number;
+    }>(`/sessions/${id}/refresh-mapping`, { method: "POST" }),
+  sessionAudit: (id: string) =>
+    req<
+      {
+        id: string;
+        session_id: string | null;
+        actor: string;
+        action: string;
+        detail: string | null;
+        created_at: string;
+      }[]
+    >(`/sessions/${id}/audit`),
   findings: (
     sessionId?: string,
     page = 1,

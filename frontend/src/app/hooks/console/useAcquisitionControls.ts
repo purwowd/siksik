@@ -2,11 +2,13 @@ import { useCallback, useMemo, useState } from "react";
 import {
   api,
   type AcquisitionMode,
+  type AnalysisScope,
   type DeviceInfo,
   type SessionSummary,
 } from "@/shared/api/client";
 import { ACTIVE } from "@/shared/constants";
 import { SESSION_STORAGE_KEY } from "@/app/hooks/console/constants";
+import { analysisPlanReady } from "@/features/operator/analysisScope";
 import type { Tab } from "@/shared/types";
 import type { ParticipantForm } from "@/features/operator/OperatorPage";
 
@@ -16,6 +18,9 @@ type Params = {
   setSession: React.Dispatch<React.SetStateAction<SessionSummary | null>>;
   mode: AcquisitionMode;
   setMode: React.Dispatch<React.SetStateAction<AcquisitionMode>>;
+  analysisScope: AnalysisScope;
+  deviceSources: string[];
+  socialTargets: string[];
   fileCount: number;
   acqSource: "live" | "zip";
   setAcqSource: React.Dispatch<React.SetStateAction<"live" | "zip">>;
@@ -56,29 +61,36 @@ export function useAcquisitionControls(p: Params) {
     [p.participant.fullName, p.participant.registrationNo, p.participant.nik],
   );
 
+  const planReady = useMemo(
+    () => analysisPlanReady(p.analysisScope, p.deviceSources, p.socialTargets),
+    [p.analysisScope, p.deviceSources, p.socialTargets],
+  );
+
   const canStartLive = useMemo(
     () =>
       identityReady &&
+      planReady &&
       p.acqSource === "live" &&
       !!p.selected &&
       !p.selected.simulated &&
       !busy &&
       !(p.session && ACTIVE.has(p.session.status)),
-    [identityReady, p.acqSource, p.selected, busy, p.session],
+    [identityReady, planReady, p.acqSource, p.selected, busy, p.session],
   );
 
   const canStartZip = useMemo(
     () =>
       identityReady &&
+      planReady &&
       p.acqSource === "zip" &&
       !!p.zipFile &&
       !busy &&
       !(p.session && ACTIVE.has(p.session.status)),
-    [identityReady, p.acqSource, p.zipFile, busy, p.session],
+    [identityReady, planReady, p.acqSource, p.zipFile, busy, p.session],
   );
 
   const start = useCallback(async () => {
-    if (!p.selected || p.selected.simulated || !identityReady) return;
+    if (!p.selected || p.selected.simulated || !identityReady || !planReady) return;
     p.setError(null);
     setBusy(true);
     try {
@@ -86,6 +98,9 @@ export function useAcquisitionControls(p: Params) {
         device_id: p.selected.device_id,
         device_type: p.selected.device_type === "simulated" ? "android" : p.selected.device_type,
         mode: p.mode,
+        analysis_scope: p.analysisScope,
+        device_sources: p.deviceSources,
+        social_targets: p.socialTargets,
         scenario: "lulus",
         file_count: p.fileCount,
         participant: participantPayload(p.participant),
@@ -111,10 +126,10 @@ export function useAcquisitionControls(p: Params) {
     } finally {
       setBusy(false);
     }
-  }, [p, identityReady]);
+  }, [p, identityReady, planReady]);
 
   const startZip = useCallback(async () => {
-    if (!p.zipFile || !identityReady) return;
+    if (!p.zipFile || !identityReady || !planReady) return;
     const maxBytes = p.zipMaxMb * 1024 * 1024;
     if (p.zipFile.size > maxBytes) {
       p.setError(
@@ -128,6 +143,9 @@ export function useAcquisitionControls(p: Params) {
     try {
       const s = await api.startSessionFromZip(p.zipFile, {
         mode: p.mode,
+        analysis_scope: p.analysisScope,
+        device_sources: p.deviceSources,
+        social_targets: p.socialTargets,
         participant: participantPayload(p.participant),
         onUploadProgress: (pct) => setUploadPct(pct),
       });
@@ -152,28 +170,21 @@ export function useAcquisitionControls(p: Params) {
       setBusy(false);
       setUploadPct(null);
     }
-  }, [p, identityReady]);
+  }, [p, identityReady, planReady]);
 
   const cancel = useCallback(async () => {
     if (!p.session) return;
     setBusy(true);
     try {
-      p.setSession(await api.cancelSession(p.session.id));
+      const s = await api.cancelSession(p.session.id);
+      p.setSession(s);
       void p.refreshSessionList();
     } catch (e) {
-      p.setError(e instanceof Error ? e.message : "Gagal membatalkan");
+      p.setError(e instanceof Error ? e.message : "Gagal membatalkan sesi");
     } finally {
       setBusy(false);
     }
   }, [p]);
 
-  return {
-    busy,
-    uploadPct,
-    canStartLive,
-    canStartZip,
-    start,
-    startZip,
-    cancel,
-  };
+  return { busy, uploadPct, canStartLive, canStartZip, start, startZip, cancel };
 }

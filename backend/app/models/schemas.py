@@ -283,6 +283,8 @@ class SessionProgress(ResponseModel):
     analysis_scope: AnalysisScope | None = None
     device_sources: list[str] | None = None
     social_targets: list[str] | None = None
+    report_sha256: str | None = Field(default=None, max_length=64)
+    authorized_confirmed_findings: int | None = Field(default=None, ge=0)
 
 
 class AgentBootstrapStatus(ResponseModel):

@@ -831,6 +831,13 @@ async def authorize_session(
     body: AuthorizeRequest,
     user: Annotated[AuthUser, Depends(require_perm("report:authorize"))],
 ) -> dict:
+    from app.services.audit import record_audit
+    from app.services.reports import canonical_report_digest
+    from app.services.sessions import (
+        SESSION_LOCKED_DETAIL,
+        authorized_at_from_progress,
+    )
+
     row = await db.fetchone("SELECT * FROM sessions WHERE id = ?", (session_id,))
     if not row:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -846,13 +853,31 @@ async def authorize_session(
             status_code=403,
             detail="Pengesahan diblokir — masih ada temuan menunggu verifikasi analis",
         )
-    progress = json.loads(row["progress_json"])
+    progress = json.loads(row["progress_json"] or "{}")
+    if authorized_at_from_progress(progress):
+        raise HTTPException(status_code=409, detail=SESSION_LOCKED_DETAIL)
     progress["authorized_by"] = user.username
     progress["authorized_at"] = utcnow()
     progress["authorize_note"] = body.note or ""
+    report = await build_session_report(session_id)
+    progress["report_sha256"] = canonical_report_digest(report)
+    confirmed = await db.fetchone(
+        """
+        SELECT COUNT(*) AS c FROM findings
+        WHERE session_id = ? AND review_status = 'confirmed'
+        """,
+        (session_id,),
+    )
+    progress["authorized_confirmed_findings"] = int(confirmed["c"]) if confirmed else 0
     await db.execute(
         "UPDATE sessions SET progress_json = ?, updated_at = ? WHERE id = ?",
         (json.dumps(progress), utcnow(), session_id),
+    )
+    await record_audit(
+        session_id=session_id,
+        actor=user.username,
+        action="report_authorized",
+        detail=str(progress["report_sha256"])[:16],
     )
     audit_logger.info(
         "session_authorized",
@@ -870,7 +895,55 @@ async def authorize_session(
         "session_id": session_id,
         "authorized_by": user.username,
         "recommendation": row["recommendation"],
+        "report_sha256": progress["report_sha256"],
     }
+
+
+@router.post("/sessions/{session_id}/refresh-mapping")
+async def refresh_session_mapping_endpoint(
+    session_id: str,
+    user: Annotated[AuthUser, Depends(require_perm("sessions:start"))],
+) -> dict:
+    from app.services.audit import record_audit
+    from app.services.session_mapping import refresh_session_mapping
+    from app.services.sessions import require_unlocked_session
+
+    row = await db.fetchone("SELECT id, status FROM sessions WHERE id = ?", (session_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if row["status"] != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail="Refresh mapping hanya untuk sesi yang sudah selesai",
+        )
+    try:
+        await require_unlocked_session(session_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        stats = await refresh_session_mapping(session_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    await record_audit(
+        session_id=session_id,
+        actor=user.username,
+        action="session_mapping_refreshed",
+        detail=json.dumps(stats, sort_keys=True),
+    )
+    return {"session_id": session_id, **stats}
+
+
+@router.get("/sessions/{session_id}/audit")
+async def session_audit(
+    session_id: str,
+    _: Annotated[AuthUser, Depends(require_perm("sessions:read"))],
+) -> list[dict]:
+    from app.services.audit import list_session_audit
+
+    row = await db.fetchone("SELECT id FROM sessions WHERE id = ?", (session_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return await list_session_audit(session_id)
 
 
 @router.get("/findings", response_model=PaginatedFindings)
@@ -903,9 +976,15 @@ async def review_finding(
     body: ReviewRequest,
     user: Annotated[AuthUser, Depends(require_perm("findings:review"))],
 ) -> FindingOut:
+    from app.services.sessions import require_unlocked_session
+
     row = await db.fetchone("SELECT * FROM findings WHERE id = ?", (finding_id,))
     if not row:
         raise HTTPException(status_code=404, detail="Finding not found")
+    try:
+        await require_unlocked_session(str(row["session_id"]))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     now = utcnow()
     await db.execute(
         """
@@ -936,9 +1015,15 @@ async def bulk_review_findings(
     body: BulkReviewRequest,
     user: Annotated[AuthUser, Depends(require_perm("findings:review"))],
 ) -> dict:
+    from app.services.sessions import require_unlocked_session
+
     row = await db.fetchone("SELECT id FROM sessions WHERE id = ?", (session_id,))
     if not row:
         raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        await require_unlocked_session(session_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     now = utcnow()
     pending_row = await db.fetchone(
         """

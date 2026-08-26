@@ -1,4 +1,10 @@
-import type { AcquisitionMode, ReviewStatus, Scenario, SessionStatus } from "./common";
+import type {
+  AcquisitionMode,
+  AnalysisScope,
+  ReviewStatus,
+  Scenario,
+  SessionStatus,
+} from "./common";
 
 export interface SessionProgress {
   phase: SessionStatus;
@@ -38,6 +44,11 @@ export interface SessionProgress {
   authorized_by?: string | null;
   authorized_at?: string | null;
   authorize_note?: string | null;
+  analysis_scope?: AnalysisScope | null;
+  device_sources?: string[];
+  social_targets?: string[];
+  report_sha256?: string | null;
+  authorized_confirmed_findings?: number | null;
   crawl_discovered?: number;
   crawl_duplicates?: number;
   preprocessing_state?: string;

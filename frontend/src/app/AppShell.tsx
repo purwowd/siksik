@@ -28,7 +28,8 @@ export function AppShell(props: ConsoleAppViewModel) {
     liveDevices, canStartLive, canStartZip,
     participant, setParticipant,
     acqSource, setAcqSource, zipEnabled, zipFile, setZipFile, zipMaxMb, uploadPct, selected, setSelected,
-    mode, setMode, authorizeNote, setAuthorizeNote, refreshDevices, refreshSessionList, refreshGallery, onPickSession,
+    mode, setMode, analysisScope, setAnalysisScope, deviceSources, setDeviceSources,
+    socialTargets, setSocialTargets, authorizeNote, setAuthorizeNote, refreshDevices, refreshSessionList, refreshGallery, onPickSession,
     openSession, openSessionWithModule, changeReviewFilter, changeModuleFilter, changeGalleryAlbum,
     start, startZip, cancel, review, bulkReview, doLogout, setSession, setReportPage, topBarActive,
   } = props;
@@ -124,7 +125,11 @@ export function AppShell(props: ConsoleAppViewModel) {
         <Breadcrumb pathname={location.pathname} session={session} />
       </div>
 
-      <CaseFlowBar session={session} />
+      <CaseFlowBar
+        session={session}
+        role={auth.role}
+        pending={reviewSummary?.pending ?? 0}
+      />
 
       {error && (
         <div className="error-banner dismissible" role="alert">
@@ -167,6 +172,12 @@ export function AppShell(props: ConsoleAppViewModel) {
                 refreshDevices={refreshDevices}
                 mode={mode}
                 setMode={setMode}
+                analysisScope={analysisScope}
+                setAnalysisScope={setAnalysisScope}
+                deviceSources={deviceSources}
+                setDeviceSources={setDeviceSources}
+                socialTargets={socialTargets}
+                setSocialTargets={setSocialTargets}
                 canStartLive={canStartLive}
                 canStartZip={canStartZip}
                 busy={busy}

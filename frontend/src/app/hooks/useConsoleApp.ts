@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { api, can, type AcquisitionMode, type SessionSummary } from "@/shared/api/client";
+import { api, can, type AcquisitionMode, type AnalysisScope, type SessionSummary } from "@/shared/api/client";
 import { ACTIVE } from "@/shared/constants";
 import { type ReviewSummary } from "@/app/hooks/console/constants";
 import { useToastStack } from "@/app/hooks/console/useToastStack";
@@ -11,6 +11,10 @@ import { useSessionWorkspace } from "@/app/hooks/console/useSessionWorkspace";
 import { useAcquisitionControls } from "@/app/hooks/console/useAcquisitionControls";
 import { useReviewActions } from "@/app/hooks/console/useReviewActions";
 import { DEFAULT_GALLERY_ALBUM, type ModuleFilterParam, type ReviewFilterParam } from "@/app/routes";
+import {
+  DEFAULT_ANALYSIS_SCOPE,
+  planForScope,
+} from "@/features/operator/analysisScope";
 
 export function useConsoleApp() {
   const [error, setError] = useState<string | null>(null);
@@ -32,6 +36,10 @@ export function useConsoleApp() {
   const [galleryAlbum, setGalleryAlbum] = useState<string>(DEFAULT_GALLERY_ALBUM);
 
   const [mode, setMode] = useState<AcquisitionMode>("quick");
+  const initialPlan = planForScope(DEFAULT_ANALYSIS_SCOPE);
+  const [analysisScope, setAnalysisScope] = useState<AnalysisScope>(DEFAULT_ANALYSIS_SCOPE);
+  const [deviceSources, setDeviceSources] = useState<string[]>([...initialPlan.deviceSources]);
+  const [socialTargets, setSocialTargets] = useState<string[]>([...initialPlan.socialTargets]);
   const [fileCount] = useState(1200);
   const [acqSource, setAcqSource] = useState<"live" | "zip">("live");
   const [zipFile, setZipFile] = useState<File | null>(null);
@@ -211,6 +219,9 @@ export function useConsoleApp() {
     setSession,
     mode,
     setMode,
+    analysisScope,
+    deviceSources,
+    socialTargets,
     fileCount,
     acqSource,
     setAcqSource,
@@ -339,6 +350,12 @@ export function useConsoleApp() {
     setSelected: runtime.setSelected,
     mode,
     setMode,
+    analysisScope,
+    setAnalysisScope,
+    deviceSources,
+    setDeviceSources,
+    socialTargets,
+    setSocialTargets,
     authorizeNote,
     setAuthorizeNote,
     refreshDevices: runtime.refreshDevices,

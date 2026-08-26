@@ -36,6 +36,35 @@ from app.services import reports as rpt
 if TYPE_CHECKING:
     from app.acquisition.runtime import AgentRuntimeRecord
 
+SESSION_LOCKED_DETAIL = "Sesi sudah disahkan — data terkunci."
+
+
+def authorized_at_from_progress(progress_json: Any) -> str | None:
+    try:
+        progress = (
+            progress_json
+            if isinstance(progress_json, dict)
+            else json.loads(progress_json or "{}")
+        )
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(progress, dict):
+        return None
+    value = str(progress.get("authorized_at") or "").strip()
+    return value or None
+
+
+async def require_unlocked_session(session_id: str) -> None:
+    row = await db.fetchone(
+        "SELECT progress_json FROM sessions WHERE id = ?",
+        (session_id,),
+    )
+    if not row:
+        raise KeyError("Session not found")
+    if authorized_at_from_progress(row["progress_json"]):
+        raise RuntimeError(SESSION_LOCKED_DETAIL)
+
+
 _PROGRESS_TIMING_KEYS = {
     "android_inventory_ms": "t_inventory_ms",
     "android_preprocessing_ms": "t_preprocess_ms",
@@ -139,6 +168,17 @@ class SessionManager:
                     now,
                 ),
             )
+            try:
+                from app.services.audit import record_audit
+
+                await record_audit(
+                    session_id=session_id,
+                    actor=operator_id or "sistem",
+                    action="session_started",
+                    detail=req.mode.value,
+                )
+            except Exception:
+                pass
             self._active_device = device_id
             task = asyncio.create_task(self._run_pipeline(session_id, req))
             self._tasks[session_id] = task
@@ -240,6 +280,8 @@ class SessionManager:
         row = await db.fetchone("SELECT * FROM sessions WHERE id = ?", (session_id,))
         if not row:
             raise KeyError("Session not found")
+        if authorized_at_from_progress(row["progress_json"]):
+            raise RuntimeError(SESSION_LOCKED_DETAIL)
         require_complete_participant(participant)
         payload = await _ensure_unique_registration(
             participant,
