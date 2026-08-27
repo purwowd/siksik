@@ -9,6 +9,8 @@ class InstallFailureKind(str, Enum):
     NONE = "none"
     RUNTIME_GRANT_UNSUPPORTED = "runtime_grant_unsupported"
     STREAMING_UNAVAILABLE = "streaming_unavailable"
+    NO_STREAMING_UNSUPPORTED = "no_streaming_unsupported"
+    TEST_ONLY_REJECTED = "test_only_rejected"
     UPDATE_INCOMPATIBLE = "update_incompatible"
     UID_INCOMPATIBLE = "uid_incompatible"
     INSUFFICIENT_STORAGE = "insufficient_storage"
@@ -56,16 +58,6 @@ def initial_install_attempt(
     prefer_no_streaming: bool = False,
     runtime_grant_supported: bool = True,
 ) -> InstallAttempt:
-    """Pilih flag install awal berdasarkan API Android + profil OEM.
-
-    Matriks ringkas:
-    - API < 26: ditolak di layer capabilities (bukan di sini).
-    - API 26–28 / OEM flaky streaming: mulai `--no-streaming` agar push stabil.
-    - `-g` dipakai bila diminta dan device belum terbukti menolak grant-at-install.
-    - `-t` hanya untuk APK test/instrumentation.
-    - API 29+ streaming default; fallback `--no-streaming` jika transport gagal.
-    - USER_RESTRICTED (sering di API 30+ OEM China): ditangani retry di transport.
-    """
     oem = f"{manufacturer or ''} {brand or ''}".casefold()
     oem_prefers_push = any(
         token in oem
@@ -119,8 +111,19 @@ def evaluate_install_result(returncode: int, stdout: str, stderr: str) -> Instal
         and "exception occurred" not in output
     ):
         return InstallEvaluation(True, InstallFailureKind.NONE)
+    if any(
+        marker in output
+        for marker in (
+            "unknown option --no-streaming",
+            "unrecognized option '--no-streaming'",
+            "unknown option: --no-streaming",
+        )
+    ):
+        return InstallEvaluation(False, InstallFailureKind.NO_STREAMING_UNSUPPORTED)
     if "securityexception" in output and "install_grant_runtime_permissions" in output:
         return InstallEvaluation(False, InstallFailureKind.RUNTIME_GRANT_UNSUPPORTED)
+    if "install_failed_test_only" in output:
+        return InstallEvaluation(False, InstallFailureKind.TEST_ONLY_REJECTED)
     if "install_failed_update_incompatible" in output:
         return InstallEvaluation(False, InstallFailureKind.UPDATE_INCOMPATIBLE)
     if any(
@@ -182,9 +185,17 @@ def next_install_attempt(
     attempt: InstallAttempt,
     failure: InstallFailureKind,
 ) -> InstallAttempt | None:
+    if failure == InstallFailureKind.NO_STREAMING_UNSUPPORTED:
+        if attempt.no_streaming:
+            return replace(attempt, no_streaming=False)
+        return None
     if failure == InstallFailureKind.RUNTIME_GRANT_UNSUPPORTED:
         if attempt.grant_runtime_permissions:
             return replace(attempt, grant_runtime_permissions=False)
+        return None
+    if failure == InstallFailureKind.TEST_ONLY_REJECTED:
+        if not attempt.allow_test_packages:
+            return replace(attempt, allow_test_packages=True)
         return None
     if failure == InstallFailureKind.STREAMING_UNAVAILABLE:
         if not attempt.no_streaming:

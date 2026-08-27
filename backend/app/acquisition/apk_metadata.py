@@ -46,14 +46,20 @@ class ApkMetadataInspector:
             raise ValueError("APK inspection timeout must be positive")
         self._config = config
         self._runner = runner
+        self._cache: dict[tuple[Path, int, int], ApkMetadata] = {}
 
     async def inspect(self, apk_path: Path) -> ApkMetadata:
         path = apk_path.expanduser().resolve()
         if not path.is_file() or path.suffix.lower() != ".apk":
             raise acquisition_error(ErrorCategory.VALIDATION_ERROR, "Artifact APK tidak valid.")
-        size = path.stat().st_size
+        stat = path.stat()
+        size = stat.st_size
         if not 0 < size <= 250 * 1024 * 1024:
             raise acquisition_error(ErrorCategory.VALIDATION_ERROR, "Ukuran APK tidak valid.")
+        cache_key = (path, size, stat.st_mtime_ns)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
         apkanalyzer, apksigner = self._resolve_tools()
         environment = self._environment()
         application_id, version_code_raw, version_name, certificate, manifest = await asyncio.gather(
@@ -97,7 +103,7 @@ class ApkMetadataInspector:
             )
         signer = self._parse_signer(certificate)
         uses_shared_user = self._uses_shared_user_id(manifest)
-        return ApkMetadata(
+        result = ApkMetadata(
             path=path,
             package_name=package_name,
             version_code=int(raw_code),
@@ -107,6 +113,8 @@ class ApkMetadataInspector:
             size_bytes=size,
             uses_shared_user_id=uses_shared_user,
         )
+        self._cache[cache_key] = result
+        return result
 
     async def _tool_output(
         self,

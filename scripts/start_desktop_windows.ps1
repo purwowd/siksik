@@ -1,28 +1,25 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-  SATRIA operator UI — native Windows (RAM Windows, bukan WSL).
+  SATRIA Tauri desktop on native Windows (not browser-only Vite).
 
 .DESCRIPTION
-  Jalankan di luar WSL (double-click .cmd / PowerShell Windows).
-  Otomatis mencari folder repo siksik, lalu:
-    Node Windows → npm/vite Windows → browser → proxy ke API WSL :8000
-  Ctrl+C menghentikan Vite + bersihkan port.
-
-  Tidak memanggil wsl.exe untuk UI. Backend tetap di WSL (terpisah).
+  Double-click scripts\start_desktop_windows.cmd from Windows (not WSL).
+  Starts Tauri window (WebView) against frontend on :5175 and API on :8000.
+  Uses C:\siksik (satria stitch). Backend may already run in WSL; otherwise
+  this script tries to start API via wsl.exe (no WSL Vite).
 
 .EXAMPLE
-  Double-click:  scripts\start_desktop_windows.cmd
-  Atau:          powershell -NoProfile -ExecutionPolicy Bypass -File ...
+  scripts\start_desktop_windows.cmd
 #>
 $ErrorActionPreference = "Stop"
 
 $ApiPort = if ($env:SADT_API_PORT) { $env:SADT_API_PORT } else { "8000" }
-$UiPort = if ($env:SADT_UI_PORT) { $env:SADT_UI_PORT } else { "5173" }
+$DesktopUiPort = if ($env:SATRIA_DESKTOP_UI_PORT) { $env:SATRIA_DESKTOP_UI_PORT } else { "5175" }
 $ApiHost = "127.0.0.1"
 $ReadyUrl = "http://${ApiHost}:${ApiPort}/api/v1/ready"
-$UiUrl = "http://${ApiHost}:${UiPort}"
-$ApiWaitSeconds = 45
+$DesktopUiUrl = "http://${ApiHost}:${DesktopUiPort}"
+$ApiWaitSeconds = 90
 
 function Write-Step([string]$Message) {
   Write-Host ""
@@ -40,7 +37,10 @@ function Test-SiksikRepo([string]$Root) {
     if (-not (Test-Path -LiteralPath $Root)) { return $false }
     $pkg = Join-Path $Root "frontend\package.json"
     $api = Join-Path $Root "backend\app\main.py"
-    return (Test-Path -LiteralPath $pkg) -and (Test-Path -LiteralPath $api)
+    $desktop = Join-Path $Root "desktop\package.json"
+    $stitch = Join-Path $Root "frontend\src\features\operator\analysisScope.ts"
+    return (Test-Path -LiteralPath $pkg) -and (Test-Path -LiteralPath $api) `
+      -and (Test-Path -LiteralPath $desktop) -and (Test-Path -LiteralPath $stitch)
   } catch {
     return $false
   }
@@ -73,7 +73,6 @@ function Find-SiksikRepoRoot {
     if ($v) { [void]$candidates.Add($v.Trim().TrimEnd('\', '/')) }
   }
 
-  # Folder induk script (…\siksik\scripts\…)
   $scriptDir = $null
   if ($PSScriptRoot) {
     $scriptDir = $PSScriptRoot
@@ -82,31 +81,10 @@ function Find-SiksikRepoRoot {
   }
   if ($scriptDir) {
     [void]$candidates.Add((Join-Path $scriptDir ".."))
-    [void]$candidates.Add($scriptDir)
   }
 
-  # Path Windows umum (prioritas di atas \\wsl$ — I/O lebih cepat)
-  $userProfile = $env:USERPROFILE
-  foreach ($p in @(
-      "C:\siksik",
-      "D:\siksik",
-      (Join-Path $userProfile "siksik"),
-      (Join-Path $userProfile "Documents\siksik"),
-      (Join-Path $userProfile "Desktop\siksik"),
-      "C:\src\siksik",
-      "C:\dev\siksik"
-    )) {
-    if ($p) { [void]$candidates.Add($p) }
-  }
-
-  # Repo hidup di filesystem WSL — Node tetap proses Windows (RAM Windows)
-  foreach ($distro in (Get-WslDistroNames)) {
-    foreach ($prefix in @("\\wsl.localhost", "\\wsl$")) {
-      [void]$candidates.Add("$prefix\$distro\home\me\siksik")
-      if ($env:USERNAME) {
-        [void]$candidates.Add("$prefix\$distro\home\$($env:USERNAME)\siksik")
-      }
-    }
+  foreach ($p in @("C:\siksik", "D:\siksik")) {
+    [void]$candidates.Add($p)
   }
 
   $seen = @{}
@@ -126,191 +104,42 @@ function Find-SiksikRepoRoot {
   return $null
 }
 
-# --- Harus PowerShell Windows, bukan di dalam WSL ---
-if ($env:WSL_DISTRO_NAME -or $env:WSL_INTEROP -or (Test-Path -LiteralPath "/proc/version")) {
-  Write-Fail @"
-Script ini harus dijalankan di Windows (luar WSL), bukan dari shell WSL.
-
-Dari File Explorer / PowerShell Windows:
-  C:\siksik\scripts\start_desktop_windows.cmd
-
-Atau double-click file .cmd tersebut.
-"@
-  exit 1
-}
-
-Write-Step "Cari repo siksik"
-$RepoRoot = Find-SiksikRepoRoot
-if (-not $RepoRoot) {
-  Write-Fail @"
-Repo siksik tidak ditemukan otomatis.
-
-Set path sekali (PowerShell), lalu jalankan lagi:
-  [Environment]::SetEnvironmentVariable('SIKSIK_ROOT', 'C:\siksik', 'User')
-
-Atau pastikan salah satu ada:
-  C:\siksik
-  %USERPROFILE%\siksik
-  \\wsl.localhost\Ubuntu-24.04\home\me\siksik
-"@
-  exit 1
-}
-
-$FrontendDir = Join-Path $RepoRoot "frontend"
-$onWslShare = ($RepoRoot -match '(?i)^\\\\wsl')
-Write-Host "SATRIA desktop — UI native Windows (RAM Windows)" -ForegroundColor Green
-Write-Host "  repo     $RepoRoot"
-if ($onWslShare) {
-  Write-Host "  catatan  Path \\wsl$ — Node tetap Windows; I/O lebih lambat dari C:\siksik" -ForegroundColor Yellow
-}
-Write-Host "  UI       $UiUrl"
-Write-Host "  API      $ReadyUrl  (backend WSL)"
-Write-Host "  Ctrl+C   stop"
-Write-Host ""
-
-# --- Node Windows saja ---
-Write-Step "Cek Node.js Windows (bukan WSL)"
-$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
-$npmCmd = Get-Command npm -ErrorAction SilentlyContinue
-$npxCmd = Get-Command npx -ErrorAction SilentlyContinue
-if (-not $nodeCmd -or -not $npmCmd -or -not $npxCmd) {
-  Write-Fail @"
-Node.js / npm / npx tidak ada di PATH Windows.
-Install Node LTS: https://nodejs.org
-Lalu buka ulang terminal Windows (bukan WSL).
-"@
-  exit 1
-}
-
-$nodePath = $nodeCmd.Source
-if ($nodePath -match '(?i)\\windows\\system32\\wsl|\\wsl\.exe$|\\AppData\\Local\\Microsoft\\WindowsApps\\wsl') {
-  Write-Fail "Command 'node' mengarah ke WSL ($nodePath). Install Node Windows asli."
-  exit 1
-}
-# Tolak binary Linux yang kebaca lewat \\wsl$
-try {
-  $fs = [System.IO.File]::OpenRead($nodePath)
-  $buf = New-Object byte[] 4
-  [void]$fs.Read($buf, 0, 4)
-  $fs.Close()
-  # ELF magic = Linux
-  if ($buf[0] -eq 0x7F -and $buf[1] -eq [byte][char]'E' -and $buf[2] -eq [byte][char]'L' -and $buf[3] -eq [byte][char]'F') {
-    Write-Fail "Binary node adalah ELF/Linux. Pakai Node Windows (nodejs.org)."
-    exit 1
-  }
-} catch { }
-
-Write-Host ("  node  {0}" -f (& node -v))
-Write-Host ("  path  {0}" -f $nodePath)
-Write-Host ("  npm   {0}" -f (& npm -v))
-Write-Host "  runtime Windows-native — UI tidak memakai RAM WSL" -ForegroundColor DarkGreen
-
-# --- API WSL ---
-Write-Step "Menunggu backend WSL di $ReadyUrl"
-$deadline = (Get-Date).AddSeconds($ApiWaitSeconds)
-$apiOk = $false
-while ((Get-Date) -lt $deadline) {
+function Test-ApiReady {
   try {
     $res = Invoke-WebRequest -Uri $ReadyUrl -UseBasicParsing -TimeoutSec 2
-    if ($res.StatusCode -ge 200 -and $res.StatusCode -lt 300) {
-      $apiOk = $true
-      break
-    }
+    return ($res.StatusCode -ge 200 -and $res.StatusCode -lt 300)
   } catch {
-    Start-Sleep -Milliseconds 800
+    return $false
   }
 }
-if (-not $apiOk) {
-  Write-Fail @"
-Backend belum merespons di $ReadyUrl
 
-Di terminal WSL (terpisah):
-  cd ~/siksik && bash scripts/start_poc.sh
-
-Atau API saja:
-  cd ~/siksik/backend && source .venv/bin/activate
-  uvicorn app.main:app --host 0.0.0.0 --port $ApiPort --workers 1
-
-Kalau 127.0.0.1 gagal (Admin Windows):
-  $RepoRoot\scripts\expose_lan.cmd
-"@
-  exit 1
-}
-Write-Host "  API ready"
-
-# --- Port UI ---
-Write-Step "Cek port UI :$UiPort"
-try {
-  $listener = [System.Net.Sockets.TcpListener]::new(
-    [System.Net.IPAddress]::Parse($ApiHost),
-    [int]$UiPort
-  )
-  $listener.Start()
-  $listener.Stop()
-} catch {
-  Write-Fail @"
-Port $UiPort sudah dipakai (sering sisa Vite di WSL).
-
-Stop Vite di WSL, atau:
-  set SADT_UI_PORT=5174
-  $RepoRoot\scripts\start_desktop_windows.cmd
-"@
-  exit 1
-}
-Write-Host "  port bebas"
-
-# --- deps (npm Windows di folder frontend) ---
-Write-Step "Dependencies frontend (npm Windows)"
-Push-Location $FrontendDir
-try {
-  if (-not (Test-Path -LiteralPath (Join-Path $FrontendDir "node_modules"))) {
-    Write-Host "  npm install (pertama kali bisa lama)…"
-    & npm.cmd install
-    if ($LASTEXITCODE -ne 0) {
-      Write-Fail "npm install gagal (exit $LASTEXITCODE)"
-      exit $LASTEXITCODE
-    }
-  } else {
-    Write-Host "  node_modules ada — skip install"
+function Start-WslSatriaApi {
+  Write-Step "Backend not ready - starting API in WSL (no WSL Vite)"
+  $script = @'
+set -e
+ROOT="$HOME/siksik"
+if [ ! -f "$ROOT/backend/app/main.py" ]; then ROOT="/home/me/siksik"; fi
+cd "$ROOT/backend"
+if [ ! -f .venv/bin/activate ]; then echo NO_VENV; exit 2; fi
+# shellcheck disable=SC1091
+source .venv/bin/activate
+nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 >/tmp/satria-api.log 2>&1 &
+echo STARTED:$!
+'@
+  foreach ($distro in (Get-WslDistroNames)) {
+    try {
+      Write-Host "  wsl -d $distro ..."
+      $out = & wsl.exe -d $distro -e bash -lc $script 2>&1 | Out-String
+      if ($out -match 'STARTED:') {
+        Write-Host "  API start requested ($distro)"
+        return $true
+      }
+    } catch { continue }
   }
-} finally {
-  Pop-Location
+  return $false
 }
 
-$env:SADT_API_PORT = "$ApiPort"
-$env:SATRIA_API_PORT = "$ApiPort"
-$env:SADT_UI_PORT = "$UiPort"
-$env:SATRIA_UI_PORT = "$UiPort"
-Remove-Item Env:SATRIA_DESKTOP -ErrorAction SilentlyContinue
-
-Write-Step "Start Vite Windows + buka browser"
-$openerArgs = @(
-  "-NoProfile",
-  "-ExecutionPolicy", "Bypass",
-  "-Command",
-  @"
-`$port = $UiPort
-`$url = '$UiUrl'
-for (`$i = 0; `$i -lt 90; `$i++) {
-  try {
-    `$c = New-Object System.Net.Sockets.TcpClient
-    `$c.Connect('127.0.0.1', `$port)
-    `$c.Close()
-    Start-Process `$url
-    exit 0
-  } catch {
-    Start-Sleep -Milliseconds 400
-  }
-}
-"@
-)
-$opener = Start-Process -FilePath "powershell.exe" `
-  -ArgumentList $openerArgs `
-  -WindowStyle Hidden `
-  -PassThru
-
-function Stop-SatriaUiPort {
-  param([int]$Port)
+function Stop-PortListeners([int]$Port) {
   try {
     $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
     foreach ($c in @($conn)) {
@@ -321,27 +150,136 @@ function Stop-SatriaUiPort {
   } catch { }
 }
 
-$exitCode = 0
-Write-Host ""
-Write-Host "UI  $UiUrl   (proses Node di Windows)" -ForegroundColor Green
-Write-Host "API $ReadyUrl   (backend WSL)" -ForegroundColor Green
-Write-Host "Ctrl+C untuk stop." -ForegroundColor Yellow
+function Ensure-CargoPath {
+  $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+  if (Test-Path -LiteralPath (Join-Path $cargoBin "cargo.exe")) {
+    if ($env:Path -notlike "*$cargoBin*") {
+      $env:Path = "$cargoBin;$env:Path"
+    }
+  }
+  $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+  if (-not $cargo) {
+    Write-Fail "cargo not in PATH. Install Rust (rustup) then reopen terminal."
+    exit 1
+  }
+  Write-Host ("  cargo  {0}" -f (& cargo -V))
+  Write-Host ("  rustc  {0}" -f (& rustc -V))
+}
+
+# --- Windows PowerShell only ---
+if ($env:WSL_DISTRO_NAME -or $env:WSL_INTEROP -or (Test-Path -LiteralPath "/proc/version")) {
+  Write-Fail @"
+Run this from Windows (Explorer / PowerShell), not inside WSL.
+
+  C:\siksik\scripts\start_desktop_windows.cmd
+"@
+  exit 1
+}
+
+Write-Step "Locate satria stitch repo"
+$RepoRoot = Find-SiksikRepoRoot
+if (-not $RepoRoot) {
+  Write-Fail @"
+Repo not found (need analysisScope.ts + desktop/).
+
+  [Environment]::SetEnvironmentVariable('SIKSIK_ROOT', 'C:\siksik', 'User')
+"@
+  exit 1
+}
+
+$FrontendDir = Join-Path $RepoRoot "frontend"
+$DesktopDir = Join-Path $RepoRoot "desktop"
+Write-Host "SATRIA Tauri desktop (native Windows WebView)" -ForegroundColor Green
+Write-Host "  repo     $RepoRoot"
+Write-Host "  UI       $DesktopUiUrl  (Tauri devUrl)"
+Write-Host "  API      $ReadyUrl"
+Write-Host "  Ctrl+C   stop"
 Write-Host ""
 
-Push-Location $FrontendDir
+Write-Step "Check Node.js Windows"
+$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+$npmCmd = Get-Command npm -ErrorAction SilentlyContinue
+if (-not $nodeCmd -or -not $npmCmd) {
+  Write-Fail "Install Node.js LTS from https://nodejs.org then reopen terminal."
+  exit 1
+}
+Write-Host ("  node  {0}" -f (& node -v))
+Write-Host ("  npm   {0}" -f (& npm -v))
+
+Write-Step "Check Rust toolchain"
+Ensure-CargoPath
+
+Write-Step "Wait for backend $ReadyUrl"
+if (-not (Test-ApiReady)) {
+  [void](Start-WslSatriaApi)
+}
+$deadline = (Get-Date).AddSeconds($ApiWaitSeconds)
+$apiOk = $false
+while ((Get-Date) -lt $deadline) {
+  if (Test-ApiReady) { $apiOk = $true; break }
+  Start-Sleep -Milliseconds 800
+}
+if (-not $apiOk) {
+  Write-Fail @"
+API not ready at $ReadyUrl
+
+In WSL:
+  cd ~/siksik/backend && source .venv/bin/activate
+  uvicorn app.main:app --host 0.0.0.0 --port $ApiPort --workers 1
+
+Do not run scripts/start_poc.sh in parallel (it starts WSL Vite).
+"@
+  exit 1
+}
+Write-Host "  API ready"
+
+Write-Step "Free Tauri UI port :$DesktopUiPort"
+Stop-PortListeners -Port ([int]$DesktopUiPort)
+Start-Sleep -Milliseconds 400
+
+Write-Step "npm install (frontend + desktop) if needed"
+foreach ($dir in @($FrontendDir, $DesktopDir)) {
+  Push-Location $dir
+  try {
+    if (-not (Test-Path -LiteralPath (Join-Path $dir "node_modules"))) {
+      Write-Host "  npm install in $dir ..."
+      & npm.cmd install
+      if ($LASTEXITCODE -ne 0) {
+        Write-Fail "npm install failed in $dir"
+        exit $LASTEXITCODE
+      }
+    } else {
+      Write-Host "  ok  $dir\node_modules"
+    }
+  } finally {
+    Pop-Location
+  }
+}
+
+# Desktop Vite port + stitch UI; beforeDevCommand inherits these.
+$env:SATRIA_DESKTOP = "1"
+$env:SATRIA_DESKTOP_UI_PORT = "$DesktopUiPort"
+$env:SADT_UI_PORT = "$DesktopUiPort"
+$env:SATRIA_UI_PORT = "$DesktopUiPort"
+$env:SADT_API_PORT = "$ApiPort"
+$env:SATRIA_API_PORT = "$ApiPort"
+
+Write-Step "Start Tauri (npm run dev) - first cargo build can take several minutes"
+Write-Host "  Window title: SATRIA - Sistem Analisis Terpadu" -ForegroundColor Yellow
+Write-Host ""
+
+Push-Location $DesktopDir
+$exitCode = 0
 try {
-  & npx.cmd vite --host $ApiHost --port $UiPort --strictPort
+  & npm.cmd run dev
   $exitCode = $LASTEXITCODE
 } catch {
-  $exitCode = 0
+  $exitCode = 1
 } finally {
   Pop-Location
-  Stop-SatriaUiPort -Port ([int]$UiPort)
-  if ($null -ne $opener -and -not $opener.HasExited) {
-    Stop-Process -Id $opener.Id -Force -ErrorAction SilentlyContinue
-  }
+  Stop-PortListeners -Port ([int]$DesktopUiPort)
   Write-Host ""
-  Write-Host "UI Windows stopped." -ForegroundColor DarkGray
+  Write-Host "Tauri desktop stopped." -ForegroundColor DarkGray
 }
 
 exit $exitCode

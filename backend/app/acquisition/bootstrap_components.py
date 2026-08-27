@@ -161,6 +161,7 @@ class AgentPackageCoordinator:
                 serial,
                 work.artifact.path,
                 grant_runtime_permissions=True,
+                allow_test_packages=True,
                 replace_package_on_uid_mismatch=self._config.package_name,
                 timeout=self._config.install_timeout_seconds,
                 approval_poll_seconds=max(

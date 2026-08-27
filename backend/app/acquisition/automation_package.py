@@ -112,13 +112,17 @@ class AutomationPackageCoordinator:
         apk_path = self._resolved_apk()
         installed_package = await self._adb.inspect_package(serial, self._config.package_name)
         installed_apk: ApkMetadata | None = None
-        if installed_package.installed:
+        if not installed_package.installed:
+            action = InstallAction.INSTALL
+        elif self._config.force_reinstall:
+            action = InstallAction.UPDATE
+        else:
             installed_apk = await self.inspect_installed_apk(serial, installed_package)
-        action = self.install_action(
-            desired_apk=desired_apk,
-            installed_package=installed_package,
-            installed_apk=installed_apk,
-        )
+            action = self.install_action(
+                desired_apk=desired_apk,
+                installed_package=installed_package,
+                installed_apk=installed_apk,
+            )
         if action == InstallAction.CURRENT:
             if not await self._adb.package_exists(serial, self._config.package_name):
                 raise acquisition_error(
