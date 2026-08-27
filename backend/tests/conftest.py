@@ -15,6 +15,7 @@ from app.core.db import db
 from app.main import app
 from app.services.auth import ensure_auth_schema, reset_login_rate_limits
 from app.services.sessions import sessions
+from app.acquisition.ios_setup import ios_setup
 
 
 async def cancel_session_tasks() -> None:
@@ -27,6 +28,7 @@ async def cancel_session_tasks() -> None:
     sessions._active_device = None
     sessions._lock = asyncio.Lock()
     sessions._update_lock = asyncio.Lock()
+    await ios_setup.shutdown()
 
 
 @pytest.fixture

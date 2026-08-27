@@ -293,6 +293,8 @@ class Settings(BaseSettings):
         "com.twitter.android",
         "com.facebook.katana",
     ]
+    ios_setup_log_path: Path = PROJECT_ROOT / "logs" / "setup_ios.log"
+    ios_setup_install_timeout_s: float = Field(default=300.0, ge=60.0, le=900.0)
 
     # Upload ZIP hasil ADB (analisa tanpa akuisisi live)
     zip_max_mb: int = 512
@@ -510,3 +512,4 @@ def ensure_dirs() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.staging_dir.mkdir(parents=True, exist_ok=True)
     settings.synthetic_dir.mkdir(parents=True, exist_ok=True)
+    settings.ios_setup_log_path.parent.mkdir(parents=True, exist_ok=True)

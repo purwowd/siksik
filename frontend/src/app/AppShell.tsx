@@ -25,7 +25,7 @@ export function AppShell(props: ConsoleAppViewModel) {
     reportFindings, reportData, reportLoading,     reviewSummary, error, setError, toasts, dismissToast, pushToast,
     tourActive, setTourActive, tourStep, setTourStep, busy, reviewBusyId, bulkBusy,
     expandedEvidence, setExpandedEvidence, focusedFindingId, setFocusedFindingId, teleRef,
-    liveDevices, canStartLive, canStartZip,
+    liveDevices, canStartLive, canStartZip, iosSetup,
     participant, setParticipant,
     acqSource, setAcqSource, zipEnabled, zipFile, setZipFile, zipMaxMb, uploadPct, selected, setSelected,
     mode, setMode, analysisScope, setAnalysisScope, deviceSources, setDeviceSources,
@@ -180,6 +180,7 @@ export function AppShell(props: ConsoleAppViewModel) {
                 setSocialTargets={setSocialTargets}
                 canStartLive={canStartLive}
                 canStartZip={canStartZip}
+                iosSetup={iosSetup}
                 busy={busy}
                 session={session}
                 start={() => void start()}

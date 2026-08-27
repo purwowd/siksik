@@ -21,6 +21,8 @@ import {
   planForScope,
   toggleChecked,
 } from "@/features/operator/analysisScope";
+import { IosSetupPanel } from "@/features/operator/IosSetupPanel";
+import type { useIosSetup } from "@/features/operator/useIosSetup";
 
 export type ParticipantForm = {
   fullName: string;
@@ -54,6 +56,7 @@ type Props = {
   setSocialTargets: (targets: string[]) => void;
   canStartLive: boolean;
   canStartZip: boolean;
+  iosSetup: ReturnType<typeof useIosSetup>;
   busy: boolean;
   session: SessionSummary | null;
   start: () => void;
@@ -253,6 +256,21 @@ export function OperatorPage(p: Props) {
                     );
                   })}
                 </div>
+                {p.iosSetup.visible && (
+                  <IosSetupPanel
+                    status={p.iosSetup.status}
+                    busy={p.iosSetup.busy}
+                    code={p.iosSetup.code}
+                    setCode={p.iosSetup.setCode}
+                    error={p.iosSetup.error}
+                    showWdaSteps={p.iosSetup.showWdaSteps}
+                    disabled={p.busy || active}
+                    onStart={() => void p.iosSetup.start()}
+                    onSubmitCode={() => void p.iosSetup.submitCode()}
+                    onAckTrust={() => void p.iosSetup.ackTrust()}
+                    onCancel={() => void p.iosSetup.cancel()}
+                  />
+                )}
               </div>
             )}
 
@@ -423,6 +441,16 @@ export function OperatorPage(p: Props) {
             {!identityReady && (
               <p className="field-note">Isi nama dan no. peserta sebelum menjalankan akuisisi.</p>
             )}
+            {p.acqSource === "live" &&
+              p.selected?.device_type === "ios" &&
+              !p.selected.simulated &&
+              !p.iosSetup.readyForAcquire && (
+                <p className="field-note">
+                  {p.analysisScope === "device"
+                    ? "Selesaikan USB Trust iPhone sebelum akuisisi."
+                    : "Selesaikan Siapkan iPhone (WDA) sebelum akuisisi sosmed."}
+                </p>
+              )}
           </div>
         </FeaturePanel>
 
@@ -436,7 +464,8 @@ export function OperatorPage(p: Props) {
               <p className="standby-title">Pipeline siap</p>
               <p className="standby-copy">
                 Isi identitas peserta, pilih perangkat live atau unggah ZIP, lalu jalankan. Live
-                Android otomatis membangun dan memasang APK agent terbaru.
+                Android otomatis membangun dan memasang APK agent terbaru. iOS: siapkan iPhone
+                (USB Trust, Developer Mode, WebDriverAgent) sebelum akuisisi sosmed.
               </p>
               <PipelineTrack />
             </div>

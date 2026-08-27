@@ -9,3 +9,5 @@ def test_v1_router_exposes_satria_and_main_paths():
     assert "/sessions/{session_id}/media-ticket" in paths
     assert "/toolchain" in paths
     assert "/agent/bootstrap" in paths
+    assert "/ios/setup" in paths
+    assert "/ios/setup/start" in paths

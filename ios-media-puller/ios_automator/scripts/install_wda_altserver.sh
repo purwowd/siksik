@@ -114,14 +114,16 @@ run_altserver_sign() {
   echo "════════════════════════════════════════════════════════════════"
   echo
 
-  if [[ -t 0 ]]; then
+  if [[ "${IOS_ALTSERVER_STDIN_PIPE:-0}" == "1" ]]; then
+    "$AS" -u "$UDID" -a "$APPLE_ID" -p "$APPLE_ID_PASSWORD" "$work_ipa"
+  elif [[ -t 0 ]]; then
     "$AS" -u "$UDID" -a "$APPLE_ID" -p "$APPLE_ID_PASSWORD" "$work_ipa"
   elif [[ -r /dev/tty ]]; then
     # Pipeline/background: paksa stdin+stdout ke terminal asli
     "$AS" -u "$UDID" -a "$APPLE_ID" -p "$APPLE_ID_PASSWORD" "$work_ipa" < /dev/tty > /dev/tty 2>&1
   else
-    echo "[install] ERROR: butuh terminal interaktif untuk kode verifikasi Apple." >&2
-    echo "[install] Jalankan langsung (bukan via automation/background):" >&2
+    echo "[install] ERROR: butuh SATRIA Siapkan iPhone (kode 6 digit) atau terminal interaktif." >&2
+    echo "[install] Jalankan dari UI operator, atau:" >&2
     echo "  bash $REPO_ROOT/ios_automator/scripts/install_wda_altserver.sh" >&2
     exit 3
   fi

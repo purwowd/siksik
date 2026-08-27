@@ -7,4 +7,5 @@ export interface DeviceInfo {
   os_version?: string | null;
   connected: boolean;
   simulated: boolean;
+  wda_state?: string | null;
 }

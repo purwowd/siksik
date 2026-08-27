@@ -50,6 +50,18 @@ class SessionStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class IosSetupState(str, Enum):
+    USB_UNPAIRED = "usb_unpaired"
+    AWAITING_USB_TRUST = "awaiting_usb_trust"
+    DEVELOPER_MODE_OFF = "developer_mode_off"
+    NEEDS_WDA = "needs_wda"
+    INSTALLING_WDA = "installing_wda"
+    AWAITING_APPLE_ID_CODE = "awaiting_apple_id_code"
+    AWAITING_DEVELOPER_TRUST = "awaiting_developer_trust"
+    READY = "ready"
+    FAILED = "failed"
+
+
 class AgentBootstrapState(str, Enum):
     DETECT_DEVICE = "detect_device"
     VALIDATE_DEVICE = "validate_device"
@@ -173,6 +185,27 @@ class AgentBootstrapRequest(RequestModel):
     device_id: str = Field(min_length=1, max_length=128)
 
 
+class IosSetupDeviceRequest(RequestModel):
+    device_id: str = Field(min_length=8, max_length=64)
+
+
+class IosSetupCodeRequest(RequestModel):
+    device_id: str = Field(min_length=8, max_length=64)
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class IosSetupStatus(ResponseModel):
+    state: IosSetupState
+    message: str
+    paired: bool = False
+    developer_mode: bool | None = None
+    wda_installed: bool = False
+    wda_trusted: bool | None = None
+    apple_id_hint: str | None = None
+    ready: bool = False
+    code_required: bool = False
+
+
 class ReviewRequest(RequestModel):
     review_status: ReviewStatus
 
@@ -205,6 +238,7 @@ class DeviceInfo(ResponseModel):
     unlocked: bool | None = None
     install_hint: str | None = None
     automation_state: str | None = None
+    wda_state: str | None = None
 
 
 class SessionProgress(ResponseModel):

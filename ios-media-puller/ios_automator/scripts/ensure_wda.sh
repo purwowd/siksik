@@ -169,11 +169,7 @@ require_interactive_install() {
   if stdin_is_tty; then
     return 0
   fi
-  die "Install WDA butuh terminal interaktif (kode 6 digit di iPhone → ketik di terminal).
-Jalankan langsung di terminal SSH/lokal (bukan background job):
-  cd $ROOT && bash ios_automator/scripts/install_wda_altserver.sh
-Lalu Trust developer di iPhone, baru:
-  ./ios_automator/scripts/run_ig_profile.sh"
+  die "WebDriverAgent belum terpasang. Di SATRIA, jalankan Siapkan iPhone sebelum akuisisi."
 }
 
 auto_reinstall_allowed() {

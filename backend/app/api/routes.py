@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
+from app.acquisition.errors import AcquisitionError
 from app.core.branding import PRODUCT_NAME, PRODUCT_TAGLINE
 from app.core.config import settings
 from app.core.db import db, utcnow
@@ -19,6 +20,9 @@ from app.models.schemas import (
     AnalysisScope,
     AgentBootstrapRequest,
     AgentBootstrapStatus,
+    IosSetupCodeRequest,
+    IosSetupDeviceRequest,
+    IosSetupStatus,
     AuthorizeRequest,
     BulkReviewRequest,
     DashboardStats,
@@ -414,6 +418,79 @@ async def android_agent_status(
 
     record = await agent_bootstrap.status_for_device(device_id, current_request_id())
     return AgentBootstrapStatus.model_validate(agent_bootstrap.public_status(record))
+
+
+def _ios_setup_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, AcquisitionError):
+        return HTTPException(status_code=exc.status_code, detail=exc.public_message)
+    if isinstance(exc, RuntimeError):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=500, detail="Penyiapan iPhone gagal.")
+
+
+@router.get("/ios/setup", response_model=IosSetupStatus)
+async def get_ios_setup(
+    _: Annotated[AuthUser, Depends(require_perm("devices"))],
+    device_id: str = Query(..., min_length=8, max_length=64),
+) -> IosSetupStatus:
+    from app.acquisition.ios_setup import ios_setup
+
+    try:
+        return await ios_setup.status(device_id)
+    except (AcquisitionError, RuntimeError) as exc:
+        raise _ios_setup_http_error(exc) from exc
+
+
+@router.post("/ios/setup/start", response_model=IosSetupStatus)
+async def start_ios_setup(
+    body: IosSetupDeviceRequest,
+    _: Annotated[AuthUser, Depends(require_perm("sessions:start"))],
+) -> IosSetupStatus:
+    from app.acquisition.ios_setup import ios_setup
+
+    try:
+        return await ios_setup.start(body.device_id)
+    except (AcquisitionError, RuntimeError) as exc:
+        raise _ios_setup_http_error(exc) from exc
+
+
+@router.post("/ios/setup/code", response_model=IosSetupStatus)
+async def submit_ios_setup_code(
+    body: IosSetupCodeRequest,
+    _: Annotated[AuthUser, Depends(require_perm("sessions:start"))],
+) -> IosSetupStatus:
+    from app.acquisition.ios_setup import ios_setup
+
+    try:
+        return await ios_setup.submit_code(body.device_id, body.code)
+    except (AcquisitionError, RuntimeError) as exc:
+        raise _ios_setup_http_error(exc) from exc
+
+
+@router.post("/ios/setup/ack-trust", response_model=IosSetupStatus)
+async def ack_ios_setup_trust(
+    body: IosSetupDeviceRequest,
+    _: Annotated[AuthUser, Depends(require_perm("sessions:start"))],
+) -> IosSetupStatus:
+    from app.acquisition.ios_setup import ios_setup
+
+    try:
+        return await ios_setup.ack_trust(body.device_id)
+    except (AcquisitionError, RuntimeError) as exc:
+        raise _ios_setup_http_error(exc) from exc
+
+
+@router.post("/ios/setup/cancel", response_model=IosSetupStatus)
+async def cancel_ios_setup(
+    body: IosSetupDeviceRequest,
+    _: Annotated[AuthUser, Depends(require_perm("sessions:start"))],
+) -> IosSetupStatus:
+    from app.acquisition.ios_setup import ios_setup
+
+    try:
+        return await ios_setup.cancel(body.device_id)
+    except (AcquisitionError, RuntimeError) as exc:
+        raise _ios_setup_http_error(exc) from exc
 
 
 @router.post("/sessions", response_model=SessionSummary)

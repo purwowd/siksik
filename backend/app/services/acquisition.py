@@ -255,6 +255,15 @@ async def detect_devices(*, include_simulators: bool = True) -> list[DeviceInfo]
                 continue
             name_code, name_out, _ = await _run(["idevicename", "-u", udid], timeout=5)
             label = name_out.strip() if name_code == 0 and name_out.strip() else f"iPhone ({udid[:8]})"
+            wda_state: str | None = None
+            try:
+                from app.acquisition.ios_setup import ios_setup
+
+                wda_state = (
+                    "installed" if await ios_setup.probe_wda_installed(udid) else "not_installed"
+                )
+            except (AcquisitionError, OSError):
+                wda_state = "unknown"
             devices.append(
                 DeviceInfo(
                     device_id=udid,
@@ -263,6 +272,7 @@ async def detect_devices(*, include_simulators: bool = True) -> list[DeviceInfo]
                     os_version="iOS",
                     connected=True,
                     simulated=False,
+                    wda_state=wda_state,
                 )
             )
 

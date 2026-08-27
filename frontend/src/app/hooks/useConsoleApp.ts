@@ -337,6 +337,7 @@ export function useConsoleApp() {
     liveDevices: runtime.liveDevices,
     canStartLive: acquisition.canStartLive,
     canStartZip: acquisition.canStartZip,
+    iosSetup: acquisition.iosSetup,
     participant,
     setParticipant,
     acqSource,

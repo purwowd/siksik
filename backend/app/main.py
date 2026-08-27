@@ -29,6 +29,9 @@ async def lifespan(_app: FastAPI):
     from app.acquisition.bootstrap import agent_bootstrap
 
     await agent_bootstrap.shutdown()
+    from app.acquisition.ios_setup import ios_setup
+
+    await ios_setup.shutdown()
     await db.close()
 
 

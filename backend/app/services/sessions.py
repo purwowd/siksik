@@ -97,6 +97,19 @@ async def _ensure_unique_registration(
     return payload
 
 
+_IN_FLIGHT_STATUSES = (
+    "pending",
+    "detecting",
+    "preparing_agent",
+    "awaiting_access",
+    "acquiring",
+    "selecting",
+    "awaiting_review",
+    "indexing",
+    "analyzing",
+)
+
+
 class SessionManager:
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task] = {}
@@ -104,11 +117,25 @@ class SessionManager:
         self._update_lock = asyncio.Lock()
         self._active_device: str | None = None
 
+    async def has_in_flight(self) -> bool:
+        row = await db.fetchone(
+            f"""
+            SELECT id FROM sessions
+            WHERE status IN ({",".join("?" for _ in _IN_FLIGHT_STATUSES)})
+            LIMIT 1
+            """,
+            _IN_FLIGHT_STATUSES,
+        )
+        return row is not None
+
     async def create_and_run(
         self,
         req: StartSessionRequest,
         operator_id: str | None = None,
     ) -> dict[str, Any]:
+        from app.acquisition.ios_setup import ios_setup
+
+        await ios_setup.assert_session_allowed(req)
         async with self._lock:
             active = await db.fetchone(
                 """

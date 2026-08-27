@@ -32,6 +32,30 @@ export const api = {
   roles: () =>
     req<{ roles: { role: string; label: string; permissions: string[] }[] }>("/auth/roles"),
   devices: () => req<DeviceInfo[]>("/devices"),
+  iosSetup: (deviceId: string) =>
+    req<import("@/features/operator/iosSetupReady").IosSetupStatus>(
+      `/ios/setup?device_id=${encodeURIComponent(deviceId)}`,
+    ),
+  startIosSetup: (deviceId: string) =>
+    req<import("@/features/operator/iosSetupReady").IosSetupStatus>("/ios/setup/start", {
+      method: "POST",
+      body: JSON.stringify({ device_id: deviceId }),
+    }),
+  submitIosSetupCode: (deviceId: string, code: string) =>
+    req<import("@/features/operator/iosSetupReady").IosSetupStatus>("/ios/setup/code", {
+      method: "POST",
+      body: JSON.stringify({ device_id: deviceId, code }),
+    }),
+  ackIosSetupTrust: (deviceId: string) =>
+    req<import("@/features/operator/iosSetupReady").IosSetupStatus>("/ios/setup/ack-trust", {
+      method: "POST",
+      body: JSON.stringify({ device_id: deviceId }),
+    }),
+  cancelIosSetup: (deviceId: string) =>
+    req<import("@/features/operator/iosSetupReady").IosSetupStatus>("/ios/setup/cancel", {
+      method: "POST",
+      body: JSON.stringify({ device_id: deviceId }),
+    }),
   toolchain: () => req<{ toolchain: Record<string, boolean>; gpu_available: boolean }>("/toolchain"),
   dashboard: (sessionId?: string) => {
     const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";

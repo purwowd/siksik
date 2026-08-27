@@ -9,6 +9,7 @@ import {
 import { ACTIVE } from "@/shared/constants";
 import { SESSION_STORAGE_KEY } from "@/app/hooks/console/constants";
 import { analysisPlanReady } from "@/features/operator/analysisScope";
+import { useIosSetup } from "@/features/operator/useIosSetup";
 import type { Tab } from "@/shared/types";
 import type { ParticipantForm } from "@/features/operator/OperatorPage";
 
@@ -66,6 +67,13 @@ export function useAcquisitionControls(p: Params) {
     [p.analysisScope, p.deviceSources, p.socialTargets],
   );
 
+  const iosSetup = useIosSetup({
+    selected: p.selected,
+    acqSource: p.acqSource,
+    analysisScope: p.analysisScope,
+    activeSession: !!(p.session && ACTIVE.has(p.session.status)),
+  });
+
   const canStartLive = useMemo(
     () =>
       identityReady &&
@@ -74,8 +82,9 @@ export function useAcquisitionControls(p: Params) {
       !!p.selected &&
       !p.selected.simulated &&
       !busy &&
-      !(p.session && ACTIVE.has(p.session.status)),
-    [identityReady, planReady, p.acqSource, p.selected, busy, p.session],
+      !(p.session && ACTIVE.has(p.session.status)) &&
+      iosSetup.readyForAcquire,
+    [identityReady, planReady, p.acqSource, p.selected, busy, p.session, iosSetup.readyForAcquire],
   );
 
   const canStartZip = useMemo(
@@ -186,5 +195,5 @@ export function useAcquisitionControls(p: Params) {
     }
   }, [p]);
 
-  return { busy, uploadPct, canStartLive, canStartZip, start, startZip, cancel };
+  return { busy, uploadPct, canStartLive, canStartZip, start, startZip, cancel, iosSetup };
 }
