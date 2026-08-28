@@ -2,6 +2,7 @@
     <string name="app_name">SATRIA Agent</string>
     <string name="inactive_session">Tidak ada sesi SATRIA aktif.</string>
     <string name="active_session">Sesi SATRIA aktif. Konfirmasi hanya dialog keamanan Android yang tampil.</string>
+    <string name="text_only_cover_status">Akuisisi data sedang berlangsung.</string>
     <string name="invalid_bootstrap">Data bootstrap tidak valid atau sudah kedaluwarsa.</string>
     <string name="permission_requested">Permintaan akses diterima.</string>
     <string name="permission_waiting">Konfirmasi akses pada dialog Android.</string>

@@ -409,51 +409,92 @@ export function ReportPage({
                           </div>
                         </header>
                         <div className="wa-thread">
-                          {room.messages.map((message) => (
-                            <article
-                              className={`wa-message wa-message-${message.direction.toLowerCase()} ${
-                                message.flagged ? "wa-message-finding" : ""
-                              }`}
-                              key={message.message_id}
-                            >
-                              <div className="wa-message-bubble">
-                                <div className="wa-message-head">
-                                  <span>
-                                    {message.direction === "OUT"
-                                      ? "Anda"
-                                      : message.sender || room.name}
-                                  </span>
-                                  {message.flagged ? (
-                                    <strong className="wa-finding-marker">Temuan</strong>
-                                  ) : null}
-                                </div>
-                                {message.quoted_text ? (
-                                  <blockquote className="wa-quote">
-                                    {message.quoted_text}
-                                  </blockquote>
-                                ) : null}
-                                <p className={message.revoked ? "wa-message-revoked" : undefined}>
-                                  {message.preview_text}
-                                </p>
-                                {message.finding_labels.length > 0 ? (
-                                  <div className="wa-finding-badges">
-                                    {message.finding_labels.map((label) => (
-                                      <span key={label}>{label}</span>
-                                    ))}
+                          {room.messages.map((message) => {
+                            const isSystem =
+                              message.actor_kind === "system" ||
+                              message.message_type === "system";
+                            if (isSystem) {
+                              return (
+                                <article
+                                  className={`wa-system-event ${
+                                    message.flagged ? "wa-message-finding" : ""
+                                  }`}
+                                  key={message.message_id}
+                                >
+                                  <div className="wa-system-event-card">
+                                    <div className="wa-system-event-head">
+                                      <strong>Sistem WhatsApp</strong>
+                                      {message.system_action_type !== null &&
+                                      message.system_action_type !== undefined ? (
+                                        <span>Aksi {message.system_action_type}</span>
+                                      ) : null}
+                                      {message.flagged ? (
+                                        <strong className="wa-finding-marker">Temuan</strong>
+                                      ) : null}
+                                    </div>
+                                    <p>{message.preview_text}</p>
+                                    <time dateTime={message.timestamp || undefined}>
+                                      {message.timestamp || "Waktu tidak tersedia"}
+                                    </time>
                                   </div>
-                                ) : null}
-                                <footer className="wa-message-foot">
-                                  <span>{message.message_type.replace(/_/g, " ")}</span>
-                                  {message.forwarded ? <span>Diteruskan</span> : null}
-                                  {message.edited_at ? <span>Diedit</span> : null}
-                                  {message.starred ? <span>★</span> : null}
-                                  <time dateTime={message.timestamp || undefined}>
-                                    {message.timestamp || "Waktu tidak tersedia"}
-                                  </time>
-                                </footer>
-                              </div>
-                            </article>
-                          ))}
+                                </article>
+                              );
+                            }
+                            return (
+                              <article
+                                className={`wa-message wa-message-${message.direction.toLowerCase()} ${
+                                  message.flagged ? "wa-message-finding" : ""
+                                }`}
+                                key={message.message_id}
+                              >
+                                <div className="wa-message-bubble">
+                                  <div className="wa-message-head">
+                                    <span>
+                                      {message.actor_kind === "self"
+                                        ? "Anda"
+                                        : message.actor_kind === "unknown"
+                                          ? "Aktor tidak diketahui"
+                                          : message.sender || room.name}
+                                    </span>
+                                    {message.flagged ? (
+                                      <strong className="wa-finding-marker">Temuan</strong>
+                                    ) : null}
+                                  </div>
+                                  {message.quoted_text ? (
+                                    <blockquote className="wa-quote">
+                                      {message.quoted_text}
+                                    </blockquote>
+                                  ) : null}
+                                  <p
+                                    className={
+                                      message.revoked ? "wa-message-revoked" : undefined
+                                    }
+                                  >
+                                    {message.preview_text}
+                                  </p>
+                                  {message.finding_labels.length > 0 ? (
+                                    <div className="wa-finding-badges">
+                                      {message.finding_labels.map((label) => (
+                                        <span key={label}>{label}</span>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                  <footer className="wa-message-foot">
+                                    <span>{message.message_type.replace(/_/g, " ")}</span>
+                                    {message.direction === "UNKNOWN" ? (
+                                      <span>Arah tidak diketahui</span>
+                                    ) : null}
+                                    {message.forwarded ? <span>Diteruskan</span> : null}
+                                    {message.edited_at ? <span>Diedit</span> : null}
+                                    {message.starred ? <span>★</span> : null}
+                                    <time dateTime={message.timestamp || undefined}>
+                                      {message.timestamp || "Waktu tidak tersedia"}
+                                    </time>
+                                  </footer>
+                                </div>
+                              </article>
+                            );
+                          })}
                         </div>
                       </section>
                     ))}

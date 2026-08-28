@@ -6,21 +6,45 @@ export interface GalleryAlbum {
 }
 
 export interface WhatsAppChatMeta {
+  account_id?: string | null;
+  account_slot?: number | null;
   conversation_id: string;
   conversation_name: string;
   conversation_address?: string | null;
   conversation_type: "chat" | "group";
+  peer_jid?: string | null;
+  participant_jid?: string | null;
   message_id: string;
-  direction: "IN" | "OUT";
+  direction: "IN" | "OUT" | "UNKNOWN";
+  direction_evidence: string;
+  actor_kind: "self" | "peer" | "group_participant" | "system" | "unknown";
   sender?: string | null;
   message_type: string;
+  message_type_code?: number | null;
   text?: string | null;
   timestamp?: string | null;
+  system_action_type?: number | null;
+  system_kind?: string | null;
+  analysis_eligible?: boolean;
+  media_filename?: string | null;
+  media_size?: number;
+  media_mime_type?: string | null;
   quoted_text?: string | null;
   starred?: boolean;
   revoked?: boolean;
   forwarded?: boolean;
   edited_at?: string | null;
+}
+
+export interface WhatsAppMediaContext {
+  conversation_id: string;
+  conversation_name?: string | null;
+  message_id: string;
+  direction: "IN" | "OUT" | "UNKNOWN";
+  actor_kind: "self" | "peer" | "group_participant" | "system" | "unknown";
+  sender?: string | null;
+  timestamp?: string | null;
+  match_basis: string;
 }
 
 export interface GalleryItem {
@@ -41,6 +65,7 @@ export interface GalleryItem {
   social_scope?: string | null;
   presentation?: "file" | "visual" | "text" | "chat";
   chat?: WhatsAppChatMeta | null;
+  whatsapp_media?: WhatsAppMediaContext | null;
   artifact_role?: string | null;
   recovery_state?: "normal" | "trash" | "recovered_deleted";
   captured_at?: string | null;

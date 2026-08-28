@@ -15,10 +15,11 @@ internal class AutomationDebugMapper(
     private val crawlId: String,
     private val enabled: Boolean,
 ) {
-    private val entries = JSONArray()
+    private var entries = JSONArray()
     private var targetPackage: String? = null
     private var targetDirectory: File? = null
     private var sequence = 0
+    private var targetAttempt = 0
 
     fun startTarget(packageName: String) {
         if (!enabled) return
@@ -27,14 +28,17 @@ internal class AutomationDebugMapper(
             return
         }
         val directory = File(File(File(externalRoot, sessionId), crawlId), packageName)
+        val continuingTarget = targetPackage == packageName && targetDirectory == directory
         try {
-            if (directory.exists() && !directory.deleteRecursively()) {
-                Log.w(LOG_TAG, "event=debug_mapping stage=cleanup_failed")
-                return
-            }
-            if (!directory.mkdirs() && !directory.isDirectory) {
-                Log.w(LOG_TAG, "event=debug_mapping stage=directory_failed")
-                return
+            if (!continuingTarget) {
+                if (directory.exists() && !directory.deleteRecursively()) {
+                    Log.w(LOG_TAG, "event=debug_mapping stage=cleanup_failed")
+                    return
+                }
+                if (!directory.mkdirs() && !directory.isDirectory) {
+                    Log.w(LOG_TAG, "event=debug_mapping stage=directory_failed")
+                    return
+                }
             }
         } catch (_: SecurityException) {
             Log.w(LOG_TAG, "event=debug_mapping stage=storage_denied")
@@ -42,9 +46,18 @@ internal class AutomationDebugMapper(
         }
         targetPackage = packageName
         targetDirectory = directory
-        sequence = 0
+        if (continuingTarget) {
+            targetAttempt += 1
+        } else {
+            entries = JSONArray()
+            sequence = 0
+            targetAttempt = 1
+        }
         writeManifest()
-        Log.i(LOG_TAG, "event=debug_mapping stage=ready target=$packageName")
+        Log.i(
+            LOG_TAG,
+            "event=debug_mapping stage=ready target=$packageName attempt=$targetAttempt",
+        )
     }
 
     fun capture(
@@ -82,6 +95,7 @@ internal class AutomationDebugMapper(
                 .put("sequence", sequence)
                 .put("captured_at_epoch_ms", System.currentTimeMillis())
                 .put("target_package", packageName)
+                .put("attempt", targetAttempt)
                 .put("scope", scope?.wireName ?: JSONObject.NULL)
                 .put("stage", normalizedStage)
                 .put("status", status.take(MAX_STATUS_LENGTH))
@@ -92,7 +106,7 @@ internal class AutomationDebugMapper(
         Log.i(
             LOG_TAG,
             "event=debug_mapping stage=$normalizedStage scope=${scope?.wireName ?: "none"} " +
-                "captured=$captured sequence=$sequence",
+                "captured=$captured sequence=$sequence attempt=$targetAttempt",
         )
         return captured
     }
@@ -107,6 +121,7 @@ internal class AutomationDebugMapper(
                 .put("session_id", sessionId)
                 .put("crawl_id", crawlId)
                 .put("target_package", targetPackage ?: JSONObject.NULL)
+                .put("attempt", targetAttempt)
                 .put("screenshots", entries)
             FileOutputStream(temporary).use { output ->
                 output.write(document.toString(2).toByteArray(Charsets.UTF_8))

@@ -6,6 +6,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from app.acquisition.device_identity import (
     hints_from_document,
@@ -1295,39 +1296,97 @@ async def _whatsapp_report_data(
     session_id: str,
     findings: list,
 ) -> tuple[list[dict], int, int, bool]:
-    rows = await db.fetchall(
-        "SELECT id, meta_json FROM files "
-        "WHERE session_id = ? AND lower(source) = 'whatsapp'",
+    file_rows = await db.fetchall(
+        "SELECT id, source, meta_json FROM files WHERE session_id = ? "
+        "AND (lower(source) = 'whatsapp' "
+        "OR instr(meta_json, '\"whatsapp_message_id\"') > 0)",
         (session_id,),
     )
     findings_by_file: dict[str, list] = {}
     for finding in findings:
         findings_by_file.setdefault(str(finding["file_id"]), []).append(finding)
 
-    messages: list[dict] = []
-    conversation_ids: set[str] = set()
-    for row in rows:
+    decoded_rows: list[tuple[Any, dict]] = []
+    findings_by_whatsapp_message: dict[str, list] = {}
+    for row in file_rows:
         try:
             metadata = json.loads(row["meta_json"] or "{}")
         except (TypeError, json.JSONDecodeError):
             continue
         if not isinstance(metadata, dict):
             continue
+        decoded_rows.append((row, metadata))
+        linked_message_ids = {
+            str(metadata.get("whatsapp_message_id") or "").strip()
+        } - {""}
+        media_links = metadata.get("whatsapp_media_links")
+        if isinstance(media_links, list):
+            linked_message_ids.update(
+                str(link.get("message_id") or "").strip()
+                for link in media_links[:16]
+                if isinstance(link, dict)
+            )
+            linked_message_ids.discard("")
+        for linked_message_id in linked_message_ids:
+            findings_by_whatsapp_message.setdefault(linked_message_id, []).extend(
+                findings_by_file.get(str(row["id"]), [])
+            )
+
+    messages: list[dict] = []
+    conversation_ids: set[str] = set()
+    for row, metadata in decoded_rows:
+        if str(row["source"] or "").casefold() != "whatsapp":
+            continue
         conversation_id = str(metadata.get("conversation_id") or "").strip()
         message_id = str(metadata.get("message_id") or "").strip()
-        direction = str(metadata.get("message_direction") or "").strip()
-        if not conversation_id or not message_id or direction not in {"IN", "OUT"}:
+        message_type = str(metadata.get("message_type") or "text")[:64]
+        direction = str(metadata.get("message_direction") or "UNKNOWN").strip()
+        actor_kind = str(metadata.get("message_actor_kind") or "").strip()
+        if message_type == "system":
+            direction = "UNKNOWN"
+            actor_kind = "system"
+        if direction not in {"IN", "OUT", "UNKNOWN"}:
+            direction = "UNKNOWN"
+        if actor_kind not in {
+            "self",
+            "peer",
+            "group_participant",
+            "system",
+            "unknown",
+        }:
+            actor_kind = (
+                "self"
+                if direction == "OUT"
+                else "peer"
+                if direction == "IN"
+                else "unknown"
+            )
+        if not conversation_id or not message_id:
             continue
         conversation_ids.add(conversation_id)
-        linked_findings = findings_by_file.get(str(row["id"]), [])
+        linked_findings = [
+            *findings_by_file.get(str(row["id"]), []),
+            *findings_by_whatsapp_message.get(message_id, []),
+        ]
+        conversation_name = str(
+            metadata.get("conversation_name")
+            or metadata.get("display_name")
+            or "Percakapan WhatsApp"
+        )[:512]
+        if conversation_name == "(You)" and not bool(
+            metadata.get("conversation_is_self_chat")
+        ):
+            conversation_name = f"Kontak WhatsApp · {conversation_id[-8:]}"
         messages.append(
             {
+                "account_id": str(metadata.get("account_id") or "")[:128] or None,
+                "account_slot": (
+                    _nonnegative_int(metadata.get("account_slot"))
+                    if metadata.get("account_slot") is not None
+                    else None
+                ),
                 "conversation_id": conversation_id,
-                "conversation_name": str(
-                    metadata.get("conversation_name")
-                    or metadata.get("display_name")
-                    or "Percakapan WhatsApp"
-                )[:512],
+                "conversation_name": conversation_name,
                 "conversation_address": str(
                     metadata.get("conversation_address") or ""
                 )[:1024]
@@ -1337,8 +1396,32 @@ async def _whatsapp_report_data(
                 ),
                 "message_id": message_id,
                 "direction": direction,
+                "direction_evidence": str(
+                    metadata.get("message_direction_evidence") or "unavailable"
+                )[:64],
+                "actor_kind": actor_kind,
+                "peer_jid": str(
+                    metadata.get("message_peer_jid")
+                    or metadata.get("conversation_peer_jid")
+                    or ""
+                )[:1024]
+                or None,
+                "participant_jid": str(
+                    metadata.get("message_participant_jid") or ""
+                )[:1024]
+                or None,
                 "sender": str(metadata.get("message_sender") or "")[:1024] or None,
-                "message_type": str(metadata.get("message_type") or "text")[:64],
+                "message_type": message_type,
+                "message_type_code": metadata.get("message_type_code"),
+                "system_action_type": metadata.get("message_system_action_type"),
+                "system_kind": str(metadata.get("message_system_kind") or "")[:128]
+                or None,
+                "analysis_eligible": bool(
+                    metadata.get(
+                        "message_analysis_eligible",
+                        message_type not in {"system", "call"},
+                    )
+                ),
                 "timestamp": metadata.get("message_timestamp")
                 or metadata.get("captured_at"),
                 "preview_text": str(
@@ -2012,10 +2095,18 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
     whatsapp_row_parts: list[str] = []
     for room in whatsapp_rooms:
         for message in room.get("messages", []):
-            direction = "Keluar" if message.get("direction") == "OUT" else "Masuk"
-            sender = message.get("sender") or (
-                "Anda" if message.get("direction") == "OUT" else "—"
-            )
+            if message.get("actor_kind") == "system":
+                direction = "Sistem"
+                sender = "WhatsApp"
+            elif message.get("direction") == "OUT":
+                direction = "Keluar"
+                sender = "Anda"
+            elif message.get("direction") == "IN":
+                direction = "Masuk"
+                sender = message.get("sender") or "—"
+            else:
+                direction = "Tidak diketahui"
+                sender = message.get("sender") or "—"
             finding_badge = (
                 '<span class="pill bad">Temuan</span>'
                 if message.get("flagged")

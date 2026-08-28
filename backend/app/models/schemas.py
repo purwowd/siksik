@@ -479,21 +479,51 @@ class GalleryAlbumOut(ResponseModel):
 
 
 class WhatsAppChatMetaOut(ResponseModel):
+    account_id: str | None = Field(default=None, max_length=128)
+    account_slot: int | None = Field(default=None, ge=0)
     conversation_id: str = Field(min_length=1, max_length=128)
     conversation_name: str = Field(min_length=1, max_length=512)
     conversation_address: str | None = Field(default=None, max_length=1024)
     conversation_type: str = Field(default="chat", pattern=r"^(chat|group)$")
+    peer_jid: str | None = Field(default=None, max_length=1024)
+    participant_jid: str | None = Field(default=None, max_length=1024)
     message_id: str = Field(min_length=1, max_length=128)
-    direction: str = Field(pattern=r"^(IN|OUT)$")
+    direction: str = Field(pattern=r"^(IN|OUT|UNKNOWN)$")
+    direction_evidence: str = Field(default="unavailable", max_length=64)
+    actor_kind: str = Field(
+        default="unknown",
+        pattern=r"^(self|peer|group_participant|system|unknown)$",
+    )
     sender: str | None = Field(default=None, max_length=1024)
     message_type: str = Field(default="text", max_length=64)
+    message_type_code: int | None = None
     text: str | None = Field(default=None, max_length=131072)
     timestamp: str | None = None
+    system_action_type: int | None = None
+    system_kind: str | None = Field(default=None, max_length=128)
+    analysis_eligible: bool = True
+    media_filename: str | None = Field(default=None, max_length=1024)
+    media_size: int = Field(default=0, ge=0)
+    media_mime_type: str | None = Field(default=None, max_length=255)
     quoted_text: str | None = Field(default=None, max_length=2000)
     starred: bool = False
     revoked: bool = False
     forwarded: bool = False
     edited_at: str | None = None
+
+
+class WhatsAppMediaContextOut(ResponseModel):
+    conversation_id: str = Field(min_length=1, max_length=128)
+    conversation_name: str | None = Field(default=None, max_length=512)
+    message_id: str = Field(min_length=1, max_length=128)
+    direction: str = Field(pattern=r"^(IN|OUT|UNKNOWN)$")
+    actor_kind: str = Field(
+        default="unknown",
+        pattern=r"^(self|peer|group_participant|system|unknown)$",
+    )
+    sender: str | None = Field(default=None, max_length=1024)
+    timestamp: str | None = None
+    match_basis: str = Field(default="filename+size", max_length=64)
 
 
 class GalleryItemOut(ResponseModel):
@@ -514,6 +544,7 @@ class GalleryItemOut(ResponseModel):
     social_scope: str | None = Field(default=None, max_length=128)
     presentation: str = Field(default="file", pattern=r"^(file|visual|text|chat)$")
     chat: WhatsAppChatMetaOut | None = None
+    whatsapp_media: WhatsAppMediaContextOut | None = None
     artifact_role: str | None = Field(default=None, max_length=64)
     recovery_state: str = Field(
         default="normal",
@@ -533,3 +564,8 @@ class PaginatedGallery(ResponseModel):
     page_size: int = Field(ge=1)
     total: int = Field(ge=0)
     pages: int = Field(ge=1)
+    pagination_total: int | None = Field(default=None, ge=0)
+    pagination_unit: str = Field(
+        default="item",
+        pattern=r"^(item|item_or_conversation)$",
+    )

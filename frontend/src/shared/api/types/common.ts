@@ -24,6 +24,8 @@ export interface Paginated<T> {
   page_size: number;
   total: number;
   pages: number;
+  pagination_total?: number | null;
+  pagination_unit?: "item" | "item_or_conversation";
 }
 
 export interface NamedCount {

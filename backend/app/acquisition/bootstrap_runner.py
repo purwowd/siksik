@@ -49,6 +49,7 @@ INVENTORY_PAGE_LIMITS = {
 SELECTION_CANDIDATE_PAGE_LIMIT = 50
 LIVE_SELECTION_PAGE_LIMIT = 16
 LIVE_ANALYSIS_BATCH_SIZE = 64
+SOCIAL_SCOPE_ATTEMPTS = 4
 
 
 class BootstrapService(Protocol):
@@ -476,6 +477,7 @@ class Phase7AndroidAgentRunner:
                     "initial_captured": "bukti awal tersimpan",
                     "capture_scrolled": "mengambil halaman lanjutan",
                     "attempt_failed": "percobaan gagal",
+                    "recovery_failed": "pemulihan state gagal, mencoba ulang",
                     "state_recovered": "state dipulihkan",
                     "checkpoint_saved": "scope lengkap",
                     "checkpoint_restored": "checkpoint dipulihkan",
@@ -520,7 +522,7 @@ class Phase7AndroidAgentRunner:
                     scope_label = scope_labels.get(progress.scope, progress.scope)
                     stage_label = stage_labels.get(progress.stage, progress.stage)
                     attempt_suffix = (
-                        f" · percobaan {progress.attempt}"
+                        f" · percobaan {progress.attempt}/{SOCIAL_SCOPE_ATTEMPTS}"
                         if progress.attempt > 0
                         else ""
                     )

@@ -492,7 +492,33 @@ class AutomationEngine(
                                     )
                                     false
                                 }
-                                if (!recovered) break
+                                if (!recovered) {
+                                    val recoveryReason = driver.lastFailureReason()
+                                        ?: "scope_recovery_failed"
+                                    Log.w(
+                                        AUTOMATION_LOG_TAG,
+                                        "event=social_scope stage=recovery_failed " +
+                                            "target=${strategy.targetPackage} " +
+                                            "scope=${scope.wireName} attempt=$attempt " +
+                                            "reason=$recoveryReason",
+                                    )
+                                    emitProgress(
+                                        onProgress,
+                                        AutomationScopeProgress(
+                                            strategy.targetPackage,
+                                            scope,
+                                            stage = "recovery_failed",
+                                            state = "retrying",
+                                            attempt = attempt,
+                                            failureClass = ScopeFailureClass.ACTION,
+                                            reason = recoveryReason,
+                                            scrollCount = scopeScrollCount,
+                                            screenshotCount = scopeScreenshotCount,
+                                        ),
+                                    )
+                                    attempt += 1
+                                    continue
+                                }
                                 Log.i(
                                     AUTOMATION_LOG_TAG,
                                     "event=social_scope stage=retry target=${strategy.targetPackage} " +
@@ -849,7 +875,7 @@ class AutomationEngine(
 
     companion object {
         private const val AUTOMATION_LOG_TAG = "SIKSIKAutomation"
-        private const val MAX_SCOPE_ATTEMPTS = 3
+        internal const val MAX_SCOPE_ATTEMPTS = 4
         private val NON_RETRYABLE_SCOPE_FAILURES = setOf(
             "account_not_signed_in",
             "crawl_cancelled",

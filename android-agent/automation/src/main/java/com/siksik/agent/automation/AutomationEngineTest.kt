@@ -104,6 +104,41 @@ class AutomationEngineTest {
     }
 
     @Test
+    fun retryableScopeFailureUsesFourthAttemptBeforeFailingLoudly() {
+        val driver = FakeDriver(
+            navigateFailures = mutableMapOf(SocialScope.OWN_PROFILE to 3),
+            recoverReturns = true,
+        )
+        val result = AutomationEngine(sequenceClock()).execute(
+            strategy,
+            driver,
+            limits,
+        ) { true }
+
+        assertEquals("complete", result.state)
+        assertEquals(
+            AutomationEngine.MAX_SCOPE_ATTEMPTS,
+            driver.navigateAttempts[SocialScope.OWN_PROFILE],
+        )
+        assertEquals(AutomationEngine.MAX_SCOPE_ATTEMPTS - 1, driver.recoverCalls)
+    }
+
+    @Test
+    fun failedRecoveryDoesNotSilentlySkipRemainingBoundedAttempts() {
+        val driver = FakeDriver(
+            navigateFailures = mutableMapOf(SocialScope.OWN_PROFILE to 4),
+            recoverReturns = false,
+        )
+        AutomationEngine(sequenceClock()).execute(strategy, driver, limits) { true }
+
+        assertEquals(
+            AutomationEngine.MAX_SCOPE_ATTEMPTS,
+            driver.navigateAttempts[SocialScope.OWN_PROFILE],
+        )
+        assertEquals(AutomationEngine.MAX_SCOPE_ATTEMPTS - 1, driver.recoverCalls)
+    }
+
+    @Test
     fun completedCheckpointSkipsNavigationForThatScope() {
         val driver = FakeDriver(
             completedCheckpoints = setOf(SocialScope.OWN_PROFILE, SocialScope.OWN_POSTS),
