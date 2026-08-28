@@ -52,4 +52,64 @@ class AccountSessionGateTest {
         assertEquals("failed", outcome.state)
         assertEquals("account_not_signed_in", outcome.reason)
     }
+
+    @Test
+    fun instagramUnsignedSessionFailsWithAccountNotSignedIn() {
+        val driver = object : AutomationDriver {
+            var returned = false
+            override fun targetExists(targetPackage: String) = true
+            override fun launch(targetPackage: String) = true
+            override fun waitVisible(targetPackage: String, timeoutMs: Long) = true
+            override fun waitStable(timeoutMs: Long) = Unit
+            override fun isForeground(targetPackage: String) = true
+            override fun navigateToScope(targetPackage: String, scope: SocialScope) = false
+            override fun scrollForward() = false
+            override fun captureScope(scope: SocialScope, takeScreenshot: Boolean) =
+                ScopeCapture(false, null)
+            override fun lastFailureReason() = "account_not_signed_in"
+            override fun requireSignedInSession(targetPackage: String) = false
+            override fun returnToAgent() {
+                returned = true
+            }
+        }
+        val outcome = AutomationEngine().execute(
+            InstagramOwnAccountStrategy(),
+            driver,
+            limits,
+        ) { true }
+        assertEquals("failed", outcome.state)
+        assertEquals("account_not_signed_in", outcome.reason)
+        assertEquals(0, outcome.scrollCount)
+        assertTrue(driver.returned)
+    }
+
+    @Test
+    fun facebookUnsignedSessionFailsWithAccountNotSignedIn() {
+        val driver = object : AutomationDriver {
+            var returned = false
+            override fun targetExists(targetPackage: String) = true
+            override fun launch(targetPackage: String) = true
+            override fun waitVisible(targetPackage: String, timeoutMs: Long) = true
+            override fun waitStable(timeoutMs: Long) = Unit
+            override fun isForeground(targetPackage: String) = true
+            override fun navigateToScope(targetPackage: String, scope: SocialScope) = false
+            override fun scrollForward() = false
+            override fun captureScope(scope: SocialScope, takeScreenshot: Boolean) =
+                ScopeCapture(false, null)
+            override fun lastFailureReason() = "account_not_signed_in"
+            override fun requireSignedInSession(targetPackage: String) = false
+            override fun returnToAgent() {
+                returned = true
+            }
+        }
+        val outcome = AutomationEngine().execute(
+            FacebookOwnAccountStrategy(),
+            driver,
+            limits,
+        ) { true }
+        assertEquals("failed", outcome.state)
+        assertEquals("account_not_signed_in", outcome.reason)
+        assertEquals(0, outcome.scrollCount)
+        assertTrue(driver.returned)
+    }
 }

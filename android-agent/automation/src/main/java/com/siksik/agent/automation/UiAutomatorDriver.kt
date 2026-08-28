@@ -158,6 +158,8 @@ class UiAutomatorDriver(
     private var failureReason: String? = null
     private var cachedShellDump: String? = null
     private var cachedShellDumpAtMs: Long = 0L
+    private var cachedFocusedActivity: String? = null
+    private var cachedFocusedActivityAtMs: Long = 0L
     /** After a hung dump, skip further dumps briefly so Infinix does not wedge the crawl. */
     private var shellDumpDisabledUntilMs: Long = 0L
     private val instagramTextRecognizer: TextRecognizer = TextRecognition.getClient(
@@ -260,7 +262,7 @@ class UiAutomatorDriver(
                 dismissBlockingSystemPrompts()
                 dismissCredentialOverlays()
                 if (foregroundPackageName() == targetPackage) {
-                    if (looksLikeSignedOutSession(targetPackage)) {
+                    if (looksLikeSignedOutSession(targetPackage, deep = true)) {
                         failureReason = "account_not_signed_in"
                         debugMapper.capture("account_not_signed_in", status = "failed")
                         return false
@@ -274,14 +276,14 @@ class UiAutomatorDriver(
         dismissBlockingSystemPrompts()
         dismissCredentialOverlays()
         val foreground = foregroundPackageName()
-        if (foreground == targetPackage && looksLikeSignedOutSession(targetPackage)) {
+        if (foreground == targetPackage && looksLikeSignedOutSession(targetPackage, deep = true)) {
             failureReason = "account_not_signed_in"
             debugMapper.capture("account_not_signed_in", status = "failed")
             return false
         }
         if (
             foregroundLooksLikeCredentialManager() ||
-            (foreground == targetPackage && looksLikeSignedOutSession(targetPackage))
+            (foreground == targetPackage && looksLikeSignedOutSession(targetPackage, deep = true))
         ) {
             failureReason = "account_not_signed_in"
             debugMapper.capture("account_not_signed_in", status = "failed")
@@ -314,7 +316,7 @@ class UiAutomatorDriver(
             failureReason = "target_not_foreground"
             return false
         }
-        if (looksLikeSignedOutSession(targetPackage)) {
+        if (looksLikeSignedOutSession(targetPackage, deep = true)) {
             failureReason = "account_not_signed_in"
             debugMapper.capture("account_not_signed_in", status = "failed")
             return false
@@ -1023,6 +1025,7 @@ class UiAutomatorDriver(
     }
 
     private fun navigateInstagram(scope: SocialScope): Boolean {
+        if (abortIfInstagramSignedOut()) return false
         if (scope == SocialScope.OWN_COMMENTS) {
             return navigateInstagramComments()
         }
@@ -1030,6 +1033,7 @@ class UiAutomatorDriver(
             // Infinix/Samsung still open Archive from own profile + hamburger.
             // Xiaomi may fail the profile tab; settings deeplink remains the fallback.
             if (!openInstagramOwnProfile() && !instagramOptionsMenuAlreadyOpen()) {
+                if (abortIfInstagramSignedOut()) return false
                 Log.i(LOG_TAG, "event=instagram_archive_skip_profile_try_settings")
             }
             return openInstagramStoryArchive()
@@ -1057,6 +1061,7 @@ class UiAutomatorDriver(
         }
         // Xiaomi: profile tab inject is blocked; comments still open via settings deeplink.
         if (!openInstagramOwnProfile() && !instagramOptionsMenuAlreadyOpen()) {
+            if (abortIfInstagramSignedOut()) return false
             Log.i(LOG_TAG, "event=instagram_comments_skip_profile_try_settings")
         }
         return openInstagramComments()
@@ -1263,6 +1268,7 @@ class UiAutomatorDriver(
         )
         logInstagramProfileNavigation("start", started)
         debugMapper.capture("instagram_profile_before_navigation", activeScope)
+        if (abortIfInstagramSignedOut(started)) return false
         dismissInstagramProfileCoachmarks()
         if (isInstagramArchiveListSurface()) {
             instagramSubpageActive = true
@@ -1325,6 +1331,7 @@ class UiAutomatorDriver(
                 return finalizeInstagramOwnProfileAfterWait(started)
             }
             SystemClock.sleep(PROFILE_PROBE_INTERVAL_MS)
+            if (abortIfInstagramSignedOut(started)) return false
             if (attempt % 3 == 1) {
                 dismissInstagramProfileCoachmarks()
                 scrollInstagramProfileToHeaderIfNeeded()
@@ -1396,6 +1403,7 @@ class UiAutomatorDriver(
         dismissInstagramProfileCoachmarks()
         scrollInstagramProfileToHeaderIfNeeded()
         SystemClock.sleep(PROFILE_LATE_SETTLE_MS)
+        if (abortIfInstagramSignedOut(started)) return false
         val deviceProof = instagramOwnProfileVisibleOnDevice()
         val probe = instagramSurfaceProbe()
         if (deviceProof || probe.ownProfile) {
@@ -3623,7 +3631,7 @@ class UiAutomatorDriver(
     }
 
     private fun openXOwnProfile(): Boolean {
-        if (looksLikeSignedOutSession(X_PACKAGE)) {
+        if (looksLikeSignedOutSession(X_PACKAGE, deep = true)) {
             return fail("account_not_signed_in")
         }
         if (
@@ -4225,14 +4233,17 @@ class UiAutomatorDriver(
 
     private fun navigateFacebook(scope: SocialScope): Boolean {
         dismissBlockingSystemPrompts()
+        if (abortIfFacebookSignedOut()) return false
         ensureTextOnlyCoverVisible(FACEBOOK_PACKAGE)
         advanceFacebookProfilePastOnboarding()
+        if (abortIfFacebookSignedOut()) return false
         if (!isForeground(FACEBOOK_PACKAGE)) {
             dismissBlockingSystemPrompts()
             if (!isForeground(FACEBOOK_PACKAGE)) {
                 return fail("facebook_not_foreground")
             }
         }
+        if (abortIfFacebookSignedOut()) return false
         if (!openFacebookOwnProfile()) {
             if (failureReason == null) return fail("facebook_profile_not_verified")
             return false
@@ -4341,16 +4352,106 @@ class UiAutomatorDriver(
             fg.contains("credentialmanager")
     }
 
-    private fun looksLikeSignedOutSession(targetPackage: String): Boolean {
+    private fun looksLikeSignedOutSession(
+        targetPackage: String,
+        deep: Boolean = false,
+    ): Boolean {
         when (targetPackage) {
             X_PACKAGE -> if (hasXOwnProfileProof()) return false
             INSTAGRAM_PACKAGE -> if (hasInstagramOwnProfileProof()) return false
-            FACEBOOK_PACKAGE -> if (hasFacebookOwnProfileProof()) return false
+            FACEBOOK_PACKAGE -> {
+                if (hasFacebookOwnProfileProof()) return false
+                if (looksLikeFacebookLoginSurface(deep = deep)) return true
+            }
         }
         if (hasExactLabel(EDIT_PROFILE_LABELS)) return false
-        return hasExactLabel(AUTH_WALL_LABELS) ||
-            hasLabelContaining(AUTH_WALL_FRAGMENTS) ||
-            foregroundLooksLikeCredentialManager()
+        if (hasAuthWallChrome(deep = deep)) return true
+        return foregroundLooksLikeCredentialManager()
+    }
+
+    private fun abortIfFacebookSignedOut(): Boolean {
+        if (failureReason == "account_not_signed_in") return true
+        if (!looksLikeSignedOutSession(FACEBOOK_PACKAGE, deep = true)) return false
+        Log.i(LOG_TAG, "event=facebook_signed_out")
+        debugMapper.capture("account_not_signed_in", activeScope, "failed")
+        fail("account_not_signed_in")
+        return true
+    }
+
+    private fun looksLikeFacebookLoginSurface(deep: Boolean): Boolean {
+        val focused = focusedActivityComponent()
+        if (focused != null && SocialUiTextPolicy.isFacebookLoginComponent(focused)) {
+            return true
+        }
+        val rootClass = try {
+            uiAutomation.rootInActiveWindow?.className?.toString().orEmpty()
+        } catch (_: Exception) {
+            ""
+        }
+        if (SocialUiTextPolicy.isFacebookLoginComponent("$FACEBOOK_PACKAGE/$rootClass")) {
+            return true
+        }
+        if (!deep) return false
+        return SocialUiTextPolicy.looksLikeFacebookLoginDump(readShellUiDump())
+    }
+
+    private fun focusedActivityComponent(): String? {
+        val now = SystemClock.elapsedRealtime()
+        if (cachedFocusedActivity != null && now - cachedFocusedActivityAtMs < 400L) {
+            return cachedFocusedActivity
+        }
+        val dump = runCatching {
+            device.executeShellCommand("dumpsys window")
+        }.getOrDefault("")
+        val component = SocialUiTextPolicy.parseFocusedActivityComponent(dump)
+        cachedFocusedActivity = component
+        cachedFocusedActivityAtMs = now
+        return component
+    }
+
+    private fun abortIfInstagramSignedOut(started: Long? = null): Boolean {
+        if (failureReason == "account_not_signed_in") return true
+        if (!looksLikeSignedOutSession(INSTAGRAM_PACKAGE, deep = true)) return false
+        if (started != null) {
+            logInstagramProfileNavigation("signed_out", started)
+        }
+        debugMapper.capture("account_not_signed_in", activeScope, "failed")
+        fail("account_not_signed_in")
+        return true
+    }
+
+    private fun hasAuthWallChrome(deep: Boolean): Boolean {
+        if (hasExactLabel(SocialUiTextPolicy.AUTH_WALL_EXACT_LABELS)) return true
+        if (hasLabelContaining(SocialUiTextPolicy.AUTH_WALL_DEVICE_FRAGMENTS)) return true
+        if (!deep) return false
+        val harvested = harvestAuthWallLabels()
+        if (harvested.isNotEmpty() && SocialUiTextPolicy.looksLikeAuthWall(harvested)) {
+            return true
+        }
+        return SocialUiTextPolicy.looksLikeAuthWallDump(readShellUiDump())
+    }
+
+    private fun harvestAuthWallLabels(): List<String> = safeUi(emptyList()) {
+        val out = ArrayList<String>(48)
+        val selectors = listOf(
+            By.clazz("android.widget.Button"),
+            By.clazz("android.widget.TextView"),
+            By.clazz("android.widget.EditText"),
+        )
+        for (selector in selectors) {
+            if (out.size >= 48) break
+            val objects = try {
+                device.findObjects(selector)
+            } catch (_: RuntimeException) {
+                continue
+            }
+            for (obj in objects) {
+                if (out.size >= 48) break
+                obj.text?.trim()?.takeIf(String::isNotEmpty)?.let(out::add)
+                obj.contentDescription?.toString()?.trim()?.takeIf(String::isNotEmpty)?.let(out::add)
+            }
+        }
+        out
     }
 
     private fun foregroundLooksLikePermissionController(): Boolean {
@@ -4425,6 +4526,7 @@ class UiAutomatorDriver(
     }
 
     private fun openFacebookOwnProfile(): Boolean {
+        if (abortIfFacebookSignedOut()) return false
         if (
             FACEBOOK_PACKAGE in verifiedOwnAccountPackages &&
             fbOwnAccountMarker != null &&
@@ -4435,6 +4537,7 @@ class UiAutomatorDriver(
         }
         repeat(MAX_BACK_NAVIGATION + 2) { attempt ->
             if (navigationExpired()) return fail("facebook_navigation_deadline")
+            if (abortIfFacebookSignedOut()) return false
             dismissBlockingSystemPrompts()
             advanceFacebookProfilePastOnboarding()
             if (hasFacebookOwnProfileProof()) {
@@ -4704,6 +4807,7 @@ class UiAutomatorDriver(
     }
 
     private fun openFacebookComments(): Boolean {
+        if (abortIfFacebookSignedOut()) return false
         if (!openFacebookMoreProfileSettings()) {
             return fail("facebook_comments_menu_missing")
         }
@@ -4884,6 +4988,7 @@ class UiAutomatorDriver(
     }
 
     private fun restoreFacebookProfileHeaderForActivity(): Boolean {
+        if (abortIfFacebookSignedOut()) return false
         if (!hasFacebookOwnProfileProof() && !openFacebookOwnProfile()) return false
         advanceFacebookProfilePastOnboarding()
         repeat(FACEBOOK_PROFILE_HEADER_RESTORE_SWIPES + 1) { attempt ->
@@ -8098,31 +8203,6 @@ class UiAutomatorDriver(
             "filter berdasarkan",
             "select multiple",
             "pilih beberapa",
-        )
-        private val AUTH_WALL_LABELS = listOf(
-            "Log in",
-            "Log In",
-            "Login",
-            "Masuk",
-            "Sign in",
-            "Sign In",
-            "Sign up",
-            "Sign Up",
-            "Create account",
-            "Create Account",
-            "Buat akun",
-            "Buat Akun",
-            "Daftar",
-        )
-        private val AUTH_WALL_FRAGMENTS = listOf(
-            "use phone or email",
-            "gunakan nomor ponsel atau email",
-            "already have an account",
-            "sudah punya akun",
-            "forgot password",
-            "lupa kata sandi",
-            "create your account",
-            "buat akun anda",
         )
         private val SHARE_PROFILE_LABELS = listOf(
             "Share profile",
