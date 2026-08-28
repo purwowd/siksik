@@ -15,10 +15,14 @@
 # Vision / torch base
 torch>=2.1.0
 
-# OCR
-paddlepaddle-gpu>=2.5.0; platform_system != "Darwin"
-paddleocr>=2.7.0
+# OCR — PaddleOCR 3.x (PaddleX / PP-OCRv6) needs PaddlePaddle 3.x.
+# Mixing 3.7 + 2.6.2 crashes: AnalysisConfig.set_optimization_level missing.
+paddlepaddle-gpu>=2.5.0,<3; platform_system != "Darwin"
+paddleocr>=2.7.0,<3
 easyocr>=1.7.0
+# Replaces the CPU `onnxruntime` wheel pulled by nudenet.
+# 1.29+ on PyPI is CUDA 13; this venv's torch is CUDA 12.4 (libcublasLt.so.12).
+onnxruntime-gpu>=1.19.0,<1.23; platform_system != "Darwin"
 
 # Audio / lyrics
 openai-whisper>=20231117

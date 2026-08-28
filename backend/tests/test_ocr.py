@@ -67,6 +67,13 @@ def test_ocr_disabled_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.unit
+def test_paddle_stack_rejects_ocr3_on_paddle2() -> None:
+    assert ocr_mod.paddle_stack_compatible("2.10.0", "2.6.2") is True
+    assert ocr_mod.paddle_stack_compatible("3.7.0", "2.6.2") is False
+    assert ocr_mod.paddle_stack_compatible("3.0.0", "3.0.0") is True
+
+
+@pytest.mark.unit
 def test_ocr_status_keys():
     st = ocr_mod.ocr_status()
     assert "enabled" in st

@@ -64,6 +64,16 @@ def nudity_defaults(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.unit
+def test_onnx_providers_prefer_cuda_over_tensorrt() -> None:
+    assert nudity.onnx_execution_providers(
+        ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
+    ) == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    assert nudity.onnx_execution_providers(["CPUExecutionProvider"]) == [
+        "CPUExecutionProvider"
+    ]
+
+
+@pytest.mark.unit
 def test_image_positive_is_one_l3_finding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     target = tmp_path / "placeholder.png"
     target.write_bytes(b"fake; detector is injected and never decodes this")

@@ -13,6 +13,7 @@ import importlib.util
 import json
 import logging
 import math
+import os
 import shutil
 import subprocess
 import tempfile
@@ -96,6 +97,68 @@ def _package_version() -> str:
         return "unknown"
 
 
+def onnx_execution_providers(available: Sequence[str]) -> list[str]:
+    """Prefer CUDA; skip TensorRT. NudeNet 3.4.2 ignores its own providers= argument."""
+    providers: list[str] = []
+    if "CUDAExecutionProvider" in available:
+        providers.append("CUDAExecutionProvider")
+    providers.append("CPUExecutionProvider")
+    return providers
+
+
+def _prepend_nvidia_cuda_libs() -> None:
+    """Make Torch's CUDA 12 / cuDNN 9 visible to onnxruntime-gpu (WSL often only has the driver)."""
+    try:
+        import ctypes
+
+        import nvidia
+    except Exception:
+        return
+    root = Path(nvidia.__file__).resolve().parent
+    extra = [path for path in root.glob("*/lib") if path.is_dir()]
+    if not extra:
+        return
+    current = os.environ.get("LD_LIBRARY_PATH", "")
+    prefix = ":".join(str(path) for path in extra)
+    if prefix not in current:
+        os.environ["LD_LIBRARY_PATH"] = f"{prefix}:{current}" if current else prefix
+    libraries: list[Path] = []
+    for directory in extra:
+        libraries.extend(sorted(directory.glob("lib*.so*")))
+    for _ in range(2):
+        for candidate in libraries:
+            try:
+                ctypes.CDLL(str(candidate), mode=ctypes.RTLD_GLOBAL)
+            except OSError:
+                continue
+
+
+def _bind_accelerated_session(detector: Any) -> None:
+    import onnxruntime
+
+    session = getattr(detector, "onnx_session", None)
+    if session is None:
+        return
+    wanted = onnx_execution_providers(onnxruntime.get_available_providers())
+    current = list(session.get_providers())
+    if current and current[0] == wanted[0]:
+        return
+    try:
+        import nudenet.nudenet as nudenet_mod  # type: ignore
+
+        model_path = os.path.join(os.path.dirname(nudenet_mod.__file__), "320n.onnx")
+        detector.onnx_session = onnxruntime.InferenceSession(
+            model_path,
+            providers=wanted,
+        )
+        log.info("NudeNet ONNX providers=%s", detector.onnx_session.get_providers())
+    except Exception as exc:
+        log.warning(
+            "NudeNet CUDA session unavailable (%s); staying on CPU",
+            type(exc).__name__,
+        )
+
+
 def _get_detector() -> Any | None:
     if not settings.nudity_detection_enabled:
         return None
@@ -106,11 +169,13 @@ def _get_detector() -> Any | None:
             return _state.detector
         _state.attempted = True
         try:
+            _prepend_nvidia_cuda_libs()
             from nudenet import NudeDetector  # type: ignore
 
             # No model path is accepted here: the small model packaged with the
             # pinned dependency is the only production source.
             _state.detector = NudeDetector(inference_resolution=320)
+            _bind_accelerated_session(_state.detector)
         except Exception as exc:
             _state.error = type(exc).__name__
             log.warning("Nudity detector unavailable: %s", _state.error)

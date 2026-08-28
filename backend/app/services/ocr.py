@@ -32,6 +32,57 @@ _SHARED_BACKENDS: dict[str, object] = {}
 _SHARED_BACKENDS_LOCK = threading.Lock()
 
 
+def _version_major(value: str) -> int:
+    try:
+        return int(str(value).split(".", 1)[0])
+    except (TypeError, ValueError):
+        return 0
+
+
+def paddle_stack_compatible(ocr_version: str, paddle_version: str) -> bool:
+    """PaddleOCR 3.x requires PaddlePaddle 3.x (PaddleX / PP-OCRv6)."""
+    ocr_major = _version_major(ocr_version)
+    paddle_major = _version_major(paddle_version)
+    if ocr_major <= 0:
+        return False
+    if ocr_major >= 3:
+        return paddle_major >= 3
+    return paddle_major >= 2
+
+
+def _installed_paddle_version() -> str | None:
+    for package in ("paddlepaddle-gpu", "paddlepaddle"):
+        try:
+            return version(package)
+        except PackageNotFoundError:
+            continue
+    try:
+        import paddle  # type: ignore
+
+        return str(getattr(paddle, "__version__", "") or "")
+    except Exception:
+        return None
+
+
+def _paddleocr_stack_ready() -> bool:
+    try:
+        ocr_version = version("paddleocr")
+    except PackageNotFoundError:
+        return False
+    paddle_version = _installed_paddle_version()
+    if not paddle_version:
+        return False
+    if paddle_stack_compatible(ocr_version, paddle_version):
+        return True
+    log.warning(
+        "PaddleOCR %s is incompatible with PaddlePaddle %s; pin paddleocr>=2.7,<3 "
+        "or upgrade paddlepaddle to 3.x",
+        ocr_version,
+        paddle_version,
+    )
+    return False
+
+
 def prepare_ocr_path(
     image_path: Path,
     *,
@@ -285,12 +336,17 @@ class PaddleOCRBackend(OcrBackend):
         try:
             from paddleocr import PaddleOCR  # noqa: F401
 
-            return True
+            return _paddleocr_stack_ready()
         except ImportError:
             return False
 
     def _get(self):
         if self._ocr is None:
+            if not _paddleocr_stack_ready():
+                raise RuntimeError(
+                    "PaddleOCR/PaddlePaddle versions are incompatible "
+                    "(need paddleocr 2.x with paddle 2.x, or both 3.x)."
+                )
             from paddleocr import PaddleOCR
 
             langs = [value.strip() for value in settings.ocr_langs.split(",") if value.strip()]

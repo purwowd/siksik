@@ -139,6 +139,21 @@ if [[ ! -d .venv ]]; then
 fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
+# onnxruntime-gpu needs Torch's CUDA 12 / cuDNN 9 wheels; WSL only ships the driver.
+NVIDIA_CUDA_LIBS="$(
+  python -c "
+from pathlib import Path
+try:
+    import nvidia
+except ImportError:
+    raise SystemExit(0)
+root = Path(nvidia.__file__).resolve().parent
+print(':'.join(str(path) for path in sorted(root.glob('*/lib')) if path.is_dir()))
+" 2>/dev/null || true
+)"
+if [[ -n "${NVIDIA_CUDA_LIBS}" ]]; then
+  export LD_LIBRARY_PATH="${NVIDIA_CUDA_LIBS}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 # pip -r requirements.txt di Mac = torch/easyocr, menit. Skip jika venv sudah jalan.
 if [[ "${SADT_PIP_INSTALL:-0}" == "1" ]] || ! python -c "import uvicorn, fastapi" >/dev/null 2>&1; then
   echo "Installing Python deps (set SADT_PIP_INSTALL=1 to force)…"
