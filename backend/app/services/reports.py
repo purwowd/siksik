@@ -90,6 +90,11 @@ REPORT_SOURCE_LABELS = {
     "ios_recovered_cache": "Cache / preview Photos (iOS)",
     "ios_deleted_metadata": "Jejak hapus permanen Photos (iOS)",
     "whatsapp": "WhatsApp",
+    "email": "Email",
+    "gmail": "Email",
+    "browser_history_full": "Riwayat Browser (lengkap)",
+    "browser_history_partial": "Riwayat Browser (sebagian)",
+    "notes": "Catatan Android",
 }
 REPORT_METHOD_LABELS = {
     "adb": "USB Android (ADB)",
@@ -110,6 +115,9 @@ REPORT_METHOD_LABELS = {
     "zip_upload": "Unggah ZIP",
     "simulated": "Simulasi lab",
     "chrome_cdp": "Riwayat browser Chrome (CDP)",
+    "gmail_api": "Email Gmail (API resmi)",
+    "android_notes_samsung_export": "Catatan Android (ekspor Samsung Notes)",
+    "android_notes_ui_walk": "Catatan Android (navigasi UI)",
     "whatsapp_crypt15": "Backup WhatsApp terenkripsi (Crypt15)",
     "whatsapp_crypt15_parse_unavailable": (
         "Backup WhatsApp Crypt15 (format database belum terbaca)"
@@ -1172,6 +1180,10 @@ async def _session_inventory_counts(session_id: str) -> dict:
         (session_id,),
     )
     recovery = {str(row["source"]): int(row["total"]) for row in recovery_rows}
+    notes_row = await db.fetchone(
+        "SELECT COUNT(*) AS total FROM files WHERE session_id = ? AND source = 'notes'",
+        (session_id,),
+    )
     return {
         "contact_records": contact_records,
         "contact_unique": contact_unique,
@@ -1179,6 +1191,7 @@ async def _session_inventory_counts(session_id: str) -> dict:
         "sms_by_direction": sms_by_direction,
         "recovery_cache": recovery.get("recovered_cache", 0),
         "recovery_trash": recovery.get("recovered_trash", 0),
+        "notes_records": int(notes_row["total"] or 0) if notes_row else 0,
     }
 
 
@@ -1571,6 +1584,7 @@ async def build_session_report(session_id: str) -> dict:
                 "cache": inventory["recovery_cache"],
                 "trash": inventory["recovery_trash"],
             },
+            "notes_records": inventory["notes_records"],
             "whatsapp_messages": whatsapp_total,
             "whatsapp_conversations": whatsapp_conversations,
             "timing": timing,
@@ -1877,6 +1891,11 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
             f"<strong>{_esc(sms_total)} · {received} masuk · "
             f"{sent} terkirim</strong></li>"
         )
+    notes_records = int(m.get("notes_records") or 0)
+    if notes_records:
+        evidence_stats += (
+            f"<li><span>Catatan Android</span><strong>{_esc(notes_records)}</strong></li>"
+        )
 
     recovery = m.get("recovery") if isinstance(m.get("recovery"), dict) else {}
     recovery_metric = ""
@@ -1894,16 +1913,16 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
         if not recovered_parts:
             recovered_parts.append(f"{progress.get('recovery_captured', 0)} item")
         if progress.get("recovery_state"):
+            recovered_parts.append(f"{progress.get('recovery_bytes', 0)} bytes")
+            warning_count = int(progress.get("recovery_warning_count") or 0)
+            cache_sources = int(progress.get("recovery_cache_sources") or 0)
+            if warning_count:
+                recovered_parts.append(f"{warning_count} peringatan")
+            if cache_sources:
+                recovered_parts.append(f"{cache_sources} sumber cache")
             recovered_parts.append(state_label)
-            recovered_parts.extend(
-                (
-                    f"{progress.get('recovery_bytes', 0)} bytes",
-                    f"{progress.get('recovery_warning_count', 0)} peringatan",
-                    f"{progress.get('recovery_cache_sources', 0)} sumber cache",
-                )
-            )
         recovery_metric = (
-            "<li>Recovery Android: "
+            "<li>Recovery sampah Android: "
             f"{_esc(' · '.join(recovered_parts))}</li>"
         )
 
@@ -1936,6 +1955,23 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
             f"UI {_esc(progress.get('whatsapp_ui_attempt', 0))}/"
             f"{_esc(progress.get('whatsapp_ui_attempts', 4))} · "
             f"{_esc(whatsapp_state_labels.get(state, state))}</li>"
+        )
+
+    notes_metric = ""
+    if progress.get("notes_state"):
+        notes_state_labels = {
+            "complete": "selesai",
+            "partial": "sebagian",
+            "unavailable": "tidak tersedia",
+            "not_installed": "aplikasi tidak ditemukan",
+        }
+        state = str(progress.get("notes_state") or "")
+        notes_metric = (
+            "<li>Catatan Android: "
+            f"{_esc(progress.get('notes_captured', 0))} diperoleh · "
+            f"{_esc(progress.get('notes_skipped', 0))} dilewati · "
+            f"{_esc(progress.get('notes_warning_count', 0))} peringatan · "
+            f"{_esc(notes_state_labels.get(state, state))}</li>"
         )
 
     rec = recommendation or "—"
@@ -2598,6 +2634,7 @@ footer {{
     {recovery_metric}
     {ios_library_metric}
     {whatsapp_metric}
+    {notes_metric}
   </ul>
   <h2 style="margin-top:16px">Per kategori</h2>
   <ul class="stats">{cat_items}</ul>

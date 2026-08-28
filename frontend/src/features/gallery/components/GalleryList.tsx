@@ -41,6 +41,7 @@ const ROLE_LABELS: Record<string, string> = {
   email_attachment: "Lampiran email",
   email_metadata: "Metadata email",
   canonical_message: "Pesan WhatsApp terstruktur",
+  canonical_note: "Catatan Android terstruktur",
 };
 
 const RECOVERY_LABELS = {

@@ -48,6 +48,7 @@ const BROWSER_SOURCES = new Set([
   "browser_history_partial",
   "browser_history",
 ]);
+const NOTES_SOURCES = new Set(["notes"]);
 
 const WA_SOURCES = new Set(["whatsapp", "wa", "msgstore"]);
 
@@ -162,6 +163,8 @@ export function buildAnalysisModules(args: {
   const { session, dash, findings } = args;
   const progress = session?.progress;
   const bySource = dash?.findings_by_source;
+  const filesBySource = dash?.files_by_source;
+  const analyzedFilesBySource = dash?.analyzed_files_by_source;
 
   const pulled = progress?.files_pulled ?? 0;
   const listed = progress?.files_listed ?? 0;
@@ -213,7 +216,12 @@ export function buildAnalysisModules(args: {
     (f) => EMAIL_SOURCES.has(f.source.toLowerCase()) || /gmail|email|mail/i.test(f.path || ""),
   );
   const emailFromDash = countBySource(bySource, (n) => /gmail|email|mail/.test(n));
-  const emailCount = Math.max(emailFindings.length, emailFromDash);
+  const emailFindingCount = Math.max(emailFindings.length, emailFromDash);
+  const emailIndexed = countBySource(filesBySource, (n) => /gmail|email|mail/.test(n));
+  const emailAnalyzed = countBySource(
+    analyzedFilesBySource,
+    (n) => /gmail|email|mail/.test(n),
+  );
 
   const browserFindings = findingsMatching(
     findings,
@@ -221,7 +229,25 @@ export function buildAnalysisModules(args: {
       BROWSER_SOURCES.has(f.source.toLowerCase()) || /browser_history/i.test(f.path || ""),
   );
   const browserFromDash = countBySource(bySource, (n) => /browser_history|chrome_cdp/.test(n));
-  const browserCount = Math.max(browserFindings.length, browserFromDash);
+  const browserFindingCount = Math.max(browserFindings.length, browserFromDash);
+  const browserIndexed = countBySource(
+    filesBySource,
+    (n) => /browser_history|chrome_cdp/.test(n),
+  );
+  const browserAnalyzed = countBySource(
+    analyzedFilesBySource,
+    (n) => /browser_history|chrome_cdp/.test(n),
+  );
+
+  const notesFindings = findingsMatching(
+    findings,
+    (f) => NOTES_SOURCES.has(f.source.toLowerCase()) || /^notes\//i.test(f.path || ""),
+  );
+  const notesFromDash = countBySource(bySource, (n) => NOTES_SOURCES.has(n));
+  const notesFindingCount = Math.max(notesFindings.length, notesFromDash);
+  const notesIndexed = countBySource(filesBySource, (n) => NOTES_SOURCES.has(n));
+  const notesAnalyzed = countBySource(analyzedFilesBySource, (n) => NOTES_SOURCES.has(n));
+  const notesCaptured = Math.max(progress?.notes_captured ?? 0, notesIndexed);
 
   const waFindings = findingsMatching(
     findings,
@@ -232,7 +258,7 @@ export function buildAnalysisModules(args: {
   const waConversations = progress?.whatsapp_conversations ?? 0;
   const waLive = waState === "complete";
 
-  return [
+  const modules: AnalysisModuleCard[] = [
     {
       id: "forensic",
       title: "Forensik Pengambilan Data",
@@ -317,42 +343,106 @@ export function buildAnalysisModules(args: {
       id: "email",
       title: "Analisis Email",
       subtitle: "Kotak masuk · lampiran · metadata",
-      availability: emailCount > 0 ? "live" : "empty",
-      availabilityLabel: emailCount > 0 ? "Temuan email" : "Belum ada temuan email",
+      availability: emailIndexed > 0 ? "live" : "empty",
+      availabilityLabel:
+        emailAnalyzed > 0
+          ? "Data email dianalisis"
+          : emailIndexed > 0
+            ? "Data email terindeks"
+            : "Belum ada data email",
       metrics: [
-        { label: "Temuan email", value: String(emailCount) },
+        { label: "Email terindeks", value: String(emailIndexed) },
+        { label: "Teranalisis", value: String(emailAnalyzed) },
+        { label: "Temuan terkait", value: String(emailFindingCount) },
         {
           label: "Periode",
           value: session?.mode === "full" ? "FULL (~6 bln)" : "QUICK (~3 bln)",
         },
       ],
       notes:
-        emailCount > 0
-          ? ["Gunakan tab Temuan untuk meninjau item email."]
+        emailIndexed > 0
+          ? [
+              emailFindingCount > 0
+                ? "Gunakan tab Temuan untuk meninjau sinyal email."
+                : "Data email selesai dianalisis tanpa temuan terkait.",
+            ]
           : ["Akuisisi Gmail/email aktif bila dikonfigurasi pada sesi."],
-      drillDown: emailCount > 0,
+      drillDown: emailFindingCount > 0,
     },
     {
       id: "browser",
       title: "Riwayat Browser",
       subtitle: "Chrome · URL lengkap · jejak sebagian",
-      availability: browserCount > 0 ? "live" : session ? "empty" : "empty",
+      availability: browserIndexed > 0 ? "live" : "empty",
       availabilityLabel:
-        browserCount > 0 ? "Temuan riwayat browser" : "Belum ada temuan riwayat browser",
+        browserAnalyzed > 0
+          ? "Data browser dianalisis"
+          : browserIndexed > 0
+            ? "Data browser terindeks"
+            : "Belum ada data riwayat browser",
       metrics: [
-        { label: "Temuan browser", value: String(browserCount) },
+        { label: "Riwayat terindeks", value: String(browserIndexed) },
+        { label: "Teranalisis", value: String(browserAnalyzed) },
+        { label: "Temuan terkait", value: String(browserFindingCount) },
         {
           label: "Periode",
           value: session?.mode === "full" ? "FULL (~6 bln)" : "QUICK (~3 bln)",
         },
       ],
       notes:
-        browserCount > 0
-          ? ["Galeri memisahkan URL lengkap dan jejak sebagian."]
+        browserIndexed > 0
+          ? [
+              browserFindingCount > 0
+                ? "Galeri memisahkan URL lengkap dan jejak sebagian."
+                : "Data riwayat browser selesai dianalisis tanpa temuan terkait.",
+            ]
           : ["CDP Chrome aktif pada akuisisi Android bila DevTools tersedia."],
-      drillDown: browserCount > 0,
+      drillDown: browserFindingCount > 0,
     },
-    {
+  ];
+
+  if (session?.device_type === "android") {
+    modules.push({
+      id: "notes",
+      title: "Catatan Android",
+      subtitle: "Samsung Notes · Keep · aplikasi catatan perangkat",
+      availability:
+        notesCaptured > 0
+          ? "live"
+          : !progress?.notes_state || progress.notes_state === "unavailable"
+            ? "unavailable"
+            : "empty",
+      availabilityLabel:
+        notesAnalyzed > 0
+          ? "Data catatan dianalisis"
+          : notesIndexed > 0
+            ? "Data catatan terindeks"
+            : notesCaptured > 0
+              ? "Catatan diperoleh"
+              : progress?.notes_state === "not_installed"
+                ? "Aplikasi catatan tidak ditemukan"
+                : progress?.notes_state
+                  ? "Belum ada data catatan"
+                  : "Tidak diakuisisi pada sesi ini",
+      metrics: [
+        { label: "Catatan diperoleh", value: String(notesCaptured) },
+        { label: "Terindeks", value: String(notesIndexed) },
+        { label: "Teranalisis", value: String(notesAnalyzed) },
+        { label: "Temuan terkait", value: String(notesFindingCount) },
+      ],
+      notes: [
+        session.mode === "full" ? "Periode FULL sekitar 6 bulan." : "Periode QUICK sekitar 3 bulan.",
+        progress?.notes_flow === "samsung_export"
+          ? "Metode: ekspor terarah Samsung Notes."
+          : progress?.notes_flow === "ui_walk"
+            ? "Metode: navigasi UI aplikasi catatan."
+            : "Akuisisi catatan tidak dijalankan pada sesi ini.",
+      ],
+      drillDown: notesFindingCount > 0,
+    });
+  }
+
+  modules.push({
       id: "tiktok",
       title: "TikTok & Short Video",
       subtitle: "YouTube · Threads · direncanakan",
@@ -367,6 +457,6 @@ export function buildAnalysisModules(args: {
         "Angka kosong bukan indikasi hasil bersih.",
       ],
       drillDown: false,
-    },
-  ];
+    });
+  return modules;
 }

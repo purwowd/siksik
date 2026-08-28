@@ -15,6 +15,7 @@ describe("operator analysis scope", () => {
       "x",
     ]);
     expect(planForScope(DEFAULT_ANALYSIS_SCOPE).deviceSources.length).toBeGreaterThan(0);
+    expect(planForScope(DEFAULT_ANALYSIS_SCOPE).deviceSources).toContain("notes");
   });
 
   it("resets checklists when switching focus", () => {

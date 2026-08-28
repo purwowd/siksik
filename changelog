@@ -1,10 +1,42 @@
 # SIKSIK Flow Implementation Changelog
 
-- Work period: 2026-07-16 to 2026-08-23
+- Work period: 2026-07-16 to 2026-08-28
 - Status: Unreleased local changes
-- Git baseline: `74a11ff` (+ staged batch below)
+- Git baseline: `78e39c6` (+ local batch below)
 - Android agent: `0.7.0`, API `1.0`
 - Primary project: `/home/me/siksik` (WSL lab); Mac mirror `/Users/macbook/Documents/Product1/siksik`
+
+## 2026-08-28: Android Notes acquisition and source-aware analysis modules
+
+- Added a native SIKSIK Android Notes acquisition source with two bounded flows:
+  Samsung Notes performs drawer → All notes → long-press → Select all → Save as
+  file with SDOCX preferred and text fallback; other supported Notes apps use a
+  semantic UI walker with editor verification, deep-scroll collection, safe
+  return-to-list, duplicate suppression, and Samsung fallback when export is
+  unavailable.
+- Notes acquisition is fail-soft and data preserving. ADB calls use argument
+  arrays, UI/XML and SDOCX parsing are bounded, exports are isolated by a
+  before/after snapshot and never deleted from the device, record filenames are
+  content hashes, and runtime logs/progress exclude serials and note content.
+- QUICK uses a three-calendar-month window with smaller note/scroll/export/time
+  budgets; FULL uses six calendar months with larger bounds. Parsed timestamps
+  are filtered against the session reference time and unknown Samsung export
+  timestamps remain explicitly marked as partial provenance.
+- Canonical `notes/*.json` records now index as
+  `application/vnd.siksik.android-note+json`, participate in text/content-policy
+  analysis and finding review, render as text cards in the Catatan Gallery album,
+  support the Notes finding-module filter, and appear in JSON/HTML reports and
+  acquisition-method labels. The operator source selector and Android-only
+  dashboard module expose the same runtime contract; iOS live requests exclude
+  the Android-only source.
+- Dashboard source metrics now return active-session `files_by_source` and
+  `analyzed_files_by_source` counts. Email and Browser cards report indexed,
+  analyzed, and related-finding totals independently, so successfully analyzed
+  clean data no longer appears as zero or missing. Finding distributions are
+  also scoped to the selected session.
+- Recovery report wording/order was aligned with the existing human-readable
+  contract: item and byte counts precede the terminal recovery state, while
+  zero warning/cache counters are omitted.
 
 ## 2026-08-23: WSL lab host, dual .env loading, LAN CORS, ADB forward gateway
 

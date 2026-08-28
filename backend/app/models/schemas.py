@@ -265,6 +265,12 @@ class SessionProgress(ResponseModel):
     whatsapp_messages: int = Field(default=0, ge=0)
     whatsapp_conversations: int = Field(default=0, ge=0)
     whatsapp_parse_skipped: int = Field(default=0, ge=0)
+    notes_state: str | None = Field(default=None, max_length=32)
+    notes_flow: str | None = Field(default=None, max_length=32)
+    notes_app: str | None = Field(default=None, max_length=255)
+    notes_captured: int = Field(default=0, ge=0)
+    notes_skipped: int = Field(default=0, ge=0)
+    notes_warning_count: int = Field(default=0, ge=0)
     authorized_by: str | None = None
     authorized_at: str | None = None
     authorize_note: str | None = None
@@ -438,6 +444,8 @@ class DashboardStats(ResponseModel):
     findings_by_category: list[NamedCount] = Field(default_factory=list)
     findings_by_layer: list[NamedCount] = Field(default_factory=list)
     findings_by_source: list[NamedCount] = Field(default_factory=list)
+    files_by_source: list[NamedCount] = Field(default_factory=list)
+    analyzed_files_by_source: list[NamedCount] = Field(default_factory=list)
     acquisition_methods: list[NamedCount] = Field(default_factory=list)
     toolchain: dict[str, bool] = Field(default_factory=dict)
     gpu_available: bool = False

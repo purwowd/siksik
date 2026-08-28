@@ -62,6 +62,15 @@ MODULE_SOURCE_SQL: dict[str, tuple[str, tuple]] = {
         """,
         (),
     ),
+    "notes": (
+        """
+        AND (
+            LOWER(f.source) = 'notes'
+            OR LOWER(f.path) LIKE 'notes/%'
+        )
+        """,
+        (),
+    ),
     "forensic": (
         " AND 1=1 ",
         (),

@@ -12,6 +12,7 @@ export const DEVICE_SOURCE_OPTIONS = [
   { id: "email", label: "Email / Gmail", hint: "Kotak masuk yang diotorisasi" },
   { id: "browser", label: "Riwayat browser", hint: "Chrome / browser di HP" },
   { id: "whatsapp", label: "WhatsApp", hint: "Cadangan / data percakapan" },
+  { id: "notes", label: "Catatan", hint: "Samsung Notes dan aplikasi catatan Android" },
 ] as const;
 
 export const SOCIAL_TARGET_OPTIONS = [

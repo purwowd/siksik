@@ -72,7 +72,15 @@ export function OperatorPage(p: Props) {
   const progress = p.session?.progress;
   const timing = p.session?.timing;
   const active = !!p.session && ACTIVE.has(p.session.status);
-  const planReady = analysisPlanReady(p.analysisScope, p.deviceSources, p.socialTargets);
+  const effectiveDeviceSources =
+    p.acqSource === "live" && p.selected?.device_type === "ios"
+      ? p.deviceSources.filter((source) => source !== "notes")
+      : p.deviceSources;
+  const planReady = analysisPlanReady(
+    p.analysisScope,
+    effectiveDeviceSources,
+    p.socialTargets,
+  );
   const showDeviceChecks = p.analysisScope !== "social";
   const showSocialChecks = p.analysisScope !== "device";
   const [clockMs, setClockMs] = useState(() => Date.now());
@@ -363,7 +371,9 @@ export function OperatorPage(p: Props) {
                   <fieldset className="analysis-check-set" disabled={p.busy || active}>
                     <legend>Sumber HP</legend>
                     <div className="analysis-check-grid">
-                      {DEVICE_SOURCE_OPTIONS.map((option) => (
+                      {DEVICE_SOURCE_OPTIONS.filter(
+                        (option) => option.id !== "notes" || p.selected?.device_type === "android",
+                      ).map((option) => (
                         <label key={option.id} className="analysis-check">
                           <input
                             type="checkbox"

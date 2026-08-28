@@ -26,6 +26,9 @@ describe("console routes", () => {
     expect(
       buildTabUrl("findings", { sesi: "abc123", modul: "browser" }),
     ).toContain("modul=browser");
+    expect(
+      buildTabUrl("findings", { sesi: "abc123", modul: "notes" }),
+    ).toContain("modul=notes");
   });
 });
 

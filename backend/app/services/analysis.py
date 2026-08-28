@@ -18,6 +18,7 @@ from app.services import vision as vis
 
 CANONICAL_CRAWL_RECORD_MIME = "application/vnd.siksik.crawl-record+json"
 WHATSAPP_MESSAGE_MIME = "application/vnd.satria.whatsapp-message+json"
+ANDROID_NOTE_MIME = "application/vnd.siksik.android-note+json"
 
 
 @dataclass(frozen=True)
@@ -196,6 +197,36 @@ async def read_preview(path: Path, mime: str, max_bytes: int = 200_000) -> str:
             return (record.normalized_text or "")[:max_bytes]
 
         return await asyncio.to_thread(_read_crawl_record)
+    if mime == ANDROID_NOTE_MIME:
+
+        def _read_android_note() -> str:
+            try:
+                if path.stat().st_size > max_bytes * 9 + 65_536:
+                    return ""
+                with path.open("r", encoding="utf-8") as stream:
+                    raw = stream.read(max_bytes * 2 + 65_537)
+                if len(raw) > max_bytes * 2 + 65_536:
+                    return ""
+                payload = json.loads(raw)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return ""
+            if (
+                not isinstance(payload, dict)
+                or payload.get("kind") != "android_note"
+                or payload.get("analysis_eligible") is False
+            ):
+                return ""
+            normalized = payload.get("normalized_text")
+            if isinstance(normalized, str) and normalized.strip():
+                return normalized[:max_bytes]
+            values = (payload.get("title"), payload.get("body"))
+            return "\n".join(
+                value.strip()
+                for value in values
+                if isinstance(value, str) and value.strip()
+            )[:max_bytes]
+
+        return await asyncio.to_thread(_read_android_note)
     if mime == WHATSAPP_MESSAGE_MIME:
 
         def _read_whatsapp_message() -> str:
@@ -289,7 +320,11 @@ def analyze_content_result(
     origin_hint: str | None = None,
 ) -> ContentAnalysisResult:
     ext = path.suffix.lower()
-    if mime in {CANONICAL_CRAWL_RECORD_MIME, WHATSAPP_MESSAGE_MIME}:
+    if mime in {
+        CANONICAL_CRAWL_RECORD_MIME,
+        WHATSAPP_MESSAGE_MIME,
+        ANDROID_NOTE_MIME,
+    }:
         from app.services import content_policy
 
         findings = analyze_text_l1_l2(text, keywords) if text.strip() else []
@@ -300,6 +335,8 @@ def analyze_content_result(
                     backend=(
                         "whatsapp_message"
                         if mime == WHATSAPP_MESSAGE_MIME
+                        else "android_note"
+                        if mime == ANDROID_NOTE_MIME
                         else "canonical_text"
                     ),
                     layer=Layer.L2.value,
@@ -585,6 +622,7 @@ async def _analyze_session_body(
         if (
             mime == CANONICAL_CRAWL_RECORD_MIME
             or mime == WHATSAPP_MESSAGE_MIME
+            or mime == ANDROID_NOTE_MIME
             or path.name.endswith(".siksik-record.json")
             or (ext == ".json" and source in {"sms", "contacts", "contact", "visible_ui"})
             or source in {"sms", "contacts", "contact"}
@@ -729,6 +767,10 @@ async def _analyze_session_body(
             if cache_key and str(row["mime"] or "") == WHATSAPP_MESSAGE_MIME:
                 cache_key = hashlib.sha256(
                     f"{cache_key}\0whatsapp-analysis-v2".encode("utf-8")
+                ).hexdigest()
+            if cache_key and str(row["mime"] or "") == ANDROID_NOTE_MIME:
+                cache_key = hashlib.sha256(
+                    f"{cache_key}\0android-note-analysis-v1".encode("utf-8")
                 ).hexdigest()
             if (
                 cache_key

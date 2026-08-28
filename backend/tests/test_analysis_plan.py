@@ -19,7 +19,7 @@ from app.models.schemas import AnalysisScope, ParticipantInput, StartSessionRequ
 def test_default_plan_is_combined_with_all_current_sources() -> None:
     plan = default_analysis_plan()
     assert plan.scope is AnalysisScope.COMBINED
-    assert {"gallery", "recovery", "email", "browser", "whatsapp"} <= set(
+    assert {"gallery", "recovery", "email", "browser", "whatsapp", "notes"} <= set(
         plan.device_sources
     )
     assert plan.social_targets == ("instagram", "facebook", "x")
@@ -117,6 +117,7 @@ def test_legacy_start_request_defaults_to_combined() -> None:
     assert plan.includes_email is True
     assert plan.includes_browser is True
     assert plan.includes_whatsapp is True
+    assert plan.includes_notes is True
 
 
 @pytest.mark.unit

@@ -146,6 +146,7 @@ MEDIA_APPLICATION_MIMES = {
     "application/vnd.apple.numbers",
     "application/vnd.apple.keynote",
     "application/vnd.siksik.crawl-record+json",
+    "application/vnd.siksik.android-note+json",
 }
 
 
@@ -1248,10 +1249,37 @@ async def dashboard(
         m = p.get("acquisition_method") or "unknown"
         methods[m] = methods.get(m, 0) + 1
 
-    finding_rows = await db.fetchall("SELECT category, layer_origin, source FROM findings")
+    if session_id:
+        finding_rows = await db.fetchall(
+            "SELECT category, layer_origin, source FROM findings WHERE session_id = ?",
+            (session_id,),
+        )
+        file_rows = await db.fetchall(
+            "SELECT source, COUNT(*) AS total, "
+            "SUM(CASE WHEN analyzed = 1 THEN 1 ELSE 0 END) AS analyzed "
+            "FROM files WHERE session_id = ? GROUP BY source",
+            (session_id,),
+        )
+    else:
+        finding_rows = await db.fetchall(
+            "SELECT category, layer_origin, source FROM findings"
+        )
+        file_rows = await db.fetchall(
+            "SELECT source, COUNT(*) AS total, "
+            "SUM(CASE WHEN analyzed = 1 THEN 1 ELSE 0 END) AS analyzed "
+            "FROM files GROUP BY source"
+        )
     by_cat = _counts([dict(r) for r in finding_rows], "category")
     by_layer = _counts([dict(r) for r in finding_rows], "layer_origin")
     by_source = _counts([dict(r) for r in finding_rows], "source")
+    files_by_source = [
+        NamedCount(name=str(row["source"]), count=int(row["total"] or 0))
+        for row in file_rows
+    ]
+    analyzed_files_by_source = [
+        NamedCount(name=str(row["source"]), count=int(row["analyzed"] or 0))
+        for row in file_rows
+    ]
 
     n = max(len(totals), 1)
     tools = await toolchain_status()
@@ -1317,6 +1345,8 @@ async def dashboard(
         findings_by_category=by_cat,
         findings_by_layer=by_layer,
         findings_by_source=by_source,
+        files_by_source=files_by_source,
+        analyzed_files_by_source=analyzed_files_by_source,
         acquisition_methods=[NamedCount(name=k, count=v) for k, v in methods.items()],
         toolchain=tools,
         gpu_available=_gpu_available(),

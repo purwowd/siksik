@@ -62,9 +62,17 @@ export function useAcquisitionControls(p: Params) {
     [p.participant.fullName, p.participant.registrationNo, p.participant.nik],
   );
 
+  const effectiveDeviceSources = useMemo(
+    () =>
+      p.acqSource === "live" && p.selected?.device_type === "ios"
+        ? p.deviceSources.filter((source) => source !== "notes")
+        : p.deviceSources,
+    [p.acqSource, p.deviceSources, p.selected?.device_type],
+  );
+
   const planReady = useMemo(
-    () => analysisPlanReady(p.analysisScope, p.deviceSources, p.socialTargets),
-    [p.analysisScope, p.deviceSources, p.socialTargets],
+    () => analysisPlanReady(p.analysisScope, effectiveDeviceSources, p.socialTargets),
+    [p.analysisScope, effectiveDeviceSources, p.socialTargets],
   );
 
   const iosSetup = useIosSetup({
@@ -108,7 +116,7 @@ export function useAcquisitionControls(p: Params) {
         device_type: p.selected.device_type === "simulated" ? "android" : p.selected.device_type,
         mode: p.mode,
         analysis_scope: p.analysisScope,
-        device_sources: p.deviceSources,
+        device_sources: effectiveDeviceSources,
         social_targets: p.socialTargets,
         scenario: "lulus",
         file_count: p.fileCount,
@@ -153,7 +161,7 @@ export function useAcquisitionControls(p: Params) {
       const s = await api.startSessionFromZip(p.zipFile, {
         mode: p.mode,
         analysis_scope: p.analysisScope,
-        device_sources: p.deviceSources,
+        device_sources: effectiveDeviceSources,
         social_targets: p.socialTargets,
         participant: participantPayload(p.participant),
         onUploadProgress: (pct) => setUploadPct(pct),

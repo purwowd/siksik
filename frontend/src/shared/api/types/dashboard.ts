@@ -41,6 +41,8 @@ export interface DashboardStats {
   findings_by_category?: NamedCount[];
   findings_by_layer?: NamedCount[];
   findings_by_source?: NamedCount[];
+  files_by_source?: NamedCount[];
+  analyzed_files_by_source?: NamedCount[];
   acquisition_methods?: NamedCount[];
   toolchain?: Record<string, boolean>;
   gpu_available?: boolean;

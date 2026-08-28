@@ -30,6 +30,12 @@ export interface SessionProgress {
   whatsapp_messages?: number;
   whatsapp_conversations?: number;
   whatsapp_parse_skipped?: number;
+  notes_state?: string | null;
+  notes_flow?: string | null;
+  notes_app?: string | null;
+  notes_captured?: number;
+  notes_skipped?: number;
+  notes_warning_count?: number;
   crawl_state?: string | null;
   crawl_source?: string | null;
   crawl_target?: string | null;

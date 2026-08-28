@@ -208,6 +208,37 @@ class Settings(BaseSettings):
     android_social_debug_snapshots: bool = True
     android_social_debug_dir: Path = ROOT.parent / "temp_crawl"
 
+    android_notes_enabled: bool = True
+    android_notes_quick_max_notes: int = Field(default=250, ge=1, le=2_000)
+    android_notes_full_max_notes: int = Field(default=1_000, ge=1, le=10_000)
+    android_notes_quick_list_scrolls: int = Field(default=24, ge=1, le=200)
+    android_notes_full_list_scrolls: int = Field(default=80, ge=1, le=500)
+    android_notes_quick_editor_scrolls: int = Field(default=12, ge=1, le=100)
+    android_notes_full_editor_scrolls: int = Field(default=24, ge=1, le=200)
+    android_notes_quick_timeout_s: float = Field(default=300.0, ge=30.0, le=1_800.0)
+    android_notes_full_timeout_s: float = Field(default=1_200.0, ge=60.0, le=3_600.0)
+    android_notes_max_note_chars: int = Field(default=200_000, ge=1_000, le=2_000_000)
+    android_notes_max_export_file_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        ge=64 * 1024,
+        le=1024 * 1024 * 1024,
+    )
+    android_notes_quick_max_export_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=4 * 1024 * 1024 * 1024,
+    )
+    android_notes_full_max_export_bytes: int = Field(
+        default=256 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=8 * 1024 * 1024 * 1024,
+    )
+    android_notes_ui_dump_max_bytes: int = Field(
+        default=4 * 1024 * 1024,
+        ge=64 * 1024,
+        le=16 * 1024 * 1024,
+    )
+
     gmail_acquisition_enabled: bool = True
     gmail_client_id: str = ""
     gmail_quick_max_messages: int = Field(default=0, ge=0, le=100_000)

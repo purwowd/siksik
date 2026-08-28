@@ -64,6 +64,7 @@ STRUCTURED_SOURCES = {
     "notification",
     "notification_listener",
     "whatsapp",
+    "notes",
 }
 PATH_MAPPED_SOURCES = {
     "gallery",
@@ -125,6 +126,9 @@ ALBUM_ALIASES = {
     "mail": "Email",
     "browser history": "Riwayat Browser (lengkap)",
     "riwayat browser": "Riwayat Browser (lengkap)",
+    "notes": "Catatan",
+    "note": "Catatan",
+    "catatan": "Catatan",
 }
 FAVORITE_TOKENS = (
     "favorite",
@@ -154,6 +158,9 @@ SEMANTIC_ALBUMS = {
     "music": "Audio",
     "email": "Email",
     "gmail": "Email",
+    "notes": "Catatan",
+    "note": "Catatan",
+    "catatan": "Catatan",
 }
 SOURCE_ALBUMS = {
     "sms": "Pesan",
@@ -172,6 +179,7 @@ SOURCE_ALBUMS = {
     "document": "Documents",
     "email": "Email",
     "gmail": "Email",
+    "notes": "Catatan",
     "whatsapp": "WhatsApp",
     "browser_history_full": "Riwayat Browser (lengkap)",
     "browser_history_partial": "Riwayat Browser (sebagian)",
@@ -693,7 +701,11 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
     preview_text = _compact_preview(_row_get(row, "preview_text")) or _compact_preview(
         meta.get("preview_text") or meta.get("normalized_text")
     )
-    if preview_text is None and source.casefold() in {"email", "gmail"} | BROWSER_HISTORY_SOURCES:
+    if preview_text is None and source.casefold() in {
+        "email",
+        "gmail",
+        "notes",
+    } | BROWSER_HISTORY_SOURCES:
         preview_text = _compact_preview(display_name)
     recovery_state = _recovery_state(meta, source, path)
     label = _resolved_album(
@@ -740,6 +752,7 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         else "text"
         if (is_social_crawl and source_app_l in SOCIAL_TEXT_ONLY)
         or source_l in BROWSER_HISTORY_SOURCES
+        or source_l == "notes"
         else "visual"
         if is_social_crawl and source_app_l == INSTAGRAM_PACKAGE
         else "file"
@@ -784,6 +797,8 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         source_path = source_locator or origin_path
     elif is_whatsapp_message:
         source_path = f"WhatsApp/{display_name}"
+    elif source_l == "notes":
+        source_path = f"Catatan/{display_name}"
     elif directory_hint:
         source_path = origin_path
     elif recovery_state != RECOVERY_NORMAL:

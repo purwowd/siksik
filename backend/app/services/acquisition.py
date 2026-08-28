@@ -1097,6 +1097,44 @@ async def acquire_dispatch(
     )
     result = await registry.acquire(context)
     if (
+        settings.android_notes_enabled
+        and plan.includes_notes
+        and device_type == DeviceType.ANDROID
+        and not simulated
+    ):
+        from app.acquisition.android_notes import (
+            AdbNotesGateway,
+            AndroidNotesAcquisitionService,
+        )
+        from app.acquisition.gmail_oauth import session_acquisition_reference
+
+        notes_transport = AsyncAdbTransport(
+            settings.adb_path,
+            timeout_seconds=settings.adb_command_timeout_s,
+            output_limit_bytes=settings.android_notes_ui_dump_max_bytes,
+        )
+        reference = await session_acquisition_reference(session_id)
+        notes = await AndroidNotesAcquisitionService(
+            lambda serial: AdbNotesGateway(serial, notes_transport)
+        ).acquire(
+            session_id=session_id,
+            serial=device_id,
+            staging=result.staging,
+            mode=mode,
+            simulated=simulated,
+            on_progress=on_progress,
+            request_id=context.request_id,
+            reference=reference,
+        )
+        if notes.item_count > 0 and notes.method:
+            result = AcquisitionResult(
+                staging=result.staging,
+                item_count=result.item_count + notes.item_count,
+                duration_ms=result.duration_ms + notes.duration_ms,
+                method=f"{result.method}+{notes.method}",
+                provider=result.provider,
+            )
+    if (
         settings.android_recovery_enabled
         and plan.includes_recovery
         and device_type == DeviceType.ANDROID
@@ -1532,6 +1570,63 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
 
                 capture = capture_meta(p)
             meta = {"ext": p.suffix.lower(), **capture}
+            if str(source).casefold() == "notes" and p.suffix.lower() == ".json":
+                from app.acquisition.android_notes import ANDROID_NOTE_MIME
+
+                mime = ANDROID_NOTE_MIME
+                note_payload = {}
+                if p.stat().st_size <= settings.android_notes_max_note_chars * 9 + 65_536:
+                    try:
+                        note_payload = json.loads(p.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                        note_payload = {}
+                if (
+                    isinstance(note_payload, dict)
+                    and note_payload.get("kind") == "android_note"
+                ):
+                    for key in (
+                        "album",
+                        "display_name",
+                        "captured_at",
+                        "observed_at",
+                        "source_modified_at",
+                        "preview_text",
+                        "normalized_text",
+                        "source_app",
+                        "source_app_label",
+                        "folder",
+                        "timestamp_raw",
+                    ):
+                        value = note_payload.get(key)
+                        if value not in {None, ""}:
+                            meta[key] = value
+                    meta.update(
+                        {
+                            "acquisition_method": note_payload.get(
+                                "extraction_method"
+                            )
+                            or "android_notes_ui_walk",
+                            "artifact_role": "canonical_note",
+                            "source_app_inferred": False,
+                            "source_app_evidence": "android_notes_ui",
+                            "note_record_id": note_payload.get("record_id"),
+                            "analysis_eligible": bool(
+                                note_payload.get("analysis_eligible", True)
+                            ),
+                            "time_scope_months": note_payload.get(
+                                "time_scope_months"
+                            ),
+                        }
+                    )
+                    captured_at = meta.get("captured_at")
+                    if isinstance(captured_at, str) and len(captured_at) >= 4:
+                        try:
+                            captured_year = int(captured_at[:4])
+                        except ValueError:
+                            captured_year = 0
+                        if 1970 <= captured_year <= 9999:
+                            meta["captured_year"] = captured_year
+                            meta["date_source"] = "android_notes_ui"
             if str(source).casefold() == "whatsapp" and p.suffix.lower() == ".json":
                 try:
                     whatsapp_payload = json.loads(p.read_text(encoding="utf-8"))
@@ -1835,6 +1930,7 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         or recovered is not None
                         or ios_artifact is not None
                         or str(source).casefold() == "whatsapp"
+                        or str(source).casefold() == "notes"
                     )
                     else str(uuid.uuid4())
                 )

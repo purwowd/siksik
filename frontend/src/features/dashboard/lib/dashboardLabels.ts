@@ -46,6 +46,11 @@ const SOURCE_LABELS: Record<string, string> = {
   ios_recovered_cache: "Cache / preview Photos (iOS)",
   ios_deleted_metadata: "Jejak hapus permanen Photos (iOS)",
   whatsapp: "WhatsApp",
+  email: "Email",
+  gmail: "Email",
+  browser_history_full: "Riwayat Browser (lengkap)",
+  browser_history_partial: "Riwayat Browser (sebagian)",
+  notes: "Catatan Android",
 };
 
 const METHOD_LABELS: Record<string, string> = {
@@ -63,6 +68,10 @@ const METHOD_LABELS: Record<string, string> = {
   android_recovery_quick_partial: "Recovery sampah Android (Cepat, sebagian)",
   android_recovery_full_complete: "Recovery sampah Android (Penuh)",
   android_recovery_full_partial: "Recovery sampah Android (Penuh, sebagian)",
+  android_notes_samsung_export: "Catatan Android (ekspor Samsung Notes)",
+  android_notes_ui_walk: "Catatan Android (navigasi UI)",
+  chrome_cdp: "Riwayat browser Chrome (CDP)",
+  gmail_api: "Email Gmail (API resmi)",
   whatsapp_crypt15: "Backup WhatsApp terenkripsi (Crypt15)",
   whatsapp_crypt15_parse_unavailable: "Backup WhatsApp Crypt15 (parser belum cocok)",
   zip_upload: "Unggah ZIP",

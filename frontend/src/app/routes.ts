@@ -15,7 +15,7 @@ const PATH_TO_TAB = Object.fromEntries(
 ) as Record<string, Tab>;
 
 export type ReviewFilterParam = "all" | ReviewStatus;
-export type ModuleFilterParam = "gallery" | "social" | "email" | "whatsapp" | "browser" | "forensic";
+export type ModuleFilterParam = "gallery" | "social" | "email" | "whatsapp" | "browser" | "notes" | "forensic";
 export type AccessFilter = "all" | "frequent" | "recent" | "favorite";
 
 export const ACCESS_FILTERS: AccessFilter[] = ["all", "frequent", "recent", "favorite"];
@@ -38,7 +38,7 @@ export function tabFromPath(pathname: string): Tab | null {
   return PATH_TO_TAB[base] ?? null;
 }
 
-const MODULE_RE = /^(gallery|social|email|whatsapp|browser|forensic)$/;
+const MODULE_RE = /^(gallery|social|email|whatsapp|browser|notes|forensic)$/;
 
 export function parseTabSearch(search: string): {
   sesi: string | null;

@@ -17,6 +17,7 @@ DEVICE_SOURCE_IDS = (
     "email",
     "browser",
     "whatsapp",
+    "notes",
 )
 SOCIAL_TARGET_IDS = ("instagram", "facebook", "x")
 SOCIAL_TARGET_PACKAGES = {
@@ -74,6 +75,7 @@ _FILE_SOURCE_TO_DEVICE = {
     "browser_history_full": "browser",
     "browser_history_partial": "browser",
     "whatsapp": "whatsapp",
+    "notes": "notes",
 }
 
 
@@ -146,6 +148,10 @@ class AnalysisPlan:
     @property
     def includes_whatsapp(self) -> bool:
         return self.includes_device_source("whatsapp")
+
+    @property
+    def includes_notes(self) -> bool:
+        return self.includes_device_source("notes")
 
     def inventory_adapters(self) -> frozenset[str]:
         adapters: set[str] = set()
