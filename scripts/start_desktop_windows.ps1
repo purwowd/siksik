@@ -6,8 +6,8 @@
 .DESCRIPTION
   Double-click scripts\start_desktop_windows.cmd from Windows (not WSL).
   Starts Tauri window (WebView) against frontend on :5175 and API on :8000.
-  Uses C:\siksik (satria stitch). Backend may already run in WSL; otherwise
-  this script tries to start API via wsl.exe (no WSL Vite).
+  Tauri/npm run from NTFS C:\siksik (CMD cannot use \\wsl$\). Source is
+  rsynced from WSL ~/siksik on each start. Backend stays in WSL.
 
 .EXAMPLE
   scripts\start_desktop_windows.cmd
@@ -97,6 +97,7 @@ function Find-SiksikRepoRoot {
     $key = $full.ToLowerInvariant()
     if ($seen.ContainsKey($key)) { continue }
     $seen[$key] = $true
+    if ($full.StartsWith('\\')) { continue }
     if (Test-SiksikRepo $full) {
       return $full
     }
@@ -111,6 +112,38 @@ function Test-ApiReady {
   } catch {
     return $false
   }
+}
+
+function Test-WslApiReady {
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    foreach ($distro in (Get-WslDistroNames)) {
+      $out = & wsl.exe -d $distro -e curl -sS -m 2 "http://127.0.0.1:$ApiPort/api/v1/ready" 2>$null | Out-String
+      if ($out -match '"status"\s*:\s*"ok"') { return $true }
+    }
+  } catch { }
+  finally { $ErrorActionPreference = $prev }
+  return $false
+}
+
+function Test-PortproxyOnApiPort {
+  $show = & netsh.exe interface portproxy show v4tov4 2>$null | Out-String
+  return [bool]($show -match "(?m)^\s*0\.0\.0\.0\s+$ApiPort\b" -or $show -match "(?m)^\s*127\.0\.0\.1\s+$ApiPort\b")
+}
+
+function Clear-PortproxyBlackhole {
+  Write-Host "  UAC: hapus portproxy $ApiPort/5173 (menghalangi localhost WSL)"
+  $cmd = @(
+    "netsh interface portproxy delete v4tov4 listenport=$ApiPort listenaddress=0.0.0.0",
+    "netsh interface portproxy delete v4tov4 listenport=$ApiPort listenaddress=127.0.0.1",
+    "netsh interface portproxy delete v4tov4 listenport=5173 listenaddress=0.0.0.0",
+    "netsh interface portproxy delete v4tov4 listenport=5173 listenaddress=127.0.0.1"
+  ) -join "; "
+  $p = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList @(
+    "-NoProfile", "-Command", $cmd
+  )
+  return ($p.ExitCode -eq 0)
 }
 
 function Start-WslSatriaApi {
@@ -166,23 +199,122 @@ function Ensure-CargoPath {
   Write-Host ("  rustc  {0}" -f (& rustc -V))
 }
 
-# --- Windows PowerShell only ---
-if ($env:WSL_DISTRO_NAME -or $env:WSL_INTEROP -or (Test-Path -LiteralPath "/proc/version")) {
-  Write-Fail @"
-Run this from Windows (Explorer / PowerShell), not inside WSL.
+# CMD/npm/cargo need an NTFS tree. \\wsl$\ cannot be net-use'd (error 64).
+function ConvertTo-WslPath([string]$WinPath) {
+  $full = [IO.Path]::GetFullPath($WinPath)
+  if ($full -match '^([A-Za-z]):\\(.*)$') {
+    $rest = $Matches[2].Replace('\', '/')
+    return "/mnt/$($Matches[1].ToLowerInvariant())/$rest"
+  }
+  throw "Not an NTFS path: $WinPath"
+}
 
-  C:\siksik\scripts\start_desktop_windows.cmd
+function Get-WindowsMirrorRoot {
+  foreach ($key in @("SIKSIK_ROOT", "SATRIA_ROOT", "SADT_ROOT")) {
+    $v = [Environment]::GetEnvironmentVariable($key, "Process")
+    if (-not $v) { $v = [Environment]::GetEnvironmentVariable($key, "User") }
+    if (-not $v) { $v = [Environment]::GetEnvironmentVariable($key, "Machine") }
+    if (-not $v) { continue }
+    $v = $v.Trim().TrimEnd('\', '/')
+    if ($v.StartsWith('\\')) { continue }
+    try { return [IO.Path]::GetFullPath($v) } catch { }
+  }
+  return "C:\siksik"
+}
+
+function Sync-WslSourceToWindows([string]$WinRoot) {
+  $dstWsl = ConvertTo-WslPath $WinRoot
+  $script = @"
+set -e
+SRC=`"`$HOME/siksik`"
+if [ ! -f `"`$SRC/desktop/package.json`" ]; then SRC="/home/me/siksik"; fi
+if [ ! -f `"`$SRC/desktop/package.json`" ]; then echo NO_WSL_REPO; exit 2; fi
+if ! command -v rsync >/dev/null 2>&1; then echo NO_RSYNC; exit 3; fi
+DST="$dstWsl"
+mkdir -p `"`$DST/frontend`" `"`$DST/desktop`" `"`$DST/backend`" `"`$DST/scripts`"
+# NTFS via /mnt/c is slow: only the trees Tauri/npm need (not android/ios/data/.venv/target).
+RSYNC=(rsync -a --delete --no-perms --no-owner --no-group --modify-window=1)
+"`${RSYNC[@]}" --exclude node_modules --exclude dist --exclude __pycache__ \
+  `"`$SRC/frontend/`" `"`$DST/frontend/`"
+"`${RSYNC[@]}" --exclude node_modules --exclude target --exclude __pycache__ \
+  `"`$SRC/desktop/`" `"`$DST/desktop/`"
+"`${RSYNC[@]}" --exclude .venv --exclude data --exclude __pycache__ --exclude .pytest_cache \
+  `"`$SRC/backend/`" `"`$DST/backend/`"
+"`${RSYNC[@]}" `"`$SRC/scripts/`" `"`$DST/scripts/`"
+echo SYNCED
+"@
+  $prevEap = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    foreach ($distro in (Get-WslDistroNames)) {
+      try {
+        Write-Host "  rsync $distro -> $WinRoot"
+        $out = $script | & wsl.exe -d $distro -e bash -s 2>&1 | Out-String
+        if ($out -match 'SYNCED') {
+          Write-Host "  source synced from WSL"
+          return $true
+        }
+        if ($out.Trim()) { Write-Host $out.Trim() }
+      } catch {
+        continue
+      }
+    }
+  } finally {
+    $ErrorActionPreference = $prevEap
+  }
+  return $false
+}
+
+# Real Linux WSL userspace only. Windows processes started from \\wsl$\ or
+# wsl.exe inherit WSL_INTEROP / WSL_DISTRO_NAME; /proc/version is also visible
+# when cwd is on the WSL filesystem. Those are not "inside bash".
+function Test-InsideLinuxWsl {
+  if ($env:OS -eq "Windows_NT") { return $false }
+  if ($env:SystemRoot -and (Test-Path -LiteralPath (Join-Path $env:SystemRoot "System32\cmd.exe"))) {
+    return $false
+  }
+  if ($env:WSL_DISTRO_NAME -or $env:WSL_INTEROP) { return $true }
+  try {
+    return ((Get-Content -LiteralPath "/proc/version" -ErrorAction Stop) -match "Microsoft")
+  } catch {
+    return $false
+  }
+}
+
+if (Test-InsideLinuxWsl) {
+  Write-Fail @"
+Run this from Windows (Explorer / shortcut SATRIA), not from a WSL shell.
+
+  Double-click SATRIA on the Desktop
 "@
   exit 1
 }
 
-Write-Step "Locate satria stitch repo"
-$RepoRoot = Find-SiksikRepoRoot
-if (-not $RepoRoot) {
-  Write-Fail @"
-Repo not found (need analysisScope.ts + desktop/).
+Write-Step "Locate Windows repo (NTFS)"
+$RepoRoot = Get-WindowsMirrorRoot
+Write-Host "  mirror  $RepoRoot"
 
-  [Environment]::SetEnvironmentVariable('SIKSIK_ROOT', 'C:\siksik', 'User')
+Write-Step "Sync frontend/desktop/backend from WSL (skip android, data, venv)"
+if (-not (Sync-WslSourceToWindows $RepoRoot)) {
+  Write-Fail @"
+Failed to rsync WSL repo to $RepoRoot
+
+In WSL:
+  rsync -a --exclude node_modules --exclude .venv --exclude target --exclude .git \
+    ~/siksik/ /mnt/c/siksik/
+"@
+  exit 1
+}
+
+if (-not (Test-SiksikRepo $RepoRoot)) {
+  $found = Find-SiksikRepoRoot
+  if ($found) { $RepoRoot = $found }
+}
+if (-not (Test-SiksikRepo $RepoRoot)) {
+  Write-Fail @"
+Repo not found at $RepoRoot (need analysisScope.ts + desktop/).
+
+Edit in WSL ~/siksik; this script mirrors it to C:\siksik for Tauri.
 "@
   exit 1
 }
@@ -210,7 +342,39 @@ Write-Step "Check Rust toolchain"
 Ensure-CargoPath
 
 Write-Step "Wait for backend $ReadyUrl"
-if (-not (Test-ApiReady)) {
+$wslReady = Test-WslApiReady
+if (-not (Test-ApiReady) -and $wslReady -and (Test-PortproxyOnApiPort)) {
+  Write-Host "  API hidup di WSL, tapi Windows :$ApiPort kena portproxy (timeout)."
+  if (-not (Clear-PortproxyBlackhole)) {
+    Write-Fail @"
+Tolak UAC atau gagal hapus portproxy.
+
+Jalankan PowerShell Administrator:
+  netsh interface portproxy delete v4tov4 listenport=8000 listenaddress=0.0.0.0
+  netsh interface portproxy delete v4tov4 listenport=5173 listenaddress=0.0.0.0
+
+Atau: scripts\expose_lan.ps1 (Run as administrator)
+"@
+    exit 1
+  }
+  Start-Sleep -Seconds 1
+}
+
+if (-not (Test-ApiReady) -and $wslReady) {
+  Write-Fail @"
+API sudah jalan di WSL, tapi Windows tidak menempel ke 127.0.0.1:$ApiPort
+(localhost forwarding belum bind — biasanya karena uvicorn start saat portproxy masih ada).
+
+Di terminal WSL: Ctrl+C, lalu jalankan ulang:
+  cd ~/siksik/backend && source .venv/bin/activate
+  uvicorn app.main:app --host 0.0.0.0 --port $ApiPort --workers 1
+
+Kemudian double-click SATRIA lagi. Jangan spawn uvicorn kedua.
+"@
+  exit 1
+}
+
+if (-not (Test-ApiReady) -and -not (Test-WslApiReady)) {
   [void](Start-WslSatriaApi)
 }
 $deadline = (Get-Date).AddSeconds($ApiWaitSeconds)
@@ -220,9 +384,17 @@ while ((Get-Date) -lt $deadline) {
   Start-Sleep -Milliseconds 800
 }
 if (-not $apiOk) {
+  $hint = ""
+  if (Test-WslApiReady) {
+    $hint = @"
+
+API di WSL sudah OK; Windows tidak tembus 127.0.0.1:$ApiPort.
+Hapus portproxy (Administrator), jangan port-forward ke IP NAT WSL.
+"@
+  }
   Write-Fail @"
 API not ready at $ReadyUrl
-
+$hint
 In WSL:
   cd ~/siksik/backend && source .venv/bin/activate
   uvicorn app.main:app --host 0.0.0.0 --port $ApiPort --workers 1
