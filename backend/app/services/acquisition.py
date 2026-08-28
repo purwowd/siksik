@@ -6,9 +6,11 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import shutil
 import time
 import uuid
+from bisect import bisect_left
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -80,6 +82,207 @@ def _nonnegative_int(value: object) -> int:
         return max(0, int(value))
     except (TypeError, ValueError, OverflowError):
         return 0
+
+
+def _media_basename(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.replace("\\", "/").strip()
+    if not normalized:
+        return None
+    name = Path(normalized).name.strip().casefold()
+    return name or None
+
+
+def _media_kind(filename: object, mime_type: object) -> str | None:
+    mime = str(mime_type or "").strip().casefold()
+    for kind in ("image", "video", "audio"):
+        if mime.startswith(f"{kind}/"):
+            return kind
+    suffix = Path(str(filename or "")).suffix.casefold()
+    if suffix in IMG_EXT:
+        return "image"
+    if suffix in VID_EXT:
+        return "video"
+    if suffix in AUDIO_EXT:
+        return "audio"
+    return None
+
+
+def _timestamp_epoch(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number / 1000.0 if number > 10_000_000_000 else number
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _link_whatsapp_media_rows(rows: list[tuple]) -> list[tuple]:
+    """Bind pulled media to Crypt15 messages using bounded, strong evidence."""
+    references_by_name: dict[str, list[dict[str, object]]] = {}
+    references_by_hash: dict[str, list[dict[str, object]]] = {}
+    references: list[dict[str, object]] = []
+    decoded: list[dict[str, object] | None] = []
+    for row in rows:
+        try:
+            metadata = json.loads(row[9] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            decoded.append(None)
+            continue
+        if not isinstance(metadata, dict):
+            decoded.append(None)
+            continue
+        decoded.append(metadata)
+        if metadata.get("artifact_role") != "canonical_message":
+            continue
+        filename = _media_basename(
+            metadata.get("media_filename") or metadata.get("media_source_path")
+        )
+        media_sha256 = str(metadata.get("media_sha256") or "").strip().casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", media_sha256):
+            media_sha256 = ""
+        message_id = str(metadata.get("message_id") or "").strip()
+        conversation_id = str(metadata.get("conversation_id") or "").strip()
+        if (not filename and not media_sha256) or not message_id or not conversation_id:
+            continue
+        reference = {
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+            "conversation_name": metadata.get("conversation_name"),
+            "direction": metadata.get("message_direction"),
+            "actor_kind": metadata.get("message_actor_kind"),
+            "sender": metadata.get("message_sender"),
+            "timestamp": metadata.get("message_timestamp"),
+            "timestamp_epoch": _timestamp_epoch(metadata.get("message_timestamp")),
+            "size": _nonnegative_int(metadata.get("media_size")),
+            "mime_type": metadata.get("media_mime_type"),
+            "media_kind": _media_kind(filename, metadata.get("media_mime_type")),
+        }
+        references.append(reference)
+        if filename:
+            references_by_name.setdefault(filename, []).append(reference)
+        if media_sha256:
+            references_by_hash.setdefault(media_sha256, []).append(reference)
+    if not references_by_name and not references_by_hash:
+        return rows
+    references_by_kind: dict[str, list[tuple[float, dict[str, object]]]] = {}
+    for reference in references:
+        kind = reference.get("media_kind")
+        timestamp = reference.get("timestamp_epoch")
+        if isinstance(kind, str) and isinstance(timestamp, (int, float)):
+            references_by_kind.setdefault(kind, []).append((float(timestamp), reference))
+    for timeline in references_by_kind.values():
+        timeline.sort(key=lambda item: item[0])
+
+    linked: list[tuple] = []
+    for row, metadata in zip(rows, decoded, strict=True):
+        if metadata is None or metadata.get("artifact_role") == "canonical_message":
+            linked.append(row)
+            continue
+        filename = _media_basename(metadata.get("display_name") or row[3])
+        digest = str(row[6] or "").strip().casefold()
+        hash_matches = references_by_hash.get(digest, [])
+        size = _nonnegative_int(row[5])
+        mime = str(row[4] or "").casefold()
+        if hash_matches:
+            matches = hash_matches[:16]
+            match_basis = "sha256"
+        else:
+            candidates = references_by_name.get(filename or "", [])
+            matches = [
+                candidate
+                for candidate in candidates
+                if (
+                    not _nonnegative_int(candidate.get("size"))
+                    or not size
+                    or _nonnegative_int(candidate.get("size")) == size
+                )
+                and (
+                    not candidate.get("mime_type")
+                    or not mime
+                    or str(candidate.get("mime_type")).casefold() == mime
+                )
+            ][:16]
+            match_basis = "filename+size"
+        if not matches:
+            source_app = str(metadata.get("source_app") or "").strip().casefold()
+            source_app_inferred = metadata.get("source_app_inferred") is True
+            timestamp = _timestamp_epoch(
+                metadata.get("captured_at")
+                or metadata.get("source_created_at")
+                or metadata.get("date_taken")
+                or metadata.get("date_added")
+            )
+            kind = _media_kind(filename or row[3], mime)
+            if (
+                source_app in {"com.whatsapp", "com.whatsapp.w4b"}
+                and not source_app_inferred
+                and timestamp is not None
+                and kind is not None
+            ):
+                timeline = references_by_kind.get(kind, [])
+                position = bisect_left(timeline, timestamp, key=lambda item: item[0])
+                nearby = timeline[max(0, position - 2) : position + 3]
+                timed = sorted(
+                    (
+                        (abs(timestamp - candidate_timestamp), candidate)
+                        for candidate_timestamp, candidate in nearby
+                    ),
+                    key=lambda item: item[0],
+                )
+                if timed and timed[0][0] <= 15.0 and (
+                    len(timed) == 1 or timed[1][0] - timed[0][0] >= 2.0
+                ):
+                    matches = [timed[0][1]]
+                    match_basis = "timestamp+media-kind"
+        if not matches:
+            linked.append(row)
+            continue
+        primary = matches[0]
+        metadata.update(
+            {
+                "album": "WhatsApp",
+                "source_app": "com.whatsapp",
+                "source_app_inferred": False,
+                "source_app_evidence": "whatsapp_crypt15:media_reference",
+                "whatsapp_provenance": "canonical_media_match",
+                "whatsapp_media_match_basis": match_basis,
+                "whatsapp_message_id": primary["message_id"],
+                "whatsapp_conversation_id": primary["conversation_id"],
+                "whatsapp_conversation_name": primary["conversation_name"],
+                "whatsapp_direction": primary["direction"],
+                "whatsapp_actor_kind": primary["actor_kind"],
+                "whatsapp_sender": primary["sender"],
+                "whatsapp_message_timestamp": primary["timestamp"],
+                "whatsapp_media_links": [
+                    {
+                        key: candidate[key]
+                        for key in (
+                            "message_id",
+                            "conversation_id",
+                            "direction",
+                            "actor_kind",
+                            "timestamp",
+                        )
+                    }
+                    for candidate in matches
+                ],
+            }
+        )
+        mutable = list(row)
+        mutable[9] = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        linked.append(tuple(mutable))
+    return linked
 
 
 def looks_favorite_path(path_str: str) -> bool:
@@ -1349,7 +1552,11 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                     quote = quote if isinstance(quote, dict) else {}
                     media = message.get("media")
                     media = media if isinstance(media, dict) else {}
-                    message_text = message.get("text")
+                    system_event = message.get("system_event")
+                    system_event = system_event if isinstance(system_event, dict) else {}
+                    message_text = message.get("display_text")
+                    if not isinstance(message_text, str) or not message_text.strip():
+                        message_text = message.get("text")
                     if not isinstance(message_text, str) or not message_text.strip():
                         message_text = media.get("caption")
                     if not isinstance(message_text, str) or not message_text.strip():
@@ -1373,16 +1580,47 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         {
                             "acquisition_method": "whatsapp_crypt15",
                             "artifact_role": "canonical_message",
+                            "source_app": "com.whatsapp",
+                            "source_app_inferred": False,
+                            "source_app_evidence": "whatsapp_crypt15",
+                            "whatsapp_provenance": "canonical_message",
+                            "account_id": whatsapp_payload.get("account_id"),
+                            "account_slot": whatsapp_payload.get("account_slot"),
                             "conversation_id": conversation.get("id"),
                             "conversation_name": conversation.get("name"),
                             "conversation_address": conversation.get("address"),
                             "conversation_type": conversation.get("type"),
+                            "conversation_peer_jid": conversation.get("peer_jid"),
+                            "conversation_peer_phone_jid": conversation.get(
+                                "peer_phone_jid"
+                            ),
+                            "conversation_is_self_chat": bool(
+                                conversation.get("is_self_chat")
+                            ),
                             "message_id": message.get("id"),
                             "message_direction": message.get("direction"),
+                            "message_direction_evidence": message.get(
+                                "direction_evidence"
+                            ),
+                            "message_actor_kind": message.get("actor_kind"),
+                            "message_actor_jid": message.get("actor_jid"),
+                            "message_peer_jid": message.get("peer_jid"),
+                            "message_participant_jid": message.get("participant_jid"),
                             "message_sender": message.get("sender"),
                             "message_type": message.get("type"),
+                            "message_type_code": message.get("type_code"),
                             "message_text": message_text,
                             "message_timestamp": message.get("timestamp"),
+                            "message_analysis_eligible": (
+                                bool(whatsapp_payload.get("analysis_eligible"))
+                                if whatsapp_payload.get("analysis_eligible") is not None
+                                else message.get("type") not in {"system", "call"}
+                            ),
+                            "message_system_action_type": message.get(
+                                "system_action_type"
+                            ),
+                            "message_system_kind": system_event.get("kind"),
+                            "message_system_label": system_event.get("label"),
                             "message_starred": bool(message.get("starred")),
                             "message_revoked": bool(message.get("revoked")),
                             "message_forward_score": _nonnegative_int(
@@ -1390,6 +1628,12 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                             ),
                             "message_edited_at": message.get("edited_at"),
                             "quoted_text": quote.get("text"),
+                            "media_filename": media.get("filename"),
+                            "media_source_path": media.get("source_path"),
+                            "media_size": _nonnegative_int(media.get("file_size")),
+                            "media_mime_type": media.get("mime_type"),
+                            "media_duration": _nonnegative_int(media.get("duration")),
+                            "media_sha256": media.get("sha256"),
                         }
                     )
                     captured_at = meta.get("captured_at")
@@ -1423,13 +1667,20 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                     meta["acquisition_method"] = "chrome_cdp"
             if artifact is not None:
                 capture_extra = crawl_capture_meta.get(str(artifact["record_id"]), {})
+                artifact_source_app = artifact["source_app"]
+                if str(artifact_source_app or "").casefold() in {
+                    "whatsapp",
+                    "com.whatsapp",
+                    "com.whatsapp.w4b",
+                }:
+                    artifact_source_app = "com.whatsapp"
                 meta.update(
                     {
                         "acquisition_method": "android_agent_direct_manifest",
                         "crawl_record_id": artifact["record_id"],
                         "crawl_artifact_role": artifact["role"],
                         "social_scope": artifact["social_scope"],
-                        "source_app": artifact["source_app"],
+                        "source_app": artifact_source_app,
                         "directory_hint": capture_extra.get("directory_hint"),
                         "display_name": capture_extra.get("display_name"),
                         "is_favorite": bool(capture_extra.get("is_favorite")),
@@ -1439,6 +1690,15 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         "album": capture_extra.get("album"),
                     }
                 )
+                if artifact_source_app == "com.whatsapp":
+                    meta.update(
+                        {
+                            "album": "WhatsApp",
+                            "source_app_inferred": False,
+                            "source_app_evidence": "android_agent:manifest_source_app",
+                            "whatsapp_provenance": "android_media_provider",
+                        }
+                    )
                 if str(artifact["role"] or "") == "source_binary":
                     meta["canonical_normalized_text"] = capture_extra.get(
                         "canonical_normalized_text"
@@ -1517,12 +1777,19 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                     record = InventoryRecordV1.model_validate_json(p.read_bytes())
                 except (OSError, ValueError) as exc:
                     raise RuntimeError("canonical crawl record is invalid") from exc
+                record_source_app = record.source_app
+                if str(record_source_app or "").casefold() in {
+                    "whatsapp",
+                    "com.whatsapp",
+                    "com.whatsapp.w4b",
+                }:
+                    record_source_app = "com.whatsapp"
                 meta.update(
                     {
                         "crawl_id": record.crawl_id,
                         "record_id": record.record_id,
                         "source_kind": record.source_kind,
-                        "source_app": record.source_app,
+                        "source_app": record_source_app,
                         "observed_at": record.observed_at,
                         "source_created_at": record.source_created_at,
                         "source_modified_at": record.source_modified_at,
@@ -1538,6 +1805,17 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
                         ),
                     }
                 )
+                if record_source_app == "com.whatsapp":
+                    meta.update(
+                        {
+                            "album": "WhatsApp",
+                            "source_app_inferred": False,
+                            "source_app_evidence": (
+                                f"android_agent:{record.provenance.source_adapter}"
+                            ),
+                            "whatsapp_provenance": "android_media_provider",
+                        }
+                    )
                 if record.source_kind == "contact":
                     from app.acquisition.contact_identity import (
                         contact_cluster_keys,
@@ -1595,6 +1873,7 @@ async def index_staging(session_id: str, staging: Path, on_progress) -> tuple[in
         from app.acquisition.contact_identity import annotate_contact_file_rows
 
         files = annotate_contact_file_rows(files)
+        files = _link_whatsapp_media_rows(files)
         await db.executemany(
             """
             INSERT INTO files (id, session_id, source, path, mime, size_bytes, sha256, pull_status, analyzed, meta_json)

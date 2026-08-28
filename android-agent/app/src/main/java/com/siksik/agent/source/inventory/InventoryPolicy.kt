@@ -96,6 +96,15 @@ object InventoryPolicy {
         }
     }
 
+    fun sourceApp(adapter: SourceAdapter, ownerPackageName: String?): String? = when {
+        ownerPackageName == "com.whatsapp" -> "com.whatsapp"
+        ownerPackageName == "com.whatsapp.w4b" -> "com.whatsapp.w4b"
+        ownerPackageName == "org.telegram.messenger" -> "org.telegram.messenger"
+        adapter == SourceAdapter.PUBLIC_WHATSAPP -> "com.whatsapp"
+        adapter == SourceAdapter.PUBLIC_TELEGRAM -> "org.telegram.messenger"
+        else -> null
+    }
+
     fun identityHash(identity: String): String = sha256("siksik-inventory:$identity")
 
     fun recordId(identityHash: String): String = "record_${identityHash.take(40)}"

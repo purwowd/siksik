@@ -39,8 +39,24 @@ function messageTypeLabel(value: string): string {
     file: "Dokumen",
     location: "Lokasi",
     system: "Sistem",
+    interactive: "Interaktif",
+    call: "Panggilan",
   };
   return labels[value] || value.replace(/_/g, " ");
+}
+
+function actorLabel(item: GalleryItem, room: Room): string {
+  const chat = item.chat!;
+  if (chat.actor_kind === "self") return "Anda";
+  if (chat.actor_kind === "system") return "Sistem WhatsApp";
+  if (chat.actor_kind === "unknown") return "Aktor tidak diketahui";
+  return chat.sender || room.name || "Pengirim";
+}
+
+function directionLabel(direction: "IN" | "OUT" | "UNKNOWN"): string {
+  if (direction === "OUT") return "Pesan keluar";
+  if (direction === "IN") return "Pesan masuk";
+  return "Arah tidak tersedia";
 }
 
 function roomsFrom(items: GalleryItem[]): Room[] {
@@ -103,23 +119,60 @@ export function WhatsAppChatRooms({ items }: Props) {
               {room.items.map((item) => {
                 const chat = item.chat!;
                 const badges = item.finding_badges ?? [];
+                const isSystem =
+                  chat.actor_kind === "system" || chat.message_type === "system";
+                if (isSystem) {
+                  return (
+                    <article
+                      key={item.id}
+                      className={`wa-system-event ${
+                        item.flagged ? "wa-message-finding" : ""
+                      }`}
+                      aria-label={`Peristiwa sistem WhatsApp${
+                        item.flagged ? ", ditandai sebagai temuan" : ""
+                      }`}
+                    >
+                      <div className="wa-system-event-card">
+                        <div className="wa-system-event-head">
+                          <strong>Sistem WhatsApp</strong>
+                          {chat.system_action_type !== null &&
+                          chat.system_action_type !== undefined ? (
+                            <span>Aksi {chat.system_action_type}</span>
+                          ) : null}
+                          {item.flagged ? (
+                            <strong className="wa-finding-marker" role="status">
+                              Temuan
+                            </strong>
+                          ) : null}
+                        </div>
+                        <p>{chat.text || item.preview_text || "Peristiwa sistem WhatsApp"}</p>
+                        {badges.length > 0 ? (
+                          <div className="wa-finding-badges" aria-label="Kategori temuan">
+                            {badges.map((badge) => (
+                              <span key={badge}>{badge}</span>
+                            ))}
+                          </div>
+                        ) : null}
+                        <time dateTime={chat.timestamp || item.captured_at || undefined}>
+                          {timeLabel(chat.timestamp || item.captured_at)}
+                        </time>
+                      </div>
+                    </article>
+                  );
+                }
                 return (
                   <article
                     key={item.id}
                     className={`wa-message wa-message-${chat.direction.toLowerCase()} ${
                       item.flagged ? "wa-message-finding" : ""
                     }`}
-                    aria-label={`${chat.direction === "OUT" ? "Pesan keluar" : "Pesan masuk"}${
+                    aria-label={`${directionLabel(chat.direction)}${
                       item.flagged ? ", ditandai sebagai temuan" : ""
                     }`}
                   >
                     <div className="wa-message-bubble">
                       <div className="wa-message-head">
-                        <span>
-                          {chat.direction === "OUT"
-                            ? "Anda"
-                            : chat.sender || room.name || "Pengirim"}
-                        </span>
+                        <span>{actorLabel(item, room)}</span>
                         {item.flagged ? (
                           <strong className="wa-finding-marker" role="status">
                             Temuan
@@ -147,6 +200,8 @@ export function WhatsAppChatRooms({ items }: Props) {
 
                       <footer className="wa-message-foot">
                         <span>{messageTypeLabel(chat.message_type)}</span>
+                        {chat.media_filename ? <span>{chat.media_filename}</span> : null}
+                        {chat.direction === "UNKNOWN" ? <span>Arah tidak diketahui</span> : null}
                         {chat.forwarded ? <span>Diteruskan</span> : null}
                         {chat.edited_at ? <span>Diedit</span> : null}
                         {chat.starred ? <span aria-label="Pesan berbintang">★</span> : null}

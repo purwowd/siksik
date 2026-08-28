@@ -111,6 +111,7 @@ class UiAutomatorDriver(
     private var navigationDeadlineAtMs: Long =
         System.currentTimeMillis() + DEFAULT_NAVIGATION_BUDGET_MS,
 ) : AutomationDriver, AutoCloseable {
+    private var navigationGateDeadlineAtMs: Long = Long.MAX_VALUE
     private val store = CommunicationCaptureStore(context)
     private val debugMapper = AutomationDebugMapper(
         context,
@@ -126,6 +127,7 @@ class UiAutomatorDriver(
     private var instagramArchiveListActive = false
     private var instagramSubpageActive = false
     private var xTimelineActive = false
+    private var xRepliesControlActivated = false
     private var fbFeedActive = false
     private var fbActivityPhase = FacebookActivityPhase.NONE
     private var fbCommentsBoundaryReached = false
@@ -181,6 +183,7 @@ class UiAutomatorDriver(
         invalidateInstagramOcrCache()
         resetInstagramCaptureProgress()
         instagramSubpageActive = false
+        xRepliesControlActivated = false
         xVisitedViewportSignatures.clear()
         xCurrentViewportSignatures.clear()
         xStoredItemSignatures.clear()
@@ -329,6 +332,19 @@ class UiAutomatorDriver(
         foregroundPackageName() == targetPackage
 
     override fun navigateToScope(targetPackage: String, scope: SocialScope): Boolean {
+        val previousGateDeadline = navigationGateDeadlineAtMs
+        val gateBudgetMs = scopeNavigationBudgetMs(targetPackage, scope)
+        navigationGateDeadlineAtMs = gateBudgetMs?.let { budget ->
+            minOf(navigationDeadlineAtMs, System.currentTimeMillis() + budget)
+        } ?: Long.MAX_VALUE
+        return try {
+            navigateToScopeWithinGate(targetPackage, scope)
+        } finally {
+            navigationGateDeadlineAtMs = previousGateDeadline
+        }
+    }
+
+    private fun navigateToScopeWithinGate(targetPackage: String, scope: SocialScope): Boolean {
         deactivateScope()
         failureReason = null
         ensureTextOnlyCoverVisible(targetPackage) || run {
@@ -349,6 +365,13 @@ class UiAutomatorDriver(
             else -> false
         }
         if (!navigated || !isForeground(targetPackage) || !scopeStillVisible(targetPackage, scope)) {
+            if (scopeNavigationGateExpired() && System.currentTimeMillis() < navigationDeadlineAtMs) {
+                failureReason = when (targetPackage) {
+                    X_PACKAGE -> "x_navigation_stalled"
+                    FACEBOOK_PACKAGE -> "facebook_navigation_stalled"
+                    else -> failureReason
+                }
+            }
             if (failureReason == null) failureReason = "scope_verification_failed"
             debugMapper.capture(
                 "scope_${scope.wireName}_${failureReason ?: "verification_failed"}",
@@ -372,6 +395,23 @@ class UiAutomatorDriver(
         debugMapper.capture("scope_${scope.wireName}_verified", scope, "verified")
         return true
     }
+
+    private fun scopeNavigationBudgetMs(targetPackage: String, scope: SocialScope): Long? =
+        when (targetPackage) {
+            X_PACKAGE -> when (scope) {
+                SocialScope.OWN_PROFILE -> X_PROFILE_NAVIGATION_BUDGET_MS
+                SocialScope.OWN_TWEETS -> X_POSTS_NAVIGATION_BUDGET_MS
+                SocialScope.OWN_REPLIES -> X_REPLIES_NAVIGATION_BUDGET_MS
+                else -> X_SCOPE_NAVIGATION_BUDGET_MS
+            }
+            FACEBOOK_PACKAGE -> when (scope) {
+                SocialScope.OWN_PROFILE -> FACEBOOK_PROFILE_NAVIGATION_BUDGET_MS
+                SocialScope.OWN_POSTS -> FACEBOOK_POSTS_NAVIGATION_BUDGET_MS
+                SocialScope.OWN_COMMENTS -> FACEBOOK_COMMENTS_NAVIGATION_BUDGET_MS
+                else -> FACEBOOK_SCOPE_NAVIGATION_BUDGET_MS
+            }
+            else -> null
+        }
 
     override fun scrollForward(): Boolean = scrollForwardResult() == ScrollResult.MOVED
 
@@ -785,9 +825,6 @@ class UiAutomatorDriver(
             return ScopeCapture(stored = true, screenshotId = null, exhausted = true)
         }
         if (rows.isEmpty()) {
-            buildXTimelineRow(nodes, marker, scope)?.let { rows = listOf(it) }
-        }
-        if (rows.isEmpty()) {
             failureReason = "x_own_content_not_visible"
             Log.w(
                 LOG_TAG,
@@ -928,7 +965,7 @@ class UiAutomatorDriver(
             System.currentTimeMillis() + RECOVERY_NAVIGATION_BUDGET_MS,
         )
 
-        if (failedAttempt == 1 && isForeground(targetPackage)) {
+        if (targetPackage == INSTAGRAM_PACKAGE && failedAttempt == 1 && isForeground(targetPackage)) {
             repeat(3) {
                 device.pressBack()
                 SystemClock.sleep(200L)
@@ -943,7 +980,7 @@ class UiAutomatorDriver(
             }
         }
 
-        if (failedAttempt <= 2) {
+        if (targetPackage == INSTAGRAM_PACKAGE && failedAttempt <= 2) {
             val relaunched = launch(targetPackage) &&
                 waitVisible(targetPackage, 4_000L) &&
                 requireSignedInSession(targetPackage)
@@ -957,14 +994,18 @@ class UiAutomatorDriver(
             }
         }
 
-        try {
-            device.executeShellCommand("am force-stop $targetPackage")
-        } catch (error: RuntimeException) {
+        val forceStopped = executeShellCommandBounded(
+            "am force-stop $targetPackage",
+            SCOPE_RECOVERY_SHELL_TIMEOUT_MS,
+            "scope_force_stop",
+        ) != null
+        if (!forceStopped) {
             Log.w(
                 LOG_TAG,
-                "event=social_scope_recovery stage=force_stop_failed " +
-                    "target=$targetPackage type=${error.javaClass.simpleName}",
+                "event=social_scope_recovery stage=force_stop_failed target=$targetPackage",
             )
+            failureReason = "scope_force_stop_failed"
+            return false
         }
         SystemClock.sleep(SCOPE_RECOVERY_SETTLE_MS)
         val recovered = launch(targetPackage) &&
@@ -3537,9 +3578,32 @@ class UiAutomatorDriver(
         }
         if (scope == SocialScope.OWN_PROFILE) return true
         dismissXChromeOverlays()
-        val labels = if (scope == SocialScope.OWN_TWEETS) X_POSTS_LABELS else X_REPLIES_LABELS
-        if (!ensureXProfileTabsVisible() || !clickXProfileTab(labels)) {
-            return fail("x_profile_tab_not_found")
+        when (scope) {
+            SocialScope.OWN_TWEETS -> {
+                if (!ensureXProfileControlVisible(X_POSTS_LABELS)) {
+                    return fail("x_posts_control_missing")
+                }
+                if (
+                    xTabLooksSelected(X_REPLIES_LABELS) &&
+                    !clickXProfileTab(X_POSTS_LABELS)
+                ) {
+                    return fail("x_default_posts_not_verified")
+                }
+                xRepliesControlActivated = false
+            }
+            SocialScope.OWN_REPLIES -> {
+                if (!ensureXProfileControlVisible(X_POSTS_LABELS)) {
+                    return fail("x_posts_control_missing")
+                }
+                if (
+                    !clickXProfileTab(X_REPLIES_LABELS) &&
+                    !clickXRepliesControlAdjacentToPosts()
+                ) {
+                    return fail("x_replies_control_missing")
+                }
+                xRepliesControlActivated = true
+            }
+            else -> return fail("x_scope_unsupported")
         }
         dismissXChromeOverlays()
         xTimelineActive = true
@@ -3566,7 +3630,7 @@ class UiAutomatorDriver(
             X_PACKAGE in verifiedOwnAccountPackages &&
             xOwnAccountMarker != null &&
             isForeground(X_PACKAGE) &&
-            ensureXProfileTabsVisible()
+            hasXOwnProfileProof()
         ) {
             return true
         }
@@ -3586,13 +3650,16 @@ class UiAutomatorDriver(
             ensureTextOnlyCoverVisible(X_PACKAGE)
             recoverXFromWrongSurface()
 
-            // Prefer navigation drawer (top-left). Never match tweet "Profile image".
-            // No shell dump on this hot path — dump hangs on Infinix home/feed.
+            // Current X variants expose the account avatar at the upper-right or
+            // open the account drawer with a gentle rightward gesture. Keep the
+            // legacy leading drawer as an OEM fallback.
             if (xLooksLikeOtherProfile()) {
                 safePressBack()
                 waitNavigation()
             }
-            val openedDrawer = clickXAccountDrawer()
+            val openedDrawer = clickXTopRightAccountAvatar() ||
+                swipeXAccountDrawerOpen() ||
+                clickXAccountDrawer()
             val openedProfile = when {
                 openedDrawer && clickXProfileMenuEntry() -> true
                 clickXBottomProfileTab() -> true
@@ -3630,6 +3697,73 @@ class UiAutomatorDriver(
             device.hasObject(By.desc("Beranda")) ||
             device.hasObject(By.descContains("Home timeline")) ||
             device.hasObject(By.res(X_PACKAGE, "channels"))
+    }
+
+    private fun clickXTopRightAccountAvatar(): Boolean {
+        val minimumLeft = (device.displayWidth * 3) / 4
+        val maximumTop = (device.displayHeight / 5).coerceAtLeast(280)
+        val avatarFragments = listOf(
+            "profile image",
+            "profile picture",
+            "your profile",
+            "account avatar",
+            "account menu",
+            "foto profil",
+            "gambar profil",
+            "profil anda",
+            "avatar akun",
+            "menu akun",
+        )
+        fun avatarControl(node: AccessibilityNodeInfo, bounds: Rect): Boolean {
+            if (
+                bounds.left < minimumLeft ||
+                bounds.top > maximumTop ||
+                bounds.width() !in 40..240 ||
+                bounds.height() !in 40..240
+            ) {
+                return false
+            }
+            return accessibilityLabels(node).any { observed ->
+                avatarFragments.any(observed::contains)
+            }
+        }
+        for (allowActionClick in listOf(true, false)) {
+            if (
+                performAccessibilityClick(
+                    X_PACKAGE,
+                    allowActionClick = allowActionClick,
+                    predicate = ::avatarControl,
+                )
+            ) {
+                waitNavigation()
+                SystemClock.sleep(X_DRAWER_SETTLE_MS)
+                if (hasXProfileMenuEntry() || xDrawerLooksOpen()) {
+                    Log.i(LOG_TAG, "event=x_drawer_open via=top_right_avatar")
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private fun swipeXAccountDrawerOpen(): Boolean {
+        if (!isForeground(X_PACKAGE) || hasXOwnProfileProof()) return false
+        val bounds = activeWindowBounds()
+        if (bounds.width() <= 0 || bounds.height() <= 0) return false
+        val y = bounds.top + (bounds.height() * 34) / 100
+        val opened = safeSwipe(
+            bounds.left + (bounds.width() * 3) / 100,
+            y,
+            bounds.left + (bounds.width() * 68) / 100,
+            y,
+            X_DRAWER_SWIPE_STEPS,
+        )
+        if (!opened) return false
+        waitNavigation()
+        SystemClock.sleep(X_DRAWER_SETTLE_MS)
+        val verified = hasXProfileMenuEntry() || xDrawerLooksOpen()
+        Log.i(LOG_TAG, "event=x_drawer_open via=right_swipe verified=$verified")
+        return verified
     }
 
     private fun clickXAccountDrawer(): Boolean {
@@ -3890,15 +4024,78 @@ class UiAutomatorDriver(
         return xProfileTabsVisible()
     }
 
+    private fun ensureXProfileControlVisible(labels: List<String>): Boolean {
+        if (xProfileControlVisible(labels)) return true
+        if (X_PACKAGE !in verifiedOwnAccountPackages || xOwnAccountMarker == null) return false
+        repeat(MAX_X_RETURN_TO_TABS_SWIPES) {
+            if (navigationExpired() || !swipeBackward()) return false
+            waitNavigation()
+            if (xProfileControlVisible(labels)) return true
+        }
+        return xProfileControlVisible(labels)
+    }
+
     private fun xProfileTabBandBottom(): Int = (device.displayHeight * 4) / 5
 
     private fun xProfileTabsVisible(): Boolean {
         val maximumTop = xProfileTabBandBottom()
-        val postsVisible = boundedLabelCandidates(X_POSTS_LABELS, 0, maximumTop).isNotEmpty() ||
-            accessibilityHasBoundedLabel(X_PACKAGE, X_POSTS_LABELS, 0, maximumTop)
-        val repliesVisible = boundedLabelCandidates(X_REPLIES_LABELS, 0, maximumTop).isNotEmpty() ||
-            accessibilityHasBoundedLabel(X_PACKAGE, X_REPLIES_LABELS, 0, maximumTop)
-        return postsVisible && repliesVisible
+        return xProfileControlVisible(X_POSTS_LABELS, maximumTop) ||
+            xProfileControlVisible(X_REPLIES_LABELS, maximumTop)
+    }
+
+    private fun xProfileControlVisible(
+        labels: List<String>,
+        maximumTop: Int = xProfileTabBandBottom(),
+    ): Boolean = boundedLabelCandidates(labels, 0, maximumTop).isNotEmpty() ||
+        accessibilityHasBoundedLabel(X_PACKAGE, labels, 0, maximumTop)
+
+    private fun clickXRepliesControlAdjacentToPosts(): Boolean {
+        val posts = boundedLabelCandidates(X_POSTS_LABELS, 0, xProfileTabBandBottom())
+            .minByOrNull { value -> safeBounds(value)?.top ?: Int.MAX_VALUE }
+            ?: return false
+        val postsBounds = safeBounds(posts) ?: return false
+        val verticalTolerance = (device.displayHeight / 25).coerceAtLeast(48)
+        val candidates = safeUi(emptyList<Pair<UiObject2, Rect>>()) {
+            device.findObjects(By.clickable(true)).mapNotNull { value ->
+                val bounds = safeBounds(value) ?: return@mapNotNull null
+                val label = sequenceOf(value.text, value.contentDescription)
+                    .filterNotNull()
+                    .joinToString(" ")
+                    .lowercase(Locale.ROOT)
+                val sameControlRow = bounds.centerY() in
+                    (postsBounds.centerY() - verticalTolerance)..
+                    (postsBounds.centerY() + verticalTolerance)
+                val safeGeometry = bounds.centerX() > postsBounds.right + X_ADJACENT_CONTROL_GAP_PX &&
+                    bounds.left < device.displayWidth &&
+                    bounds.width() in 32..(device.displayWidth / 3).coerceAtLeast(32) &&
+                    bounds.height() in 32..220
+                val secondaryControl = X_SECONDARY_TAB_LABELS.any { secondary ->
+                    label.contains(secondary.lowercase(Locale.ROOT))
+                }
+                if (sameControlRow && safeGeometry && !secondaryControl) {
+                    value to bounds
+                } else {
+                    null
+                }
+            }
+        }.sortedBy { (_, bounds) -> bounds.centerX() - postsBounds.centerX() }
+        val (target, bounds) = candidates.firstOrNull() ?: return false
+        val clicked = safeClick(target) ||
+            a11yServiceTap(bounds.centerX(), bounds.centerY())
+        if (!clicked) return false
+        waitNavigation()
+        SystemClock.sleep(X_SCROLL_IDLE_MS)
+        if (xHighlightsMenuVisible()) {
+            safePressBack()
+            waitNavigation()
+            Log.w(LOG_TAG, "event=x_replies_control_rejected reason=highlights_menu")
+            return false
+        }
+        Log.i(
+            LOG_TAG,
+            "event=x_replies_control_clicked via=adjacent_icon x=${bounds.centerX()} y=${bounds.centerY()}",
+        )
+        return true
     }
 
     private fun clickXProfileTab(labels: List<String>): Boolean {
@@ -4259,39 +4456,24 @@ class UiAutomatorDriver(
                     return true
                 }
             }
-            var opened = clickFacebookProfileTab() ||
-                clickDescriptionContains(FACEBOOK_PROFILE_TAB_DESC) ||
-                clickExactDescription(FACEBOOK_PROFILE_TAB_DESC) ||
-                clickTopNavigation(FACEBOOK_PROFILE_TAB_DESC) ||
-                clickBottomNavigation(FACEBOOK_PROFILE_TAB_DESC) ||
-                clickFacebookLabeledControl(FACEBOOK_OWN_PROFILE_LABELS) ||
-                clickExactText(FACEBOOK_OWN_PROFILE_LABELS) ||
-                clickExactDescription(FACEBOOK_OWN_PROFILE_LABELS)
+            var opened = openFacebookProfileFromMenu()
+            if (!hasFacebookOwnProfileProof()) {
+                opened = clickFacebookProfileTab() ||
+                    clickDescriptionContains(FACEBOOK_PROFILE_TAB_DESC) ||
+                    clickExactDescription(FACEBOOK_PROFILE_TAB_DESC) ||
+                    clickTopNavigation(FACEBOOK_PROFILE_TAB_DESC) ||
+                    clickBottomNavigation(FACEBOOK_PROFILE_TAB_DESC) ||
+                    clickFacebookLabeledControl(FACEBOOK_OWN_PROFILE_LABELS) ||
+                    clickDescriptionContains(FACEBOOK_OWN_PROFILE_LABELS) ||
+                    clickExactText(FACEBOOK_OWN_PROFILE_LABELS) ||
+                    clickExactDescription(FACEBOOK_OWN_PROFILE_LABELS) ||
+                    opened
+            }
             if (!hasFacebookOwnProfileProof()) {
                 opened = clickFacebookLabeledControl(
                     FACEBOOK_OWN_PROFILE_LABELS,
                     allowActionClick = false,
                 ) || opened
-            }
-            if (!hasFacebookOwnProfileProof()) {
-                val menuOpened = clickFacebookLabeledControl(FACEBOOK_MENU_LABELS) ||
-                    clickExactDescription(FACEBOOK_MENU_LABELS) ||
-                    clickFacebookLabeledControl(
-                        FACEBOOK_MENU_LABELS,
-                        allowActionClick = false,
-                    )
-                if (menuOpened) {
-                    waitNavigation()
-                    SystemClock.sleep(350)
-                    opened = clickFacebookLabeledControl(FACEBOOK_OWN_PROFILE_LABELS) ||
-                        clickExactTextWithScroll(FACEBOOK_OWN_PROFILE_LABELS, MENU_SCROLL_LIMIT) ||
-                        clickExactDescription(FACEBOOK_OWN_PROFILE_LABELS) ||
-                        clickFacebookLabeledControl(
-                            FACEBOOK_OWN_PROFILE_LABELS,
-                            allowActionClick = false,
-                        ) ||
-                        opened
-                }
             }
             if (!hasFacebookOwnProfileProof()) {
                 opened = clickExactDescription(listOf("Go to profile")) || opened
@@ -4336,6 +4518,59 @@ class UiAutomatorDriver(
         return fail("facebook_profile_not_verified")
     }
 
+    private fun openFacebookProfileFromMenu(): Boolean {
+        if (hasFacebookOwnProfileProof()) return true
+        val primaryMenuClick = clickFacebookLabeledControl(FACEBOOK_MENU_LABELS) ||
+            clickExactDescription(FACEBOOK_MENU_LABELS)
+        if (primaryMenuClick) {
+            waitNavigation()
+            SystemClock.sleep(FB_GATE_SETTLE_MS)
+        }
+        var serviceMenuClick = false
+        if (!facebookMenuSurfaceVisible()) {
+            serviceMenuClick = clickFacebookLabeledControl(
+                FACEBOOK_MENU_LABELS,
+                allowActionClick = false,
+            )
+            if (serviceMenuClick) {
+                waitNavigation()
+                SystemClock.sleep(FB_GATE_SETTLE_MS)
+            }
+        }
+        if (!facebookMenuSurfaceVisible()) {
+            return false
+        }
+        val openedProfile = clickFacebookLabeledControl(FACEBOOK_OWN_PROFILE_LABELS) ||
+            clickDescriptionContains(FACEBOOK_OWN_PROFILE_LABELS) ||
+            clickExactTextWithScroll(FACEBOOK_OWN_PROFILE_LABELS, MENU_SCROLL_LIMIT) ||
+            clickExactDescription(FACEBOOK_OWN_PROFILE_LABELS) ||
+            clickFacebookLabeledControl(
+                FACEBOOK_OWN_PROFILE_LABELS,
+                allowActionClick = false,
+            )
+        if (!openedProfile && isForeground(FACEBOOK_PACKAGE)) {
+            safePressBack()
+            waitNavigation()
+        }
+        return openedProfile
+    }
+
+    private fun facebookMenuSurfaceVisible(): Boolean =
+        isForeground(FACEBOOK_PACKAGE) &&
+            (
+                hasExactLabel(FACEBOOK_OWN_PROFILE_LABELS) ||
+                    hasExactLabel(FACEBOOK_MENU_SURFACE_LABELS) ||
+                    facebookMenuHeadingVisible()
+                )
+
+    private fun facebookMenuHeadingVisible(): Boolean = safeUi(false) {
+        val maximumTop = device.displayHeight / 3
+        device.findObjects(By.text("Menu")).any { value ->
+            val bounds = safeBounds(value) ?: return@any false
+            bounds.top <= maximumTop && !value.isClickable
+        }
+    }
+
     /** Facebook localizes the navigation description as e.g. "Profil, Tab 6 dari 6". */
     private fun clickFacebookProfileTab(): Boolean {
         val expected = FACEBOOK_PROFILE_TAB_DESC.map { value ->
@@ -4364,15 +4599,14 @@ class UiAutomatorDriver(
         // Refresh marker from the live profile header before TEXT_ONLY row matching.
         // FB Compose puts the display name on ViewGroup, not TextView.
         refreshFacebookAccountMarker(forceShell = true)
-        // Prefer All filter; posts also appear while scrolling the profile feed.
-        clickDescriptionContains(FACEBOOK_ALL_FILTER_DESC) ||
-            clickExactText(FACEBOOK_ALL_FILTER_LABELS)
-        waitNavigation()
-        SystemClock.sleep(350)
+        if (!ensureFacebookAllPostsSurface()) {
+            return fail("facebook_all_posts_missing")
+        }
         fbFeedActive = true
         if (fbOwnAccountMarker == null) {
             // Header may have been scrolled away — infer author from own posts list.
             for (attempt in 0 until 6) {
+                if (navigationExpired()) break
                 val inferred = inferFbMarkerFromOwnPostsSurface()
                 if (inferred != null) {
                     fbOwnAccountMarker = inferred
@@ -4396,6 +4630,7 @@ class UiAutomatorDriver(
         // Initial viewport is header + "People you may know" — engine aborts the whole
         // scope if the first capture stores nothing, so pre-scroll until own posts appear.
         for (attempt in 0 until 8) {
+            if (navigationExpired()) break
             val rows = fbPostsRowsFromUiDevice(marker).ifEmpty {
                 fbPostsRowsFromShellDump(marker)
             }
@@ -4418,6 +4653,44 @@ class UiAutomatorDriver(
         return true
     }
 
+    private fun ensureFacebookAllPostsSurface(): Boolean {
+        repeat(FACEBOOK_ALL_POSTS_SEEK_ATTEMPTS) { attempt ->
+            if (navigationExpired()) return false
+            if (hasFacebookAllFilter()) {
+                val selected = facebookAllPostsFilterSelected()
+                if (
+                    selected ||
+                    clickDescriptionContains(FACEBOOK_ALL_FILTER_DESC) ||
+                    clickExactDescription(FACEBOOK_ALL_FILTER_LABELS) ||
+                    clickExactText(FACEBOOK_ALL_FILTER_LABELS)
+                ) {
+                    waitNavigation()
+                    SystemClock.sleep(FB_GATE_SETTLE_MS)
+                }
+                if (hasFacebookAllFilter()) {
+                    Log.i(
+                        LOG_TAG,
+                        "event=facebook_all_posts_ready attempt=$attempt selected=$selected",
+                    )
+                    return true
+                }
+            }
+            invalidateShellDumpCache()
+            if (!swipeFacebookFeed()) return false
+            SystemClock.sleep(FB_GATE_SETTLE_MS)
+        }
+        return hasFacebookAllFilter()
+    }
+
+    private fun facebookAllPostsFilterSelected(): Boolean = safeUi(false) {
+        val labels = FACEBOOK_ALL_FILTER_LABELS + FACEBOOK_ALL_FILTER_DESC
+        labels.any { label ->
+            device.findObjects(By.text(label)).any { value -> value.isSelected } ||
+                device.findObjects(By.desc(label)).any { value -> value.isSelected } ||
+                device.findObjects(By.descContains(label)).any { value -> value.isSelected }
+        }
+    }
+
     private fun openFacebookStoryArchive(): Boolean {
         if (!clickExactLabel(listOf("Archive", "Arsip"))) {
             if (!openFacebookMoreProfileSettings()) return false
@@ -4434,24 +4707,37 @@ class UiAutomatorDriver(
         if (!openFacebookMoreProfileSettings()) {
             return fail("facebook_comments_menu_missing")
         }
-        val openedActivityHub =
+        val openedActivityLog =
             clickExactTextWithScroll(FACEBOOK_ACTIVITY_LOG_LABELS, MENU_SCROLL_LIMIT) ||
                 clickFacebookLabeledControl(FACEBOOK_ACTIVITY_LOG_LABELS) ||
-                clickFacebookLabeledControl(FACEBOOK_ACTIVITY_LOG_LABELS, allowActionClick = false) ||
-                clickExactTextWithScroll(FACEBOOK_YOUR_ACTIVITY_LABELS, MENU_SCROLL_LIMIT) ||
-                clickFacebookLabeledControl(FACEBOOK_YOUR_ACTIVITY_LABELS) ||
-                clickFacebookLabeledControl(FACEBOOK_YOUR_ACTIVITY_LABELS, allowActionClick = false)
-        if (!openedActivityHub) {
-            return fail("facebook_activity_log_missing")
+                clickFacebookLabeledControl(FACEBOOK_ACTIVITY_LOG_LABELS, allowActionClick = false)
+        if (!openedActivityLog) {
+            return fail("facebook_activity_log_entry_missing")
         }
         waitNavigation()
-        SystemClock.sleep(400)
-        clickFacebookLabeledControl(FACEBOOK_YOUR_ACTIVITY_LABELS) ||
-            clickDescriptionContains(FACEBOOK_YOUR_ACTIVITY_DESC) ||
-            clickExactText(FACEBOOK_YOUR_ACTIVITY_LABELS) ||
-            clickFacebookLabeledControl(FACEBOOK_YOUR_ACTIVITY_LABELS, allowActionClick = false)
-        waitNavigation()
-        SystemClock.sleep(350)
+        SystemClock.sleep(FB_GATE_SETTLE_MS)
+        if (!waitForFacebookActivityLogLanding()) {
+            return fail("facebook_activity_log_not_ready")
+        }
+        if (!hasExactLabel(FACEBOOK_COMMENTS_REACTIONS_LABELS)) {
+            val openedYourActivity =
+                clickFacebookLabeledControl(FACEBOOK_YOUR_ACTIVITY_LABELS) ||
+                    clickDescriptionContains(FACEBOOK_YOUR_ACTIVITY_DESC) ||
+                    clickExactText(FACEBOOK_YOUR_ACTIVITY_LABELS) ||
+                    clickFacebookLabeledControl(
+                        FACEBOOK_YOUR_ACTIVITY_LABELS,
+                        allowActionClick = false,
+                    ) ||
+                    clickExactTextWithScroll(FACEBOOK_YOUR_ACTIVITY_LABELS, MENU_SCROLL_LIMIT)
+            if (!openedYourActivity) {
+                return fail("facebook_your_activity_missing")
+            }
+            waitNavigation()
+            SystemClock.sleep(FB_GATE_SETTLE_MS)
+        }
+        if (!waitForFacebookGate { hasExactLabel(FACEBOOK_COMMENTS_REACTIONS_LABELS) }) {
+            return fail("facebook_comments_reactions_missing")
+        }
         val openedCommentsHub =
             clickFacebookLabeledControl(FACEBOOK_COMMENTS_REACTIONS_LABELS) ||
                 clickDescriptionContains(FACEBOOK_COMMENTS_REACTIONS_DESC) ||
@@ -4461,10 +4747,11 @@ class UiAutomatorDriver(
                     allowActionClick = false,
                 ) ||
                 clickExactTextWithScroll(FACEBOOK_COMMENTS_REACTIONS_LABELS, MENU_SCROLL_LIMIT)
-        if (openedCommentsHub) {
-            waitNavigation()
-            SystemClock.sleep(350)
+        if (!openedCommentsHub) {
+            return fail("facebook_comments_reactions_missing")
         }
+        waitNavigation()
+        SystemClock.sleep(FB_GATE_SETTLE_MS)
         if (openFacebookActivitySection(FACEBOOK_COMMENTS_LABELS)) {
             fbActivityPhase = FacebookActivityPhase.COMMENTS
         } else {
@@ -4489,6 +4776,24 @@ class UiAutomatorDriver(
             fbCurrentViewportSignatures[SocialScope.OWN_COMMENTS] = signature
         }
         return true
+    }
+
+    private fun waitForFacebookActivityLogLanding(): Boolean = waitForFacebookGate {
+        hasLabelContaining(FACEBOOK_ACTIVITY_LOG_WELCOME_LABELS) ||
+            hasExactLabel(FACEBOOK_YOUR_ACTIVITY_LABELS) ||
+            (
+                hasExactLabel(FACEBOOK_ACTIVITY_LOG_LABELS) &&
+                    hasExactLabel(FACEBOOK_COMMENTS_REACTIONS_LABELS)
+                )
+    }
+
+    private fun waitForFacebookGate(condition: () -> Boolean): Boolean {
+        repeat(FACEBOOK_GATE_WAIT_ATTEMPTS) {
+            if (condition()) return true
+            if (navigationExpired()) return false
+            SystemClock.sleep(FACEBOOK_GATE_POLL_MS)
+        }
+        return condition()
     }
 
     private fun openFacebookActivitySection(labels: List<String>): Boolean {
@@ -4548,42 +4853,80 @@ class UiAutomatorDriver(
     }
 
     private fun openFacebookMoreProfileSettings(): Boolean {
-        if (!hasFacebookOwnProfileProof() && !openFacebookOwnProfile()) return false
-        advanceFacebookProfilePastOnboarding()
-        if (facebookSettingsSheetVisible()) return true
-        if (
+        if (!restoreFacebookProfileHeaderForActivity()) return false
+        if (facebookProfileOptionsSheetVisible()) return true
+        val primaryOpened =
             clickFacebookLabeledControl(FACEBOOK_MORE_PROFILE_SETTINGS_LABELS) ||
             clickExactDescription(FACEBOOK_MORE_PROFILE_SETTINGS_LABELS) ||
             clickExactText(FACEBOOK_MORE_PROFILE_SETTINGS_LABELS)
-        ) {
+        if (primaryOpened) {
             waitNavigation()
-            SystemClock.sleep(350)
-            if (facebookSettingsSheetVisible()) return true
+            SystemClock.sleep(FB_GATE_SETTLE_MS)
+            if (waitForFacebookGate(::facebookProfileOptionsSheetVisible)) return true
         }
-        if (
+        if (!facebookProfileHeaderActionsVisible()) return false
+        val serviceOpened =
             clickFacebookLabeledControl(
                 FACEBOOK_MORE_PROFILE_SETTINGS_LABELS,
                 allowActionClick = false,
             )
-        ) {
+        if (serviceOpened) {
             waitNavigation()
-            SystemClock.sleep(350)
-            if (facebookSettingsSheetVisible()) return true
+            SystemClock.sleep(FB_GATE_SETTLE_MS)
+            if (waitForFacebookGate(::facebookProfileOptionsSheetVisible)) return true
         }
-        // Generic More is last: it also matches post overflow on some locales.
-        if (clickExactLabel(FACEBOOK_MORE_LABELS) || clickFacebookLabeledControl(FACEBOOK_MORE_LABELS)) {
-            waitNavigation()
-            SystemClock.sleep(350)
-            if (facebookSettingsSheetVisible()) return true
+        if (!facebookProfileHeaderActionsVisible() || !clickFacebookHeaderMoreByGeometry()) {
+            return false
         }
-        return facebookSettingsSheetVisible()
+        waitNavigation()
+        SystemClock.sleep(FB_GATE_SETTLE_MS)
+        return waitForFacebookGate(::facebookProfileOptionsSheetVisible)
     }
 
-    private fun facebookSettingsSheetVisible(): Boolean =
+    private fun restoreFacebookProfileHeaderForActivity(): Boolean {
+        if (!hasFacebookOwnProfileProof() && !openFacebookOwnProfile()) return false
+        advanceFacebookProfilePastOnboarding()
+        repeat(FACEBOOK_PROFILE_HEADER_RESTORE_SWIPES + 1) { attempt ->
+            if (facebookProfileHeaderActionsVisible()) {
+                Log.i(LOG_TAG, "event=facebook_profile_header_ready attempt=$attempt")
+                return true
+            }
+            if (attempt >= FACEBOOK_PROFILE_HEADER_RESTORE_SWIPES || navigationExpired()) {
+                return false
+            }
+            if (!swipeBackward()) return false
+            waitNavigation()
+            SystemClock.sleep(FB_GATE_SETTLE_MS)
+        }
+        return false
+    }
+
+    private fun facebookProfileHeaderActionsVisible(): Boolean =
+        hasFacebookOwnProfileProof() &&
+            hasExactLabel(FACEBOOK_MORE_PROFILE_SETTINGS_LABELS) &&
+            hasExactLabel(FACEBOOK_PROFILE_SEARCH_LABELS)
+
+    private fun clickFacebookHeaderMoreByGeometry(): Boolean {
+        val minimumLeft = (device.displayWidth * 3) / 5
+        val maximumTop = device.displayHeight / 3
+        val expected = (FACEBOOK_MORE_PROFILE_SETTINGS_LABELS + FACEBOOK_MORE_LABELS)
+            .map { label -> label.lowercase(Locale.ROOT) }
+        return performAccessibilityClick(FACEBOOK_PACKAGE) { node, bounds ->
+            bounds.left >= minimumLeft &&
+                bounds.top <= maximumTop &&
+                bounds.width() in 32..220 &&
+                bounds.height() in 32..220 &&
+                accessibilityLabels(node).any { observed ->
+                    expected.any { label ->
+                        observed == label || observed.startsWith("$label,")
+                    }
+                }
+        }
+    }
+
+    private fun facebookProfileOptionsSheetVisible(): Boolean =
         hasExactLabel(FACEBOOK_ACTIVITY_LOG_LABELS) ||
-            hasExactLabel(FACEBOOK_YOUR_ACTIVITY_LABELS) ||
-            hasExactLabel(FACEBOOK_MORE_PROFILE_SETTINGS_LABELS) ||
-            hasExactLabel(listOf("Settings", "Pengaturan", "Setelan", "Profile settings", "Pengaturan profil"))
+            hasExactLabel(FACEBOOK_PROFILE_OPTIONS_SHEET_LABELS)
 
     private fun clickDescriptionContains(labels: List<String>): Boolean =
         clickFirst(labels.map { By.descContains(it) })
@@ -4638,30 +4981,6 @@ class UiAutomatorDriver(
                 }
                 SocialScope.OWN_COMMENTS -> fbCommentsRowsFromUiDevice(marker)
                 else -> emptyList()
-            }
-        }
-        if (rows.isEmpty() && scope == SocialScope.OWN_POSTS) {
-            // Fallback: treat joined a11y text as one owned viewport if marker present.
-            val joined = CommunicationPolicy.joinedText(
-                visibleNodes.flatMap { node -> listOf(node.text, node.contentDescription) },
-                BuildConfig.MAX_SMS_TEXT_LENGTH,
-            )
-            if (
-                joined != null &&
-                joined.contains(marker, ignoreCase = true) &&
-                hasMeaningfulFbText(joined, marker)
-            ) {
-                rows = listOf(
-                    FbTimelineRow(
-                        nodes = visibleNodes.take(BuildConfig.MAX_UI_NODES),
-                        normalizedText = joined,
-                        contentHash = CommunicationPolicy.contentHash(
-                            FACEBOOK_PACKAGE,
-                            scope.wireName,
-                            joined,
-                        ),
-                    ),
-                )
             }
         }
         if (rows.isEmpty()) {
@@ -5101,6 +5420,7 @@ class UiAutomatorDriver(
 
     private fun isFacebookPostNoise(value: String): Boolean {
         val lower = value.lowercase(Locale.ROOT)
+        if (SocialUiTextPolicy.isFacebookSuggestionText(value)) return true
         if (lower in FB_POST_NOISE) return true
         if (FB_POST_NOISE_FRAGMENTS.any { fragment -> lower.contains(fragment) }) return true
         if (FB_SHARED_WITH_PATTERN.containsMatchIn(value)) return true
@@ -5918,14 +6238,17 @@ class UiAutomatorDriver(
         if (X_EMPTY_TIMELINE_LABELS.any { label -> value.contains(label, ignoreCase = true) }) {
             return false
         }
+        val normalizedMarker = marker.lowercase(Locale.ROOT)
         return value.lineSequence()
             .map { line -> line.trim() }
             .filter(String::isNotEmpty)
             .any { line ->
-                val normalized = line.lowercase()
-                normalized != marker.lowercase() &&
-                    normalized != "@${marker.lowercase()}" &&
-                    normalized !in X_TIMELINE_NOISE
+                val normalized = line.lowercase(Locale.ROOT)
+                normalized != normalizedMarker &&
+                    normalized != "@$normalizedMarker" &&
+                    normalized !in X_TIMELINE_NOISE &&
+                    normalized !in X_PROFILE_CHROME_NOISE &&
+                    !SocialUiTextPolicy.isXProfileMetadataLine(line)
             }
     }
 
@@ -5950,9 +6273,6 @@ class UiAutomatorDriver(
             if (root?.packageName?.toString() == X_PACKAGE) {
                 val nodes = snapshotVisibleNodes(root)
                 rows = xOwnedTimelineRows(nodes, marker, scope)
-                if (rows.isEmpty()) {
-                    buildXTimelineRow(nodes, marker, scope)?.let { row -> rows = listOf(row) }
-                }
             }
         }
         if (rows.isEmpty()) {
@@ -5988,7 +6308,7 @@ class UiAutomatorDriver(
     }
 
     private fun xRepliesSurfaceReady(): Boolean {
-        if (!xProfileTabsVisible() && !hasExactLabel(X_REPLIES_LABELS)) return false
+        if (!xRepliesControlActivated && !xTabLooksSelected(X_REPLIES_LABELS)) return false
         if (xTabLooksSelected(X_POSTS_LABELS) && !xTabLooksSelected(X_REPLIES_LABELS)) {
             return false
         }
@@ -6222,6 +6542,7 @@ class UiAutomatorDriver(
             },
             "siksik-ui-bound",
         )
+        worker.isDaemon = true
         worker.start()
         try {
             worker.join(UI_DEVICE_BOUND_MS)
@@ -6234,6 +6555,37 @@ class UiAutomatorDriver(
         }
         @Suppress("UNCHECKED_CAST")
         return (holder[0] as T?) ?: fallback
+    }
+
+    private fun executeShellCommandBounded(
+        command: String,
+        timeoutMs: Long,
+        event: String,
+    ): String? {
+        val holder = arrayOfNulls<String>(1)
+        val worker = Thread(
+            {
+                try {
+                    holder[0] = device.executeShellCommand(command)
+                } catch (error: Throwable) {
+                    Log.w(LOG_TAG, "event=$event stage=failed type=${error.javaClass.simpleName}")
+                }
+            },
+            "siksik-shell-$event",
+        )
+        worker.isDaemon = true
+        worker.start()
+        try {
+            worker.join(timeoutMs)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return null
+        }
+        if (worker.isAlive) {
+            Log.w(LOG_TAG, "event=$event stage=timeout timeout_ms=$timeoutMs")
+            return null
+        }
+        return holder[0]
     }
 
     private fun shellTap(x: Int, y: Int): Boolean = try {
@@ -6784,13 +7136,14 @@ class UiAutomatorDriver(
         )
         worker.isDaemon = true
         worker.start()
+        val joinMs = minOf(shellDumpJoinMs(), navigationRemainingMs().coerceAtLeast(1L))
         try {
-            worker.join(SHELL_DUMP_JOIN_MS)
+            worker.join(joinMs)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }
         if (worker.isAlive) {
-            Log.w(LOG_TAG, "event=shell_dump_timeout join_ms=$SHELL_DUMP_JOIN_MS")
+            Log.w(LOG_TAG, "event=shell_dump_timeout join_ms=$joinMs")
             shellDumpDisabledUntilMs = now + SHELL_DUMP_COOLDOWN_MS
             cachedShellDump = ""
             cachedShellDumpAtMs = now
@@ -6804,6 +7157,11 @@ class UiAutomatorDriver(
         cachedShellDump = xml
         cachedShellDumpAtMs = SystemClock.elapsedRealtime()
         return xml
+    }
+
+    private fun shellDumpJoinMs(): Long = when (foregroundPackageName()) {
+        X_PACKAGE, FACEBOOK_PACKAGE -> TEXT_ONLY_SHELL_DUMP_JOIN_MS
+        else -> SHELL_DUMP_JOIN_MS
     }
 
     private fun buildAccessibilityHierarchyDump(): String {
@@ -7201,6 +7559,7 @@ class UiAutomatorDriver(
 
     private fun clickExactTextWithScroll(labels: List<String>, maxScrolls: Int): Boolean {
         repeat(maxScrolls + 1) { attempt ->
+            if (navigationExpired()) return false
             if (clickExactLabel(labels)) return true
             // Always use a generic swipe for menus — never the scope-specific advance.
             if (attempt < maxScrolls && !swipeForward()) return false
@@ -7211,6 +7570,7 @@ class UiAutomatorDriver(
 
     private fun clickExactTextWithScrollBackward(labels: List<String>, maxScrolls: Int): Boolean {
         repeat(maxScrolls + 1) { attempt ->
+            if (navigationExpired()) return false
             if (clickExactLabel(labels)) return true
             if (attempt < maxScrolls && !swipeBackward()) return false
             waitNavigation()
@@ -7452,14 +7812,21 @@ class UiAutomatorDriver(
         return false
     }
 
+    private fun activeNavigationDeadlineAtMs(): Long =
+        minOf(navigationDeadlineAtMs, navigationGateDeadlineAtMs)
+
     private fun navigationExpired(): Boolean =
-        System.currentTimeMillis() >= navigationDeadlineAtMs
+        System.currentTimeMillis() >= activeNavigationDeadlineAtMs()
+
+    private fun scopeNavigationGateExpired(): Boolean =
+        navigationGateDeadlineAtMs != Long.MAX_VALUE &&
+            System.currentTimeMillis() >= navigationGateDeadlineAtMs
 
     private fun navigationRemainingMs(): Long =
-        (navigationDeadlineAtMs - System.currentTimeMillis()).coerceAtLeast(0L)
+        (activeNavigationDeadlineAtMs() - System.currentTimeMillis()).coerceAtLeast(0L)
 
     private fun waitBudgetMs(requested: Long): Long {
-        val remaining = navigationDeadlineAtMs - System.currentTimeMillis()
+        val remaining = activeNavigationDeadlineAtMs() - System.currentTimeMillis()
         if (remaining <= 0L) return 0L
         return minOf(requested, remaining)
     }
@@ -7513,6 +7880,7 @@ class UiAutomatorDriver(
             instagramArchiveListActive = false
         }
         xTimelineActive = false
+        xRepliesControlActivated = false
         fbFeedActive = false
         fbActivityPhase = FacebookActivityPhase.NONE
         fbCommentsBoundaryReached = false
@@ -7571,6 +7939,11 @@ class UiAutomatorDriver(
         private const val HEADER_WAIT_ATTEMPTS = 4
         private const val MIN_INSTAGRAM_OWN_PROFILE_SIGNALS = 3
         private const val MENU_SCROLL_LIMIT = 4
+        private const val FACEBOOK_ALL_POSTS_SEEK_ATTEMPTS = 8
+        private const val FACEBOOK_PROFILE_HEADER_RESTORE_SWIPES = 8
+        private const val FACEBOOK_GATE_WAIT_ATTEMPTS = 10
+        private const val FACEBOOK_GATE_POLL_MS = 250L
+        private const val FB_GATE_SETTLE_MS = 300L
         private const val NAVIGATION_WAIT_MS = 1_500L
         private const val LABEL_WAIT_MS = 600L
         private const val NAVIGATION_IDLE_MS = 350L
@@ -7599,10 +7972,22 @@ class UiAutomatorDriver(
         private const val UI_DEVICE_SELECTOR_WAIT_MS = 500L
         private const val X_SCROLL_IDLE_MS = 250L
         private const val X_SIGNATURE_IDLE_MS = 200L
+        private const val X_DRAWER_SETTLE_MS = 300L
+        private const val X_DRAWER_SWIPE_STEPS = 36
+        private const val X_ADJACENT_CONTROL_GAP_PX = 8
+        private const val X_SCOPE_NAVIGATION_BUDGET_MS = 40_000L
+        private const val X_PROFILE_NAVIGATION_BUDGET_MS = 45_000L
+        private const val X_POSTS_NAVIGATION_BUDGET_MS = 35_000L
+        private const val X_REPLIES_NAVIGATION_BUDGET_MS = 40_000L
+        private const val FACEBOOK_SCOPE_NAVIGATION_BUDGET_MS = 60_000L
+        private const val FACEBOOK_PROFILE_NAVIGATION_BUDGET_MS = 90_000L
+        private const val FACEBOOK_POSTS_NAVIGATION_BUDGET_MS = 60_000L
+        private const val FACEBOOK_COMMENTS_NAVIGATION_BUDGET_MS = 55_000L
         private const val DEFAULT_NAVIGATION_BUDGET_MS = 120_000L
         private const val RECOVERY_NAVIGATION_BUDGET_MS = 120_000L
         private const val SCOPE_RECOVERY_SETTLE_MS = 400L
         private const val SCOPE_RECOVERY_VISIBLE_TIMEOUT_MS = 6_000L
+        private const val SCOPE_RECOVERY_SHELL_TIMEOUT_MS = 2_500L
         private const val INSTAGRAM_OCR_CACHE_MS = 1_200L
         private const val INSTAGRAM_OCR_TIMEOUT_MS = 2_000L
         private const val MAX_INSTAGRAM_OCR_HITS = 192
@@ -7620,6 +8005,7 @@ class UiAutomatorDriver(
         private const val ARCHIVE_PAGE_SWIPE_STEPS = 36
         private const val SHELL_DUMP_CACHE_MS = 1_200L
         private const val SHELL_DUMP_JOIN_MS = 11_000L
+        private const val TEXT_ONLY_SHELL_DUMP_JOIN_MS = 3_000L
         private const val SHELL_DUMP_COOLDOWN_MS = 20_000L
         private const val SHELL_DUMP_POLL_MIN_MS = 2_500L
         private const val VISIBLE_GRID_POSTS = 3
@@ -8041,19 +8427,33 @@ class UiAutomatorDriver(
         )
         private val X_PROFILE_CHROME_NOISE = setOf(
             "navigate up",
+            "kembali",
             "profile image",
+            "gambar profil",
+            "foto profil",
             "search button",
+            "tombol cari",
             "more options",
+            "opsi lainnya",
             "edit profile",
+            "edit profil",
             "get verified",
+            "dapatkan verifikasi",
             "posts",
+            "postingan",
             "replies",
+            "balasan",
             "highlights",
+            "sorotan",
             "articles",
+            "artikel",
             "media",
             "likes",
+            "suka",
             "following",
+            "mengikuti",
             "followers",
+            "pengikut",
         )
         private val X_EMPTY_TIMELINE_LABELS = listOf(
             "No posts yet",
@@ -8078,6 +8478,16 @@ class UiAutomatorDriver(
             "tweet_detail",
         )
         private val FACEBOOK_MENU_LABELS = listOf("Menu")
+        private val FACEBOOK_MENU_SURFACE_LABELS = listOf(
+            "Settings & privacy",
+            "Pengaturan & privasi",
+            "Settings and privacy",
+            "Pengaturan dan privasi",
+            "All shortcuts",
+            "Semua pintasan",
+            "Help & support",
+            "Bantuan & dukungan",
+        )
         private val FACEBOOK_OWN_PROFILE_LABELS = listOf(
             "See your profile",
             "Lihat profil Anda",
@@ -8090,7 +8500,12 @@ class UiAutomatorDriver(
             "Profile tab",
             "Tab Profil",
         )
-        private val FACEBOOK_MORE_LABELS = listOf("More", "Lainnya")
+        private val FACEBOOK_MORE_LABELS = listOf(
+            "More",
+            "Lainnya",
+            "More options",
+            "Opsi lainnya",
+        )
         private val FACEBOOK_MORE_PROFILE_SETTINGS_LABELS = listOf(
             "More profile settings",
             "Pengaturan profil lainnya",
@@ -8118,10 +8533,13 @@ class UiAutomatorDriver(
             "Activity Log",
             "Log aktivitas",
             "Log Aktivitas",
-            "Your activity",
-            "Aktivitas Anda",
-            "Facebook activity",
-            "Aktivitas Facebook",
+        )
+        private val FACEBOOK_ACTIVITY_LOG_WELCOME_LABELS = listOf(
+            "Welcome to Activity Log",
+            "Welcome to your Activity Log",
+            "Selamat datang di Log Aktivitas",
+            "Selamat datang di log aktivitas",
+            "Selamat datang di Log aktivitas",
         )
         private val FACEBOOK_YOUR_ACTIVITY_LABELS = listOf(
             "Your Facebook activity",
@@ -8149,9 +8567,25 @@ class UiAutomatorDriver(
             "Comments and responses",
             "Komentar dan tanggapan",
         )
+        private val FACEBOOK_PROFILE_SEARCH_LABELS = listOf("Search", "Cari")
+        private val FACEBOOK_PROFILE_OPTIONS_SHEET_LABELS = listOf(
+            "View as",
+            "Lihat sebagai",
+            "Archive",
+            "Arsip",
+            "Manage posts",
+            "Kelola postingan",
+            "Review posts and tags",
+            "Tinjau postingan dan tanda",
+        )
         private const val FACEBOOK_ACTIVITY_ITEM_RESOURCE = "activity-log-item"
         private val FACEBOOK_ALL_FILTER_LABELS = listOf("All", "Semua")
-        private val FACEBOOK_ALL_FILTER_DESC = listOf("All, 1 of", "Semua, 1 dari")
+        private val FACEBOOK_ALL_FILTER_DESC = listOf(
+            "All, 1 of",
+            "Semua, 1 dari",
+            "All posts",
+            "Semua postingan",
+        )
         private val FACEBOOK_METRIC_HINTS = listOf(
             "friends",
             "teman",
@@ -8230,18 +8664,26 @@ class UiAutomatorDriver(
             "menu",
             "friends",
             "following",
+            "mengikuti",
             "posts",
+            "postingan",
             "photos",
+            "foto",
             "reels",
             "all",
+            "semua",
             "people you may know",
+            "orang yang mungkin anda kenal",
             "personal details",
+            "detail pribadi",
             "what's on your mind?",
             "what’s on your mind?",
             "create note: what’s on your mind?",
             "create note: what's on your mind?",
             "remove friend suggestion",
+            "hapus saran teman",
             "remove",
+            "hapus",
             "profile picture",
             "foto profil",
             "add",

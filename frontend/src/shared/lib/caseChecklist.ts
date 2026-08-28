@@ -1,4 +1,3 @@
-import { ACTIVE } from "@/shared/constants";
 import type { SessionSummary } from "@/shared/api/client";
 
 export type CaseCheck = {

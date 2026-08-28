@@ -24,14 +24,24 @@ export interface SocialReportAccount {
 }
 
 export interface WhatsAppReportMessage {
+  account_id?: string | null;
+  account_slot?: number | null;
   conversation_id: string;
   conversation_name: string;
   conversation_address?: string | null;
   conversation_type: "chat" | "group";
   message_id: string;
-  direction: "IN" | "OUT";
+  direction: "IN" | "OUT" | "UNKNOWN";
+  direction_evidence: string;
+  actor_kind: "self" | "peer" | "group_participant" | "system" | "unknown";
+  peer_jid?: string | null;
+  participant_jid?: string | null;
   sender?: string | null;
   message_type: string;
+  message_type_code?: number | null;
+  system_action_type?: number | null;
+  system_kind?: string | null;
+  analysis_eligible: boolean;
   timestamp?: string | null;
   preview_text: string;
   quoted_text?: string | null;

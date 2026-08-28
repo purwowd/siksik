@@ -87,7 +87,7 @@ export function CaseFlowBar({ session, role = "operator", pending = 0 }: Props) 
               )}
               {live && socialCrawlActive && attemptState && (
                 <span className="ent-meta-chip mono" title="State percobaan crawl sosial">
-                  {attempt && attempt > 0 ? `#${attempt} · ` : ""}
+                  {attempt && attempt > 0 ? `#${attempt}/4 · ` : ""}
                   {attemptState}
                 </span>
               )}

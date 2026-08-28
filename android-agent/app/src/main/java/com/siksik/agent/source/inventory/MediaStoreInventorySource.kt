@@ -410,6 +410,7 @@ class MediaStoreInventorySource(
         }
         if (Build.VERSION.SDK_INT >= 30) {
             add(MediaStore.MediaColumns.IS_FAVORITE)
+            add(MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
         }
         if (adapter != SourceAdapter.MEDIA_IMAGE && adapter != SourceAdapter.DOCUMENT_SHARED) {
             add(MediaStore.Video.VideoColumns.DURATION)
@@ -434,6 +435,11 @@ class MediaStoreInventorySource(
         val dateModified = cursor.long(MediaStore.MediaColumns.DATE_MODIFIED)?.secondsToMillis()
         val exif = if (kind == InventorySourceKind.MEDIA_IMAGE) exifReader.read(uri, mime) else null
         val directoryHint = directoryHint(cursor)
+        val ownerPackageName = if (Build.VERSION.SDK_INT >= 30) {
+            cursor.text(MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
+        } else {
+            null
+        }
         val flaggedFavorite = if (Build.VERSION.SDK_INT >= 30) {
             cursor.int(MediaStore.MediaColumns.IS_FAVORITE)?.let { it != 0 } ?: false
         } else {
@@ -462,11 +468,7 @@ class MediaStoreInventorySource(
             ),
             sourceKind = kind,
             sourceAdapter = adapter,
-            sourceApp = when (adapter) {
-                SourceAdapter.PUBLIC_WHATSAPP -> "whatsapp"
-                SourceAdapter.PUBLIC_TELEGRAM -> "telegram"
-                else -> null
-            },
+            sourceApp = InventoryPolicy.sourceApp(adapter, ownerPackageName),
             sourceLocator = InventoryPolicy.sourceLocator(adapter, identityHash),
             displayName = name,
             mimeType = mime,

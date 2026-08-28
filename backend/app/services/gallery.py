@@ -272,6 +272,7 @@ class GalleryRecord:
     social_scope: str | None
     presentation: str
     chat: dict[str, Any] | None
+    whatsapp_media: dict[str, Any] | None
     artifact_role: str | None
     recovery_state: str
 
@@ -751,11 +752,17 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
             str(display_name),
         )
     elif is_whatsapp_message:
-        display_name = (
+        conversation_name = (
             _optional_text(meta.get("conversation_name"))
             or _optional_text(meta.get("display_name"))
             or "Percakapan WhatsApp"
         )
+        if conversation_name == "(You)" and not bool(
+            meta.get("conversation_is_self_chat")
+        ):
+            conversation_id = _optional_text(meta.get("conversation_id")) or ""
+            conversation_name = f"Kontak WhatsApp · {conversation_id[-8:]}"
+        display_name = conversation_name
     source_locator = _optional_text(_row_get(row, "source_locator"))
     preview_path = path
     preview_mime = mime
@@ -789,9 +796,33 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
     if is_whatsapp_message:
         conversation_id = _optional_text(meta.get("conversation_id"))
         message_id = _optional_text(meta.get("message_id"))
-        direction = _optional_text(meta.get("message_direction"))
-        if conversation_id and message_id and direction in {"IN", "OUT"}:
+        direction = _optional_text(meta.get("message_direction")) or "UNKNOWN"
+        if conversation_id and message_id and direction in {"IN", "OUT", "UNKNOWN"}:
+            message_type = _optional_text(meta.get("message_type")) or "text"
+            actor_kind = _optional_text(meta.get("message_actor_kind"))
+            if actor_kind not in {
+                "self",
+                "peer",
+                "group_participant",
+                "system",
+                "unknown",
+            }:
+                actor_kind = (
+                    "system"
+                    if message_type == "system"
+                    else "self"
+                    if direction == "OUT"
+                    else "peer"
+                    if direction == "IN"
+                    else "unknown"
+                )
             chat = {
+                "account_id": _optional_text(meta.get("account_id")),
+                "account_slot": (
+                    _nonnegative_int(meta.get("account_slot"))
+                    if meta.get("account_slot") is not None
+                    else None
+                ),
                 "conversation_id": conversation_id,
                 "conversation_name": str(display_name),
                 "conversation_address": _optional_text(
@@ -800,18 +831,79 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
                 "conversation_type": (
                     "group" if meta.get("conversation_type") == "group" else "chat"
                 ),
+                "peer_jid": _optional_text(
+                    meta.get("message_peer_jid")
+                    or meta.get("conversation_peer_jid")
+                ),
+                "participant_jid": _optional_text(
+                    meta.get("message_participant_jid")
+                ),
                 "message_id": message_id,
                 "direction": direction,
+                "direction_evidence": _optional_text(
+                    meta.get("message_direction_evidence")
+                )
+                or ("message.from_me" if direction in {"IN", "OUT"} else "unavailable"),
+                "actor_kind": actor_kind,
                 "sender": _optional_text(meta.get("message_sender")),
-                "message_type": _optional_text(meta.get("message_type")) or "text",
+                "message_type": message_type,
+                "message_type_code": (
+                    _nonnegative_int(meta.get("message_type_code"))
+                    if meta.get("message_type_code") is not None
+                    else None
+                ),
                 "text": _optional_text(meta.get("message_text")) or preview_text,
                 "timestamp": _optional_text(meta.get("message_timestamp")),
+                "system_action_type": (
+                    _nonnegative_int(meta.get("message_system_action_type"))
+                    if meta.get("message_system_action_type") is not None
+                    else None
+                ),
+                "system_kind": _optional_text(meta.get("message_system_kind")),
+                "analysis_eligible": bool(
+                    meta.get(
+                        "message_analysis_eligible",
+                        message_type not in {"system", "call"},
+                    )
+                ),
+                "media_filename": _optional_text(meta.get("media_filename")),
+                "media_size": _nonnegative_int(meta.get("media_size")),
+                "media_mime_type": _optional_text(meta.get("media_mime_type")),
                 "quoted_text": _compact_preview(meta.get("quoted_text")),
                 "starred": bool(meta.get("message_starred")),
                 "revoked": bool(meta.get("message_revoked")),
                 "forwarded": _nonnegative_int(meta.get("message_forward_score")) > 0,
                 "edited_at": _optional_text(meta.get("message_edited_at")),
             }
+    whatsapp_media = None
+    whatsapp_message_id = _optional_text(meta.get("whatsapp_message_id"))
+    whatsapp_conversation_id = _optional_text(meta.get("whatsapp_conversation_id"))
+    if not is_whatsapp_message and whatsapp_message_id and whatsapp_conversation_id:
+        media_direction = _optional_text(meta.get("whatsapp_direction")) or "UNKNOWN"
+        if media_direction not in {"IN", "OUT", "UNKNOWN"}:
+            media_direction = "UNKNOWN"
+        media_actor = _optional_text(meta.get("whatsapp_actor_kind")) or "unknown"
+        if media_actor not in {
+            "self",
+            "peer",
+            "group_participant",
+            "system",
+            "unknown",
+        }:
+            media_actor = "unknown"
+        whatsapp_media = {
+            "conversation_id": whatsapp_conversation_id,
+            "conversation_name": _optional_text(
+                meta.get("whatsapp_conversation_name")
+            ),
+            "message_id": whatsapp_message_id,
+            "direction": media_direction,
+            "actor_kind": media_actor,
+            "sender": _optional_text(meta.get("whatsapp_sender")),
+            "timestamp": _optional_text(meta.get("whatsapp_message_timestamp")),
+            "match_basis": _optional_text(meta.get("whatsapp_media_match_basis"))
+            or "filename+size",
+        }
     return GalleryRecord(
         file_id=identity,
         path=path,
@@ -838,6 +930,7 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         social_scope=social_scope,
         presentation=presentation,
         chat=chat,
+        whatsapp_media=whatsapp_media,
         artifact_role=role or None,
         recovery_state=recovery_state,
     )
@@ -861,6 +954,7 @@ def _to_item(session_id: str, record: GalleryRecord) -> GalleryItemOut:
         social_scope=record.social_scope,
         presentation=record.presentation,
         chat=record.chat,
+        whatsapp_media=record.whatsapp_media,
         artifact_role=record.artifact_role,
         recovery_state=record.recovery_state,
         captured_at=(
@@ -1059,6 +1153,41 @@ async def _load_records(session_id: str, mode: AcquisitionMode) -> list[GalleryR
         for file_id, (_meta, _crawl, linked_record_id, _artifact) in file_links.items()
         if file_id in flagged_ids and linked_record_id
     }
+    whatsapp_messages_by_file: dict[str, set[str]] = {}
+    for row in rows:
+        file_id = str(row["id"])
+        meta = file_links[file_id][0]
+        message_ids = {
+            value
+            for value in (_optional_text(meta.get("whatsapp_message_id")),)
+            if value
+        }
+        if meta.get("artifact_role") == "canonical_message":
+            canonical_message_id = _optional_text(meta.get("message_id"))
+            if canonical_message_id:
+                message_ids.add(canonical_message_id)
+        links = meta.get("whatsapp_media_links")
+        if isinstance(links, list):
+            message_ids.update(
+                value
+                for link in links[:16]
+                if isinstance(link, dict)
+                if (value := _optional_text(link.get("message_id"))) is not None
+            )
+        if message_ids:
+            whatsapp_messages_by_file[file_id] = message_ids
+    flagged_whatsapp_message_ids = {
+        message_id
+        for file_id, message_ids in whatsapp_messages_by_file.items()
+        if file_id in flagged_ids
+        for message_id in message_ids
+    }
+    whatsapp_badges_by_message: dict[str, set[str]] = {}
+    for file_id, message_ids in whatsapp_messages_by_file.items():
+        for message_id in message_ids:
+            whatsapp_badges_by_message.setdefault(message_id, set()).update(
+                badges_by_file.get(file_id, set())
+            )
     records: list[GalleryRecord] = []
     for row in rows:
         meta, crawl, linked_record_id, artifact = file_links[str(row["id"])]
@@ -1092,6 +1221,7 @@ async def _load_records(session_id: str, mode: AcquisitionMode) -> list[GalleryR
             resolved_role = "email_metadata"
         visual_preview = next(iter(visual_artifacts.get(linked_record_id or "", [])), None)
         enriched = dict(row)
+        whatsapp_message_ids = whatsapp_messages_by_file.get(str(row["id"]), set())
         enriched["meta_json"] = json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
         enriched.update(
             {
@@ -1113,13 +1243,19 @@ async def _load_records(session_id: str, mode: AcquisitionMode) -> list[GalleryR
                 "is_flagged": (
                     str(row["id"]) in flagged_ids
                     or linked_record_id in flagged_record_ids
+                    or bool(whatsapp_message_ids & flagged_whatsapp_message_ids)
                 ),
-                # Category badges deliberately use the exact session/file
-                # finding join.  Existing linked-record flag propagation is
-                # left untouched, but a badge must not leak to a companion
-                # artifact that was not itself classified in this session.
+                # Crawl companions and WhatsApp media links are explicit
+                # semantic relationships. A media finding therefore marks its
+                # originating chat bubble while retaining the media file as
+                # the review/evidence target.
                 "finding_badges": sorted(
                     badges_by_file.get(str(row["id"]), set())
+                    | {
+                        badge
+                        for message_id in whatsapp_message_ids
+                        for badge in whatsapp_badges_by_message.get(message_id, set())
+                    }
                 ),
             }
         )
@@ -1230,17 +1366,57 @@ async def list_albums(session_id: str, mode: AcquisitionMode) -> list[GalleryAlb
     return albums
 
 
-def _paginate(items: list[GalleryItemOut], page: int, page_size: int) -> PaginatedGallery:
-    total = len(items)
-    pages = max(1, (total + page_size - 1) // page_size) if total else 1
+def _paginate_records(
+    session_id: str,
+    records: list[GalleryRecord],
+    page: int,
+    page_size: int,
+) -> PaginatedGallery:
+    units: list[list[GalleryRecord]] = []
+    rooms: dict[str, list[GalleryRecord]] = {}
+    has_chat = False
+    for record in records:
+        conversation_id = (
+            _optional_text(record.chat.get("conversation_id"))
+            if record.chat is not None
+            else _optional_text(record.whatsapp_media.get("conversation_id"))
+            if record.whatsapp_media is not None
+            else None
+        )
+        if not conversation_id:
+            units.append([record])
+            continue
+        has_chat = True
+        room = rooms.get(conversation_id)
+        if room is None:
+            room = []
+            rooms[conversation_id] = room
+            units.append(room)
+        room.append(record)
+
+    record_total = len(records)
+    pagination_total = len(units)
+    pages = (
+        max(1, (pagination_total + page_size - 1) // page_size)
+        if pagination_total
+        else 1
+    )
     page = min(max(1, page), pages)
     start = (page - 1) * page_size
+    selected_units = units[start : start + page_size]
+    items = [
+        _to_item(session_id, record)
+        for unit in selected_units
+        for record in unit
+    ]
     return PaginatedGallery(
-        items=items[start : start + page_size],
+        items=items,
         page=page,
         page_size=page_size,
-        total=total,
+        total=record_total,
         pages=pages,
+        pagination_total=pagination_total,
+        pagination_unit="item_or_conversation" if has_chat else "item",
     )
 
 
@@ -1264,8 +1440,9 @@ async def list_items(
     else:
         selected = [item for item in records if item.album_key == key]
         selected.sort(key=lambda item: item.recency_ts, reverse=True)
-    return _paginate(
-        [_to_item(session_id, item) for item in selected],
+    return _paginate_records(
+        session_id,
+        selected,
         page,
         page_size,
     )

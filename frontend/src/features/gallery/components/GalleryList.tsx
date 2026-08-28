@@ -20,6 +20,7 @@ const SOCIAL_LABELS: Record<string, string> = {
   "com.instagram.android": "Instagram",
   "com.twitter.android": "X",
   "com.facebook.katana": "Facebook",
+  "com.whatsapp": "WhatsApp",
 };
 
 const SCOPE_LABELS: Record<string, string> = {
@@ -88,6 +89,16 @@ function ItemMeta({ item }: { item: GalleryItem }) {
         </div>
       ) : null}
       {item.favorite ? <div className="finding-meta">Favorit perangkat</div> : null}
+      {item.whatsapp_media ? (
+        <div className="finding-meta">
+          Media WhatsApp · {item.whatsapp_media.conversation_name || "Percakapan"} ·{" "}
+          {item.whatsapp_media.direction === "OUT"
+            ? "keluar"
+            : item.whatsapp_media.direction === "IN"
+              ? "masuk"
+              : "arah tidak diketahui"}
+        </div>
+      ) : null}
       {item.flagged ? <div className="finding-meta gallery-flagged">Terflag</div> : null}
       {(item.finding_badges ?? []).length > 0 ? (
         <div className="gallery-finding-badges" aria-label="Kategori temuan">
@@ -198,9 +209,14 @@ export function GalleryList({ sessionId, data, onPage }: Props) {
       <Pagination
         page={data.page}
         pages={data.pages}
-        total={data.total}
+        total={data.pagination_total ?? data.total}
         page_size={data.page_size}
         onPage={onPage}
+        label={
+          data.pagination_unit === "item_or_conversation"
+            ? "Item/percakapan"
+            : "Baris"
+        }
       />
     </>
   );

@@ -205,8 +205,40 @@ async def read_preview(path: Path, mime: str, max_bytes: int = 200_000) -> str:
                 return ""
             if not isinstance(payload, dict) or payload.get("kind") != "whatsapp_message":
                 return ""
-            normalized = payload.get("normalized_text")
-            return normalized[:max_bytes] if isinstance(normalized, str) else ""
+            message = payload.get("message")
+            message = message if isinstance(message, dict) else {}
+            if (
+                message.get("type") in {"system", "call"}
+                or message.get("actor_kind") == "system"
+                or payload.get("analysis_eligible") is False
+            ):
+                return ""
+            analysis_text = payload.get("analysis_text")
+            if isinstance(analysis_text, str):
+                return analysis_text[:max_bytes]
+
+            # Legacy schema compatibility: rebuild only the current message's
+            # authored content. Room identity, sender, and quoted text are
+            # deliberately excluded from risk classification.
+            media = message.get("media")
+            media = media if isinstance(media, dict) else {}
+            location = message.get("location")
+            location = location if isinstance(location, dict) else {}
+            values = (
+                message.get("text"),
+                media.get("caption"),
+                location.get("place_name"),
+                location.get("address"),
+                location.get("url"),
+                payload.get("preview_text"),
+            )
+            return "\n".join(
+                dict.fromkeys(
+                    value.strip()
+                    for value in values
+                    if isinstance(value, str) and value.strip()
+                )
+            )[:max_bytes]
 
         return await asyncio.to_thread(_read_whatsapp_message)
     if ext in {".imgmeta", ".vidmeta"}:
@@ -694,6 +726,10 @@ async def _analyze_session_body(
                 return []
             canonical_text = str(meta.get("canonical_normalized_text") or "").strip()
             cache_key = str(row["sha256"] or "")
+            if cache_key and str(row["mime"] or "") == WHATSAPP_MESSAGE_MIME:
+                cache_key = hashlib.sha256(
+                    f"{cache_key}\0whatsapp-analysis-v2".encode("utf-8")
+                ).hexdigest()
             if (
                 cache_key
                 and meta.get("crawl_artifact_role") == "source_binary"

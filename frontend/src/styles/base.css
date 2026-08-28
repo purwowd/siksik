@@ -2496,6 +2496,10 @@ a.btn {
   justify-self: end;
 }
 
+.wa-message-unknown {
+  justify-self: center;
+}
+
 .wa-message-bubble {
   position: relative;
   min-width: min(250px, 100%);
@@ -2516,6 +2520,52 @@ a.btn {
   background:
     linear-gradient(90deg, color-mix(in srgb, var(--danger) 15%, transparent), transparent 38%),
     color-mix(in srgb, var(--danger) 7%, var(--panel-2));
+  box-shadow: inset 3px 0 0 var(--danger);
+}
+
+.wa-system-event {
+  display: flex;
+  justify-content: center;
+  justify-self: stretch;
+  padding: 3px 0;
+}
+
+.wa-system-event-card {
+  width: min(92%, 760px);
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--muted) 36%, var(--line));
+  border-radius: 999px;
+  color: color-mix(in srgb, var(--text) 76%, var(--muted));
+  background: color-mix(in srgb, var(--panel-2) 88%, transparent);
+  text-align: center;
+}
+
+.wa-system-event-card p {
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.wa-system-event-card time,
+.wa-system-event-head {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+}
+
+.wa-system-event-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.wa-system-event.wa-message-finding .wa-system-event-card {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, var(--panel-2));
   box-shadow: inset 3px 0 0 var(--danger);
 }
 

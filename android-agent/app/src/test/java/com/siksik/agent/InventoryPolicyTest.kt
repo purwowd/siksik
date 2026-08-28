@@ -119,6 +119,29 @@ class InventoryPolicyTest {
             ),
         )
         assertEquals(
+            "com.whatsapp",
+            InventoryPolicy.sourceApp(
+                SourceAdapter.MEDIA_IMAGE,
+                "com.whatsapp",
+            ),
+        )
+        assertEquals(
+            "org.telegram.messenger",
+            InventoryPolicy.sourceApp(
+                SourceAdapter.PUBLIC_TELEGRAM,
+                null,
+            ),
+        )
+        assertNull(
+            InventoryPolicy.sourceApp(SourceAdapter.MEDIA_IMAGE, null),
+        )
+        assertNull(
+            InventoryPolicy.sourceApp(
+                SourceAdapter.MEDIA_IMAGE,
+                "com.example.unrelated",
+            ),
+        )
+        assertEquals(
             4,
             InventoryPolicy.publicSqlPatterns(SourceAdapter.PUBLIC_WHATSAPP).size,
         )

@@ -148,6 +148,39 @@ def _build_whatsapp_database(path: Path) -> None:
             message_row_id INTEGER PRIMARY KEY,
             edited_timestamp INTEGER
         );
+        CREATE TABLE message_system (
+            message_row_id INTEGER PRIMARY KEY,
+            action_type INTEGER
+        );
+        CREATE TABLE message_system_initial_privacy_provider (
+            message_row_id INTEGER PRIMARY KEY,
+            privacy_provider INTEGER,
+            biz_state_id INTEGER,
+            is_deprecated INTEGER
+        );
+        CREATE TABLE message_ui_elements (
+            _id INTEGER PRIMARY KEY,
+            message_row_id INTEGER,
+            element_type INTEGER,
+            element_content TEXT,
+            description TEXT,
+            template_id TEXT,
+            footer_text TEXT,
+            button_text TEXT,
+            message_type INTEGER
+        );
+        CREATE TABLE message_call_log (
+            message_row_id INTEGER PRIMARY KEY,
+            call_log_row_id INTEGER
+        );
+        CREATE TABLE call_log (
+            _id INTEGER PRIMARY KEY,
+            from_me INTEGER,
+            video_call INTEGER,
+            duration INTEGER,
+            call_result INTEGER,
+            call_type INTEGER
+        );
         CREATE TABLE group_participant_user (
             group_jid_row_id INTEGER,
             user_jid_row_id INTEGER
@@ -166,6 +199,8 @@ def _build_whatsapp_database(path: Path) -> None:
             (3, "628111111111", "s.whatsapp.net", "628111111111@s.whatsapp.net"),
             (4, "628222222222", "s.whatsapp.net", "628222222222@s.whatsapp.net"),
             (5, "628333333333", "s.whatsapp.net", "628333333333@s.whatsapp.net"),
+            (6, "self-lid", "lid_me", "self-lid@lid_me"),
+            (7, "628999999999", "status_me", "628999999999@status_me"),
         ],
     )
     connection.execute("INSERT INTO jid_map VALUES (1, 3)")
@@ -182,6 +217,9 @@ def _build_whatsapp_database(path: Path) -> None:
             (100, 1, 10, 1, "out-key", 0, 1_785_000_000_000, 0, "pesan keluar", 1),
             (200, 2, 20, 0, "group-key", 4, 1_786_000_000_000, 1, None, 0),
             (300, 3, 10, 0, "old-key", 3, 1_600_000_000_000, 0, "terlalu lama", 0),
+            (400, 4, 10, 1, "system-key", 0, 1_786_000_000_100, 7, None, 0),
+            (500, 5, 10, 0, "interactive-key", 3, 1_786_000_000_200, 55, None, 0),
+            (600, 6, 10, 0, "call-key", 3, 1_786_000_000_300, 90, None, 0),
         ],
     )
     connection.execute(
@@ -193,6 +231,27 @@ def _build_whatsapp_database(path: Path) -> None:
         (200, "pesan yang dikutip", 5),
     )
     connection.execute("INSERT INTO message_forwarded VALUES (?, ?)", (200, 2))
+    connection.execute("INSERT INTO message_system VALUES (?, ?)", (400, 67))
+    connection.execute(
+        "INSERT INTO message_system_initial_privacy_provider VALUES (?, ?, ?, ?)",
+        (400, 0, 10, 0),
+    )
+    connection.execute(
+        "INSERT INTO message_ui_elements VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            1,
+            500,
+            6,
+            json.dumps({"title": "Pilih layanan", "description": "Konfirmasi pesanan"}),
+            None,
+            "template-1",
+            None,
+            None,
+            None,
+        ),
+    )
+    connection.execute("INSERT INTO call_log VALUES (?, ?, ?, ?, ?, ?)", (1, 0, 0, 0, 2, 0))
+    connection.execute("INSERT INTO message_call_log VALUES (?, ?)", (600, 1))
     connection.execute(
         "INSERT INTO group_participant_user VALUES (?, ?)",
         (2, 4),
@@ -215,11 +274,11 @@ def test_database_parser_exports_canonical_chat_messages_defensively(
     ).export()
 
     assert summary.conversation_count == 2
-    assert summary.message_count == 2
+    assert summary.message_count == 5
     assert summary.skipped_messages == 0
     records = [json.loads(path.read_text()) for path in output.rglob("*.json")]
     assert {record["kind"] for record in records} == {"whatsapp_message"}
-    assert {record["message"]["direction"] for record in records} == {"IN", "OUT"}
+    assert {record["message"]["direction"] for record in records} == {"IN", "OUT", "UNKNOWN"}
     group = next(record for record in records if record["conversation"]["type"] == "group")
     assert group["conversation"]["name"] == "Tim Uji"
     assert group["message"]["type"] == "image"
@@ -228,6 +287,28 @@ def test_database_parser_exports_canonical_chat_messages_defensively(
     assert group["message"]["quote"]["text"] == "pesan yang dikutip"
     assert group["message"]["forward_score"] == 2
     assert "caption berisiko" in group["normalized_text"]
+    assert "pesan yang dikutip" not in group["analysis_text"]
+    direct = next(
+        record
+        for record in records
+        if record["conversation"]["type"] == "chat"
+        and record["message"]["type"] == "text"
+    )
+    assert direct["conversation"]["name"] == "+628111111111"
+    assert direct["conversation"]["is_self_chat"] is False
+    assert direct["account_id"]
+    system = next(record for record in records if record["message"]["type"] == "system")
+    assert system["message"]["direction"] == "UNKNOWN"
+    assert system["message"]["actor_kind"] == "system"
+    assert system["message"]["system_event"]["kind"] == "initial_privacy_provider"
+    assert system["analysis_text"] == ""
+    interactive = next(
+        record for record in records if record["message"]["type"] == "interactive"
+    )
+    assert "Pilih layanan" in interactive["analysis_text"]
+    call = next(record for record in records if record["message"]["type"] == "call")
+    assert call["message"]["call"]["kind"] == "voice"
+    assert call["analysis_text"] == ""
     assert all("wa_64digit" not in json.dumps(record) for record in records)
 
 
@@ -675,6 +756,14 @@ async def test_canonical_message_runs_analysis_gallery_and_report_pipeline(
             "forward_score": 1,
             "edited_at": None,
             "quote": {"sender": "+628133333333", "text": "pesan awal"},
+            "media": {
+                "filename": "evidence.jpg",
+                "file_size": 4,
+                "mime_type": "image/jpeg",
+                "caption": None,
+                "source_path": "/Media/evidence.jpg",
+                "duration": 0,
+            },
         },
     }
     target = (
@@ -685,25 +774,33 @@ async def test_canonical_message_runs_analysis_gallery_and_report_pipeline(
     )
     target.parent.mkdir(parents=True)
     target.write_text(json.dumps(canonical), encoding="utf-8")
+    media_target = staging / "media_image" / "evidence.jpg"
+    media_target.parent.mkdir(parents=True)
+    media_target.write_bytes(b"jpeg")
 
     async def on_progress(*_args, **_kwargs) -> None:
         return None
 
     indexed, _duration = await index_staging(session_id, staging, on_progress)
-    assert indexed == 1
+    assert indexed == 2
     rows = await db.fetchall(
         "SELECT * FROM files WHERE session_id = ?",
         (session_id,),
     )
-    assert len(rows) == 1
-    assert rows[0]["mime"] == WHATSAPP_MESSAGE_MIME
-    assert "_whatsapp" not in rows[0]["path"]
-    metadata = json.loads(rows[0]["meta_json"])
+    assert len(rows) == 2
+    canonical_row = next(row for row in rows if row["mime"] == WHATSAPP_MESSAGE_MIME)
+    media_row = next(row for row in rows if row["mime"] == "image/jpeg")
+    assert "_whatsapp" not in canonical_row["path"]
+    metadata = json.loads(canonical_row["meta_json"])
     assert metadata["conversation_id"] == "conversation-opaque-1"
     assert metadata["quoted_text"] == "pesan awal"
+    media_metadata = json.loads(media_row["meta_json"])
+    assert media_metadata["source_app"] == "com.whatsapp"
+    assert media_metadata["source_app_inferred"] is False
+    assert media_metadata["whatsapp_message_id"] == "message-opaque-1"
 
     preview = await read_preview(target, WHATSAPP_MESSAGE_MIME)
-    assert preview == canonical["normalized_text"]
+    assert preview == canonical["preview_text"]
     outcome = analyze_content_result(
         target,
         WHATSAPP_MESSAGE_MIME,
@@ -713,7 +810,7 @@ async def test_canonical_message_runs_analysis_gallery_and_report_pipeline(
     )
     assert any(finding["label"] == "Indikasi: rahasia" for finding in outcome.findings)
 
-    file_id = str(rows[0]["id"])
+    file_id = str(media_row["id"])
     await db.execute(
         """
         INSERT INTO findings (
@@ -725,8 +822,8 @@ async def test_canonical_message_runs_analysis_gallery_and_report_pipeline(
             "finding-whatsapp-1",
             session_id,
             file_id,
-            "whatsapp",
-            rows[0]["path"],
+            "media_image",
+            media_row["path"],
             "incitement",
             "Indikasi: rahasia",
             0.91,
@@ -744,14 +841,18 @@ async def test_canonical_message_runs_analysis_gallery_and_report_pipeline(
         1,
         50,
     )
-    assert gallery.total == 1
-    item = gallery.items[0]
+    assert gallery.total == 2
+    assert gallery.pagination_total == 1
+    item = next(entry for entry in gallery.items if entry.presentation == "chat")
+    linked_media = next(entry for entry in gallery.items if entry.whatsapp_media is not None)
     assert item.presentation == "chat"
     assert item.chat is not None
     assert item.chat.conversation_name == "Ruang Uji"
     assert item.chat.direction == "IN"
     assert item.flagged is True
     assert item.finding_badges
+    assert linked_media.whatsapp_media is not None
+    assert linked_media.whatsapp_media.conversation_id == "conversation-opaque-1"
 
     report = await build_session_report(session_id)
     assert report["whatsapp_data"]["total_messages"] == 1

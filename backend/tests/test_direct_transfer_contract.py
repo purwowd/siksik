@@ -96,7 +96,7 @@ def media_record() -> dict[str, object]:
         "crawl_id": CRAWL_ID,
         "siksik_session_id": SESSION_ID,
         "source_kind": "media_image",
-        "source_app": "whatsapp",
+        "source_app": "com.whatsapp",
         "source_locator": "media_store_image:opaque",
         "observed_at": TIMESTAMP,
         "source_created_at": TIMESTAMP,

@@ -1,16 +1,18 @@
 package com.siksik.agent.accessibility
 
 import android.accessibilityservice.AccessibilityService
-import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Gravity
+import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams
+import android.widget.TextView
+import com.siksik.agent.R
 
 internal class TextOnlyCrawlCover(
     private val service: AccessibilityService,
@@ -61,14 +63,17 @@ internal class TextOnlyCrawlCover(
             Log.w(LOG_TAG, "event=text_only_cover_show_failed reason=no_window_manager")
             return
         }
-        val cover = View(service).apply {
-            setBackgroundColor(Color.WHITE)
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
-            keepScreenOn = true
-            if (Build.VERSION.SDK_INT >= 29) {
-                isForceDarkAllowed = false
+        val cover = LayoutInflater.from(service)
+            .inflate(R.layout.activity_bootstrap, null, false)
+            .apply {
+                findViewById<TextView>(R.id.bootstrap_status)
+                    .setText(R.string.text_only_cover_status)
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                keepScreenOn = true
+                if (Build.VERSION.SDK_INT >= 29) {
+                    isForceDarkAllowed = false
+                }
             }
-        }
         val flags = LayoutParams.FLAG_NOT_FOCUSABLE or
             LayoutParams.FLAG_NOT_TOUCHABLE or
             LayoutParams.FLAG_NOT_TOUCH_MODAL or
