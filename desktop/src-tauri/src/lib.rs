@@ -1,6 +1,9 @@
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -157,50 +160,186 @@ fn render_html_to_pdf(html: &str, pdf_path: &Path) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
 
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
     let dir = std::env::temp_dir().join("satria-desktop-reports");
     std::fs::create_dir_all(&dir).map_err(|e| format!("temp dir: {e}"))?;
-    let html_path = dir.join(format!(
-        "print-{}.html",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    ));
+    let html_path = dir.join(format!("print-{stamp}.html"));
+    let profile_dir = dir.join(format!("chrome-profile-{stamp}"));
+    std::fs::create_dir_all(&profile_dir).map_err(|e| format!("profile dir: {e}"))?;
 
     let clean_html = html
         .replace("window.print()", "/* no auto print */")
         .replace("window.print ()", "/* no auto print */");
     std::fs::write(&html_path, clean_html.as_bytes()).map_err(|e| format!("tulis HTML: {e}"))?;
 
-    let file_url = path_to_file_url(&html_path)?;
-    let pdf_arg = format!("--print-to-pdf={}", pdf_path.display());
-    let output = Command::new(&chrome)
+    let pdf_arg = format!("--print-to-pdf={}", chrome_cli_path(&pdf_path));
+    let profile_arg = format!("--user-data-dir={}", chrome_cli_path(&profile_dir));
+    let mut last_err = String::new();
+
+    // Prefer loopback HTTP: Windows canonicalize() file:// URLs used to become
+    // file:///?/C:/... which Chromium "repairs" until ERR_TOO_MANY_REDIRECTS,
+    // then --print-to-pdf still writes that error page as a "successful" PDF.
+    let printed = match serve_html_while(&clean_html, |page_url| {
+        run_headless_print(&chrome, &pdf_arg, &profile_arg, page_url)
+    }) {
+        Ok(output) => Some(output),
+        Err(err) => {
+            last_err = err;
+            None
+        }
+    };
+
+    let ok = printed
+        .as_ref()
+        .is_some_and(|_| pdf_is_valid_report(&pdf_path));
+    if !ok {
+        let _ = std::fs::remove_file(&pdf_path);
+        let fallback_profile = dir.join(format!("chrome-profile-{stamp}-file"));
+        let _ = std::fs::create_dir_all(&fallback_profile);
+        let fallback_profile_arg =
+            format!("--user-data-dir={}", chrome_cli_path(&fallback_profile));
+        let file_url = path_to_file_url(&html_path)?;
+        match run_headless_print(&chrome, &pdf_arg, &fallback_profile_arg, &file_url) {
+            Ok(_) => {}
+            Err(err) => last_err = err,
+        }
+        let _ = std::fs::remove_dir_all(&fallback_profile);
+    }
+
+    let _ = std::fs::remove_file(&html_path);
+    let _ = std::fs::remove_dir_all(&profile_dir);
+
+    if !pdf_is_valid_report(&pdf_path) {
+        let _ = std::fs::remove_file(&pdf_path);
+        let stderr = printed
+            .as_ref()
+            .map(|out| String::from_utf8_lossy(&out.stderr).into_owned())
+            .unwrap_or(last_err);
+        return Err(format!(
+            "PDF gagal dibuat (halaman error browser, bukan laporan). {}",
+            stderr.chars().take(400).collect::<String>()
+        ));
+    }
+    Ok(())
+}
+
+fn run_headless_print(
+    chrome: &Path,
+    pdf_arg: &str,
+    profile_arg: &str,
+    source_url: &str,
+) -> Result<std::process::Output, String> {
+    Command::new(chrome)
         .args([
             "--headless=new",
             "--disable-gpu",
             "--no-first-run",
             "--no-default-browser-check",
             "--no-pdf-header-footer",
-            "--virtual-time-budget=10000",
-            &pdf_arg,
-            &file_url,
+            "--allow-file-access-from-files",
+            "--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable,HttpsFirstModeV2,TranslateUI",
+            "--virtual-time-budget=15000",
+            profile_arg,
+            pdf_arg,
+            source_url,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|e| format!("gagal menjalankan Chrome: {e}"))?;
+        .map_err(|e| format!("gagal menjalankan Chrome: {e}"))
+}
 
-    let _ = std::fs::remove_file(&html_path);
+fn serve_html_while<F, T>(html: &str, work: F) -> Result<T, String>
+where
+    F: FnOnce(&str) -> Result<T, String>,
+{
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| format!("bind print server: {e}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("print server nonblocking: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("print server addr: {e}"))?
+        .port();
+    let body = html.as_bytes().to_vec();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_flag = stop.clone();
+    let server = thread::spawn(move || {
+        let started = Instant::now();
+        while !stop_flag.load(Ordering::Relaxed) && started.elapsed() < Duration::from_secs(45) {
+            match listener.accept() {
+                Ok((mut stream, _)) => write_print_http_response(&mut stream, &body),
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}/report.html");
+    let result = work(&url);
+    stop.store(true, Ordering::Relaxed);
+    let _ = server.join();
+    result
+}
 
-    if !pdf_path.is_file() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "PDF gagal dibuat (exit {}). {}",
-            output.status.code().unwrap_or(-1),
-            err.chars().take(400).collect::<String>()
-        ));
+fn write_print_http_response(stream: &mut TcpStream, html: &[u8]) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let mut buf = [0u8; 4096];
+    let n = stream.read(&mut buf).unwrap_or(0);
+    if n == 0 || !buf[..n.min(4)].eq_ignore_ascii_case(b"GET ") {
+        return;
     }
-    Ok(())
+    let req = String::from_utf8_lossy(&buf[..n]);
+    let first = req.lines().next().unwrap_or("");
+    let wants_html = first.contains("/report.html") || first.starts_with("GET / HTTP/");
+    let (status, content_type, body): (&str, &str, &[u8]) = if wants_html {
+        ("200 OK", "text/html; charset=utf-8", html)
+    } else {
+        ("204 No Content", "text/plain", b"")
+    };
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    if !body.is_empty() {
+        let _ = stream.write_all(body);
+    }
+    let _ = stream.flush();
+}
+
+fn pdf_is_valid_report(pdf_path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(pdf_path) else {
+        return false;
+    };
+    if bytes.len() < 64 || !bytes.starts_with(b"%PDF") {
+        return false;
+    }
+    const ERROR_MARKERS: [&[u8]; 5] = [
+        b"ERR_TOO_MANY_REDIRECTS",
+        b"ERR_FILE_NOT_FOUND",
+        b"ERR_ACCESS_DENIED",
+        b"ERR_INVALID_URL",
+        b"This page isn't working",
+    ];
+    !ERROR_MARKERS.iter().any(|needle| contains_bytes(&bytes, needle))
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+fn chrome_cli_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn find_chromium_binary() -> Option<PathBuf> {
@@ -272,16 +411,30 @@ fn path_to_file_url(path: &Path) -> Result<String, String> {
         .map_err(|e| format!("canonicalize: {e}"))?;
     #[cfg(windows)]
     {
-        let s = abs.to_string_lossy().replace('\\', "/");
-        let trimmed = s.trim_start_matches('/');
-        return Ok(format!("file:///{trimmed}"));
+        return Ok(windows_canonical_to_file_url(&abs.to_string_lossy()));
     }
     #[cfg(not(windows))]
     {
-        // Escape spaces for Chrome file URL
         let encoded = abs.display().to_string().replace(' ', "%20");
         Ok(format!("file://{encoded}"))
     }
+}
+
+/// Chrome-safe file URL from a Windows canonical path.
+/// `Path::canonicalize` yields `\\?\C:\...`. Replacing `\` then stripping
+/// leading slashes produced `file:///?/C:/...`; Chromium then redirect-loops
+/// and `--print-to-pdf` saves the ERR_TOO_MANY_REDIRECTS page.
+#[cfg(any(windows, test))]
+fn windows_canonical_to_file_url(canonical: &str) -> String {
+    let mut s = canonical.replace('\\', "/");
+    if let Some(rest) = s.strip_prefix("//?/UNC/") {
+        return format!("file://{rest}");
+    }
+    if let Some(rest) = s.strip_prefix("//?/") {
+        s = rest.to_string();
+    }
+    let trimmed = s.trim_start_matches('/');
+    format!("file:///{trimmed}")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -364,4 +517,87 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{contains_bytes, pdf_is_valid_report, windows_canonical_to_file_url};
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::path::PathBuf;
+
+    #[test]
+    fn windows_extended_path_does_not_become_query_file_url() {
+        let canonical = r"\\?\C:\Users\Admin\AppData\Local\Temp\satria-desktop-reports\print-1.html";
+        let legacy = {
+            let s = canonical.replace('\\', "/");
+            let trimmed = s.trim_start_matches('/');
+            format!("file:///{trimmed}")
+        };
+        assert_eq!(
+            legacy,
+            "file:///?/C:/Users/Admin/AppData/Local/Temp/satria-desktop-reports/print-1.html"
+        );
+        assert_eq!(
+            windows_canonical_to_file_url(canonical),
+            "file:///C:/Users/Admin/AppData/Local/Temp/satria-desktop-reports/print-1.html"
+        );
+    }
+
+    #[test]
+    fn windows_plain_and_unc_paths_become_file_urls() {
+        assert_eq!(
+            windows_canonical_to_file_url(r"C:\Temp\report.html"),
+            "file:///C:/Temp/report.html"
+        );
+        assert_eq!(
+            windows_canonical_to_file_url(r"\\?\UNC\fileserver\share\a.html"),
+            "file://fileserver/share/a.html"
+        );
+    }
+
+    #[test]
+    fn rejects_chromium_error_page_pdf() {
+        let dir = std::env::temp_dir().join("satria-pdf-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("error.pdf");
+        std::fs::write(
+            &path,
+            b"%PDF-1.4\n1 0 obj\n<< /Title (This page isn't working) >>\nERR_TOO_MANY_REDIRECTS\nendobj\n",
+        )
+        .unwrap();
+        assert!(!pdf_is_valid_report(&path));
+        assert!(contains_bytes(
+            b"stream ERR_TOO_MANY_REDIRECTS end",
+            b"ERR_TOO_MANY_REDIRECTS"
+        ));
+        let missing = PathBuf::from("/tmp/satria-missing-report.pdf");
+        assert!(!pdf_is_valid_report(&missing));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn print_server_serves_html_and_ignores_favicon() {
+        let html = "<html><body>SATRIA laporan</body></html>";
+        super::serve_html_while(html, |url| {
+            let mut page = TcpStream::connect(url.trim_start_matches("http://").trim_end_matches("/report.html"))
+                .map_err(|e| e.to_string())?;
+            page.write_all(b"GET /report.html HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                .map_err(|e| e.to_string())?;
+            let mut body = String::new();
+            page.read_to_string(&mut body).map_err(|e| e.to_string())?;
+            assert!(body.contains("200 OK"), "{body}");
+            assert!(body.contains("SATRIA laporan"), "{body}");
+
+            let host = url.trim_start_matches("http://").trim_end_matches("/report.html");
+            let mut icon = TcpStream::connect(host).map_err(|e| e.to_string())?;
+            icon.write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                .map_err(|e| e.to_string())?;
+            let mut icon_body = String::new();
+            icon.read_to_string(&mut icon_body).map_err(|e| e.to_string())?;
+            assert!(icon_body.contains("204"), "{icon_body}");
+            Ok(())
+        })
+        .unwrap();
+    }
 }
