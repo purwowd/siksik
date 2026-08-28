@@ -31,8 +31,21 @@ def test_engine_fingerprint_tracks_qwen_config(monkeypatch: pytest.MonkeyPatch):
     assert first != second
     assert "v16" in first
     assert "qwen_decoder=generated-tokens-v1" in first
+    assert "qwen_input=max-edge-v1" in first
     assert "qwen_parser=assistant-answer-v1" in first
     assert "qwen_prompt=indonesian-content-json-v2" in first
+
+
+@pytest.mark.unit
+def test_engine_fingerprint_tracks_qwen_max_edge(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(config.settings, "gpu_qwen_max_edge_px", 1280)
+    first = hash_cache.engine_fingerprint()
+    monkeypatch.setattr(config.settings, "gpu_qwen_max_edge_px", 1600)
+    second = hash_cache.engine_fingerprint()
+
+    assert first != second
+    assert "qwen_px=1280" in first
+    assert "qwen_px=1600" in second
 
 
 @pytest.mark.unit

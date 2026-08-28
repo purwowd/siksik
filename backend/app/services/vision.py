@@ -384,6 +384,7 @@ def vision_status() -> dict:
     info["tuning"] = {
         "ocr_max_edge_px": cfg.ocr_max_edge_px,
         "ocr_sharpen": cfg.ocr_sharpen,
+        "gpu_qwen_max_edge_px": cfg.gpu_qwen_max_edge_px,
         "video_cap_quick": cfg.video_cap_quick,
         "video_cap_full": cfg.video_cap_full,
         "worker_concurrency": cfg.worker_concurrency,

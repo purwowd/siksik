@@ -40,6 +40,7 @@ def engine_fingerprint() -> str:
     from app.services.content_visual import CONTENT_VISUAL_REVISION
     from app.services.gpu_stack.reason_qwen import (
         QWEN_DECODER_REVISION,
+        QWEN_INPUT_REVISION,
         QWEN_PARSER_REVISION,
         QWEN_PROMPT_REVISION,
     )
@@ -90,6 +91,8 @@ def engine_fingerprint() -> str:
                 f"{_config_digest(settings.gpu_qwen_model)}:"
                 f"{_config_digest(settings.gpu_qwen_plugin)}"
             ),
+            f"qwen_px={settings.gpu_qwen_max_edge_px}",
+            f"qwen_input={QWEN_INPUT_REVISION}",
             f"qwen_decoder={QWEN_DECODER_REVISION}",
             f"qwen_parser={QWEN_PARSER_REVISION}",
             f"qwen_prompt={QWEN_PROMPT_REVISION}",

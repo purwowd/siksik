@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import tempfile
+import threading
 from pathlib import Path
 
 from app.core.config import settings
@@ -21,10 +24,13 @@ log = logging.getLogger(__name__)
 _model = None
 _processor = None
 _load_failed = False
+# One in-flight VL generate. 6GB labs OOM/swap when workers share the 3B weights.
+_INFER_LOCK = threading.Lock()
 
 # Revisions are part of the hash-cache fingerprint. Bump the relevant value
 # whenever generation, parsing, or policy-prompt semantics change.
 QWEN_DECODER_REVISION = "generated-tokens-v1"
+QWEN_INPUT_REVISION = "max-edge-v1"
 QWEN_PARSER_REVISION = "assistant-answer-v1"
 QWEN_PROMPT_REVISION = "indonesian-content-json-v2"
 
@@ -211,6 +217,7 @@ def status() -> dict:
         "available": available and (bool(plugin) or bool(settings.gpu_qwen_model)),
         "model": settings.gpu_qwen_model,
         "plugin": plugin,
+        "max_edge_px": settings.gpu_qwen_max_edge_px,
         "detail": detail,
     }
 
@@ -299,6 +306,45 @@ def _hits_from_text(text: str, *, layer: str, backend: str) -> list[ModerationHi
     ]
 
 
+def _prepare_qwen_image(image_path: Path) -> tuple[Path, Path | None]:
+    """Downscale the VL source. Camera JPEGs can exceed PIL's decompression cap."""
+    max_edge = int(settings.gpu_qwen_max_edge_px)
+    from PIL import Image, ImageOps
+
+    previous = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = None
+    try:
+        with Image.open(image_path) as src:
+            try:
+                src.draft("RGB", (max_edge, max_edge))
+            except Exception:
+                pass
+            image = ImageOps.exif_transpose(src)
+            image = image.convert("RGB")
+            width, height = image.size
+            if max_edge <= 0 or max(width, height) <= max_edge:
+                return image_path, None
+            image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+            fd, name = tempfile.mkstemp(suffix=".jpg", prefix="sadt_qwen_")
+            os.close(fd)
+            tmp = Path(name)
+            try:
+                image.save(tmp, "JPEG", quality=95)
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
+            log.info(
+                "Qwen image downscale %sx%s -> %sx%s",
+                width,
+                height,
+                image.size[0],
+                image.size[1],
+            )
+            return tmp, tmp
+    finally:
+        Image.MAX_IMAGE_PIXELS = previous
+
+
 def moderate_image(path: Path) -> list[ModerationHit]:
     if not settings.gpu_stack_enabled or not settings.gpu_qwen_enabled:
         return []
@@ -323,50 +369,65 @@ def moderate_image(path: Path) -> list[ModerationHit]:
     if plugin_hits is not None:
         return plugin_hits
 
-    model, processor = _try_load()
-    if not model or not processor:
-        return []
+    tmp: Path | None = None
     try:
-        from PIL import Image
-        import torch
+        with _INFER_LOCK:
+            model, processor = _try_load()
+            if not model or not processor:
+                return []
+            from PIL import Image
+            import torch
 
-        prompt = _moderation_prompt("gambar")
-        image = Image.open(path).convert("RGB")
+            prompt = _moderation_prompt("gambar")
+            capped_path, tmp = _prepare_qwen_image(path)
 
-        # Prefer Qwen VL chat helpers when installed
-        try:
-            from qwen_vl_utils import process_vision_info
+            # Prefer Qwen VL chat helpers when installed
+            try:
+                from qwen_vl_utils import process_vision_info
 
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": str(path)},
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ]
-            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            image_inputs, video_inputs = process_vision_info(messages)
-            inputs = processor(
-                text=[text],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
-            )
-        except Exception:
-            text = f"<image>\n{prompt}"
-            inputs = processor(text=[text], images=[image], return_tensors="pt")
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": str(capped_path)},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ]
+                text = processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                image_inputs, video_inputs = process_vision_info(messages)
+                inputs = processor(
+                    text=[text],
+                    images=image_inputs,
+                    videos=video_inputs,
+                    padding=True,
+                    return_tensors="pt",
+                )
+            except Exception:
+                with Image.open(capped_path) as image:
+                    image = image.convert("RGB")
+                    text = f"<image>\n{prompt}"
+                    inputs = processor(text=[text], images=[image], return_tensors="pt")
 
-        inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
-        with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=96)
-        answer = _decode_generated_answer(processor, out, inputs["input_ids"])
-        return _hits_from_text(answer, layer=Layer.L3.value, backend=_backend_name())
+            inputs = {
+                key: value.to(model.device) if hasattr(value, "to") else value
+                for key, value in inputs.items()
+            }
+            with torch.no_grad():
+                out = model.generate(**inputs, max_new_tokens=96)
+            answer = _decode_generated_answer(processor, out, inputs["input_ids"])
+            return _hits_from_text(answer, layer=Layer.L3.value, backend=_backend_name())
     except Exception as exc:
         log.warning("Qwen VL image failed: %s", exc)
         return []
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def moderate_text(text_value: str) -> list[ModerationHit]:
@@ -380,37 +441,38 @@ def moderate_text(text_value: str) -> list[ModerationHit]:
 
     if not should_adjudicate_text(value):
         return []
-    model, processor = _try_load()
-    if not model or not processor:
-        return []
     try:
-        import torch
+        with _INFER_LOCK:
+            model, processor = _try_load()
+            if not model or not processor:
+                return []
+            import torch
 
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"{_moderation_prompt('teks')}\n\n<KONTEN>\n{value}\n</KONTEN>",
-                    }
-                ],
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"{_moderation_prompt('teks')}\n\n<KONTEN>\n{value}\n</KONTEN>",
+                        }
+                    ],
+                }
+            ]
+            rendered = processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            inputs = processor(text=[rendered], padding=True, return_tensors="pt")
+            inputs = {
+                key: tensor.to(model.device) if hasattr(tensor, "to") else tensor
+                for key, tensor in inputs.items()
             }
-        ]
-        rendered = processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        inputs = processor(text=[rendered], padding=True, return_tensors="pt")
-        inputs = {
-            key: tensor.to(model.device) if hasattr(tensor, "to") else tensor
-            for key, tensor in inputs.items()
-        }
-        with torch.no_grad():
-            output = model.generate(**inputs, max_new_tokens=160)
-        answer = _decode_generated_answer(processor, output, inputs["input_ids"])
-        return _hits_from_text(answer, layer=Layer.L3.value, backend=_backend_name(text=True))
+            with torch.no_grad():
+                output = model.generate(**inputs, max_new_tokens=160)
+            answer = _decode_generated_answer(processor, output, inputs["input_ids"])
+            return _hits_from_text(answer, layer=Layer.L3.value, backend=_backend_name(text=True))
     except Exception as exc:
         log.warning("Qwen text moderation failed: %s", exc)
         return []

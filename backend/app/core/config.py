@@ -431,6 +431,8 @@ class Settings(BaseSettings):
     gpu_qwen_enabled: bool = True
     gpu_qwen_model: str = ""  # e.g. Qwen/Qwen2.5-VL-7B-Instruct
     gpu_qwen_plugin: str = ""  # optional override for VL moderate(path)
+    # Camera JPEGs can be 12k; VL generate on the full frame stalls 6GB labs.
+    gpu_qwen_max_edge_px: int = Field(default=1280, ge=320, le=4096)
     gpu_whisper_model: str = "base"  # tiny|base|small|medium|large-v3
     gpu_whisper_lang: str = "id"  # kosongkan untuk auto
     gpu_ocr_backend: str = "paddleocr"

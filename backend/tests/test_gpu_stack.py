@@ -199,3 +199,89 @@ def test_qwen_decoder_removes_input_tokens():
         "clean_up_tokenization_spaces": False,
     }
     assert answer == "AMAN"
+
+
+@pytest.mark.unit
+def test_prepare_qwen_image_downscales(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from PIL import Image
+
+    monkeypatch.setattr(config.settings, "gpu_qwen_max_edge_px", 1280)
+    source = tmp_path / "camera.jpg"
+    Image.new("RGB", (2000, 1500), (12, 24, 36)).save(source, "JPEG")
+
+    capped, tmp = reason_qwen._prepare_qwen_image(source)
+    try:
+        assert tmp is not None
+        assert capped == tmp
+        with Image.open(capped) as image:
+            assert image.size == (1280, 960)
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+
+
+@pytest.mark.unit
+def test_prepare_qwen_image_keeps_small_source(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from PIL import Image
+
+    monkeypatch.setattr(config.settings, "gpu_qwen_max_edge_px", 1280)
+    source = tmp_path / "small.jpg"
+    Image.new("RGB", (800, 600), (1, 2, 3)).save(source, "JPEG")
+
+    capped, tmp = reason_qwen._prepare_qwen_image(source)
+
+    assert capped == source
+    assert tmp is None
+
+
+@pytest.mark.unit
+def test_moderate_image_sends_capped_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from PIL import Image
+
+    source = tmp_path / "camera.jpg"
+    capped = tmp_path / "capped.jpg"
+    Image.new("RGB", (64, 64), (8, 8, 8)).save(source, "JPEG")
+    Image.new("RGB", (32, 32), (9, 9, 9)).save(capped, "JPEG")
+    seen: dict[str, object] = {}
+
+    class Tensorish(list):
+        def to(self, _device):
+            return self
+
+    class FakeProcessor:
+        def apply_chat_template(self, _messages, tokenize=False, add_generation_prompt=True):
+            raise RuntimeError("force fallback processor path")
+
+        def __call__(self, **kwargs):
+            images = kwargs.get("images") or []
+            seen["size"] = images[0].size if images else None
+            return {"input_ids": Tensorish([[1, 2, 3]])}
+
+        def batch_decode(self, _ids, **_kwargs):
+            return ["AMAN"]
+
+    class FakeModel:
+        device = "cpu"
+
+        def generate(self, **_kwargs):
+            seen["generated"] = True
+            return [[1, 2, 3, 9]]
+
+    def fake_prepare(path: Path) -> tuple[Path, Path | None]:
+        seen["source"] = path
+        return capped, None
+
+    monkeypatch.setattr(config.settings, "gpu_stack_enabled", True)
+    monkeypatch.setattr(config.settings, "gpu_qwen_enabled", True)
+    monkeypatch.setattr(config.settings, "gpu_qwen_model", "Qwen/Qwen2.5-VL-3B-Instruct")
+    monkeypatch.setattr(config.settings, "gpu_qwen_plugin", "")
+    monkeypatch.setattr(reason_qwen, "_prepare_qwen_image", fake_prepare)
+    monkeypatch.setattr(reason_qwen, "_try_load", lambda: (FakeModel(), FakeProcessor()))
+    monkeypatch.setattr(reason_qwen, "run_plugin", lambda *_args, **_kwargs: None)
+
+    hits = reason_qwen.moderate_image(source)
+
+    assert hits == []
+    assert seen.get("generated") is True
+    assert seen.get("source") == source
+    assert seen.get("size") == (32, 32)
