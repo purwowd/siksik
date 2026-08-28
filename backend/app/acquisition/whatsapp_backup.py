@@ -51,8 +51,61 @@ class WhatsAppUiAutomationError(RuntimeError):
     """One complete UI-automation attempt did not reach a usable backup."""
 
 
+class WhatsAppNotSignedInError(Exception):
+    """WhatsApp is installed but no phone number is registered yet."""
+
+
 class WhatsAppParseError(RuntimeError):
     """The acquired backup could not be converted into canonical records."""
+
+
+UNSIGNED_IN_RESOURCE_MARKERS = (
+    "registration_phone",
+    "registration_cc",
+    "registration_country",
+    "registration_submit",
+    "registration_code",
+    "eula_accept",
+    "verify_sms",
+    "register_phone",
+    "register_name",
+)
+UNSIGNED_IN_TEXT_MARKERS = (
+    "welcome to whatsapp",
+    "selamat datang di whatsapp",
+    "agree and continue",
+    "setuju dan lanjutkan",
+    "enter your phone number",
+    "masukkan nomor telepon",
+    "verify your phone number",
+    "verifikasi nomor telepon",
+    "waiting to automatically detect",
+    "menunggu deteksi sms",
+    "didn't receive a code",
+    "didn't receive code",
+    "didn’t receive a code",
+    "didn’t receive code",
+    "kode tidak diterima",
+)
+WHATSAPP_REGISTRATION_ACTIVITY_RE = re.compile(
+    r"com\.whatsapp(?:\.w4b)?[/.].*registration(?:\.|/)",
+    re.IGNORECASE,
+)
+
+
+def hierarchy_shows_unsigned_in(elements: list[UIElement]) -> bool:
+    for element in elements:
+        resource = element.resource_id.casefold()
+        if any(marker in resource for marker in UNSIGNED_IN_RESOURCE_MARKERS):
+            return True
+        blob = f"{element.text} {element.content_desc}".casefold()
+        if any(marker in blob for marker in UNSIGNED_IN_TEXT_MARKERS):
+            return True
+    return False
+
+
+def activity_shows_unsigned_in(dump: str) -> bool:
+    return bool(WHATSAPP_REGISTRATION_ACTIVITY_RE.search(dump or ""))
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,10 +360,27 @@ class WhatsAppUiAutomator:
         )
         await self.sleep(2.0)
 
+    async def _activity_top_dump(self) -> str:
+        try:
+            result = await self.transport.run(
+                self.serial,
+                ["shell", "dumpsys", "activity", "top"],
+                operation="whatsapp_activity_probe",
+                timeout=20.0,
+                check=False,
+            )
+        except AcquisitionError:
+            return ""
+        return f"{result.stdout}\n{result.stderr}"
+
     async def navigate_to_chat_backup(self) -> bool:
         await self.launch_whatsapp()
+        if activity_shows_unsigned_in(await self._activity_top_dump()):
+            raise WhatsAppNotSignedInError
         for _ in range(WHATSAPP_NAVIGATION_STEPS):
             elements = await self.dump_hierarchy()
+            if hierarchy_shows_unsigned_in(elements):
+                raise WhatsAppNotSignedInError
             if any(
                 "google_drive_backup_now_btn" in element.resource_id
                 or element.text in {"BACK UP", "CADANGKAN"}
@@ -662,6 +732,8 @@ class WhatsAppUiAutomator:
             try:
                 artifact = await self._single_attempt()
             except asyncio.CancelledError:
+                raise
+            except WhatsAppNotSignedInError:
                 raise
             except (AcquisitionError, OSError, ValueError, WhatsAppUiAutomationError) as exc:
                 last_error = exc
@@ -1453,7 +1525,22 @@ class WhatsAppBackupAcquisitionService:
             )
             return None
 
-        artifact = await automator.acquire_backup(on_progress=on_progress)
+        try:
+            artifact = await automator.acquire_backup(on_progress=on_progress)
+        except WhatsAppNotSignedInError:
+            logger.warning(
+                "whatsapp_not_signed_in",
+                extra={"error_category": "not_signed_in", "mode": mode.value},
+            )
+            await on_progress(
+                SessionStatus.ACQUIRING,
+                38.0,
+                "WhatsApp belum login nomor; akuisisi chat dilewati",
+                whatsapp_state="not_signed_in",
+                whatsapp_ui_attempt=1,
+                whatsapp_ui_attempts=WHATSAPP_UI_ATTEMPTS,
+            )
+            return None
         await on_progress(
             SessionStatus.ACQUIRING,
             41.0,

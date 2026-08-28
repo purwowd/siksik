@@ -282,7 +282,9 @@ export function buildAnalysisModules(args: {
               ? "Backup diperoleh · parser belum cocok"
               : waState === "not_installed"
                 ? "WhatsApp tidak terpasang"
-                : "Belum ada data WhatsApp",
+                : waState === "not_signed_in"
+                  ? "WhatsApp belum login nomor"
+                  : "Belum ada data WhatsApp",
       metrics: [
         { label: "Pesan", value: String(waMessages) },
         { label: "Percakapan", value: String(waConversations) },

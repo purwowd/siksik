@@ -380,7 +380,11 @@ export function ReportPage({
                   <p className="report-muted-note">
                     {progress?.whatsapp_state === "parse_unavailable"
                       ? "Backup diperoleh, tetapi format database belum dapat diparse."
-                      : "Tidak ada pesan WhatsApp pada rentang waktu sesi ini."}
+                      : progress?.whatsapp_state === "not_installed"
+                        ? "WhatsApp tidak terpasang pada perangkat ini."
+                        : progress?.whatsapp_state === "not_signed_in"
+                          ? "WhatsApp terpasang, tetapi belum login nomor telepon."
+                          : "Tidak ada pesan WhatsApp pada rentang waktu sesi ini."}
                   </p>
                 ) : (
                   <div className="wa-room-list report-wa-rooms">

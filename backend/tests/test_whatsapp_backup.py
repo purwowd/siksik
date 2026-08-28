@@ -14,14 +14,18 @@ from app.acquisition.contracts import AcquisitionResult, ProviderKind
 from app.acquisition.whatsapp_backup import (
     WHATSAPP_MESSAGE_MIME,
     WHATSAPP_UI_ATTEMPTS,
+    UIElement,
     WhatsAppBackupAcquisitionService,
     WhatsAppAcquisitionResult,
     WhatsAppBackupArtifact,
     WhatsAppDatabaseParser,
+    WhatsAppNotSignedInError,
     WhatsAppParseError,
     WhatsAppUiAutomationError,
     WhatsAppUiAutomator,
+    activity_shows_unsigned_in,
     decrypt_crypt15,
+    hierarchy_shows_unsigned_in,
 )
 from app.core.config import settings
 from app.core.db import db, utcnow
@@ -283,6 +287,132 @@ async def test_ui_automator_returns_on_fourth_success(tmp_path: Path) -> None:
     assert result.ui_attempts == 4
 
 
+def _ui(resource_id: str = "", text: str = "", content_desc: str = "") -> UIElement:
+    return UIElement(resource_id, text, content_desc, (0, 0, 120, 80), True)
+
+
+def test_hierarchy_detects_phone_registration_and_ignores_logged_in_chats() -> None:
+    assert hierarchy_shows_unsigned_in(
+        [_ui("com.whatsapp:id/registration_phone", "phone")]
+    )
+    assert hierarchy_shows_unsigned_in(
+        [_ui(text="Selamat datang di WhatsApp")]
+    )
+    assert hierarchy_shows_unsigned_in(
+        [_ui(text="AGREE AND CONTINUE")]
+    )
+    assert hierarchy_shows_unsigned_in(
+        [_ui(text="Masukkan nomor telepon Anda")]
+    )
+    assert not hierarchy_shows_unsigned_in(
+        [
+            _ui("com.whatsapp:id/menuitem_overflow", content_desc="Opsi lainnya"),
+            _ui(text="Grup baru"),
+            _ui(text="Perangkat tertaut"),
+        ]
+    )
+    assert not hierarchy_shows_unsigned_in(
+        [_ui("com.whatsapp:id/google_drive_backup_now_btn", "CADANGKAN")]
+    )
+
+
+def test_activity_dump_detects_registration_funnel() -> None:
+    assert activity_shows_unsigned_in(
+        "mResumedActivity: ActivityRecord{abc com.whatsapp/.registration.RegisterPhone t7}"
+    )
+    assert activity_shows_unsigned_in(
+        "ACTIVITY com.whatsapp/.registration.EULA 123\n"
+    )
+    assert not activity_shows_unsigned_in(
+        "mResumedActivity: ActivityRecord{abc com.whatsapp/.HomeActivity t7}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unsigned_in_does_not_retry_ui_attempts(tmp_path: Path) -> None:
+    calls = 0
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    class UnsignedIn(WhatsAppUiAutomator):
+        async def _single_attempt(self) -> WhatsAppBackupArtifact:
+            nonlocal calls
+            calls += 1
+            raise WhatsAppNotSignedInError
+
+    automator = UnsignedIn(serial="device-1", work_dir=tmp_path, sleep=no_sleep)
+
+    async def on_progress(*_args, **_fields) -> None:
+        return None
+
+    with pytest.raises(WhatsAppNotSignedInError):
+        await automator.acquire_backup(on_progress=on_progress)
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unsigned_in_is_fail_soft_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def package_installed(_self) -> bool:
+        return True
+
+    async def acquire_backup(_self, **_kwargs) -> WhatsAppBackupArtifact:
+        raise WhatsAppNotSignedInError
+
+    monkeypatch.setattr(WhatsAppUiAutomator, "package_installed", package_installed)
+    monkeypatch.setattr(WhatsAppUiAutomator, "acquire_backup", acquire_backup)
+    events: list[dict] = []
+
+    async def on_progress(*_args, **fields) -> None:
+        events.append(fields)
+
+    result = await WhatsAppBackupAcquisitionService().acquire(
+        serial="device-1",
+        staging=tmp_path,
+        mode=AcquisitionMode.QUICK,
+        on_progress=on_progress,
+    )
+
+    assert result is None
+    assert events[-1]["whatsapp_state"] == "not_signed_in"
+
+
+@pytest.mark.asyncio
+async def test_navigate_raises_unsigned_in_before_tapping(
+    tmp_path: Path,
+) -> None:
+    taps = 0
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    class RegistrationScreen(WhatsAppUiAutomator):
+        async def launch_whatsapp(self) -> None:
+            return None
+
+        async def _activity_top_dump(self) -> str:
+            return ""
+
+        async def dump_hierarchy(self) -> list[UIElement]:
+            return [_ui("com.whatsapp:id/registration_phone", "Enter your phone number")]
+
+        async def tap_element(self, element: UIElement, delay: float = 1.5) -> None:
+            nonlocal taps
+            taps += 1
+            del element, delay
+
+    automator = RegistrationScreen(serial="device-1", work_dir=tmp_path, sleep=no_sleep)
+
+    with pytest.raises(WhatsAppNotSignedInError):
+        await automator.navigate_to_chat_backup()
+
+    assert taps == 0
+
+
 @pytest.mark.asyncio
 async def test_parser_failure_is_fail_soft_after_successful_ui(
     tmp_path: Path,
@@ -420,6 +550,53 @@ async def test_dispatch_does_not_swallow_ui_automation_failure(
             file_count=0,
             on_progress=on_progress,
         )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_skips_unsigned_in_whatsapp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    async def fake_provider(_self, _context) -> AcquisitionResult:
+        return AcquisitionResult(staging, 3, 10.0, "android_agent", ProviderKind.ANDROID_AGENT)
+
+    async def package_installed(_self) -> bool:
+        return True
+
+    async def acquire_backup(_self, **_kwargs) -> WhatsAppBackupArtifact:
+        raise WhatsAppNotSignedInError
+
+    monkeypatch.setattr(
+        "app.acquisition.providers.registry.AcquisitionProviderRegistry.acquire",
+        fake_provider,
+    )
+    monkeypatch.setattr(WhatsAppUiAutomator, "package_installed", package_installed)
+    monkeypatch.setattr(WhatsAppUiAutomator, "acquire_backup", acquire_backup)
+    monkeypatch.setattr(settings, "android_recovery_enabled", False)
+    monkeypatch.setattr(settings, "gmail_acquisition_enabled", False)
+    monkeypatch.setattr(settings, "browser_history_enabled", False)
+
+    events: list[dict] = []
+
+    async def on_progress(*_args, **fields) -> None:
+        events.append(fields)
+
+    result = await acquisition_service.acquire_dispatch(
+        session_id="session-wa-unsigned",
+        device_id="device-wa",
+        device_type=DeviceType.ANDROID,
+        simulated=False,
+        mode=AcquisitionMode.QUICK,
+        scenario=Scenario.LULUS,
+        file_count=0,
+        on_progress=on_progress,
+    )
+
+    assert result == (staging, 3, 10.0, "android_agent")
+    assert any(event.get("whatsapp_state") == "not_signed_in" for event in events)
 
 
 @pytest.mark.asyncio

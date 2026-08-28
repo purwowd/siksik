@@ -1839,6 +1839,7 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
     if progress.get("whatsapp_state"):
         whatsapp_state_labels = {
             "not_installed": "tidak terpasang",
+            "not_signed_in": "belum login nomor",
             "ui_automation": "otomasi UI",
             "parsing": "parsing",
             "parse_unavailable": "backup diperoleh, parser tidak tersedia",
