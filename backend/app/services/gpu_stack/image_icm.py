@@ -3,7 +3,7 @@
 Wiring order:
   1. Plugin (`SADT_GPU_ICM_PLUGIN` / ``{model}/sadt_adapter.py``)
   2. Transformers/LLaVA load when ``SADT_GPU_ICM_MODEL`` set (best-effort)
-  3. Pillow visual heuristic bridge
+  3. Optional legacy Pillow bridge when explicitly enabled
 
 Refs: https://github.com/zhaoyuzhi/icm-assistant
 """
@@ -11,6 +11,7 @@ Refs: https://github.com/zhaoyuzhi/icm-assistant
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 
 from app.core.config import settings
@@ -22,6 +23,8 @@ from app.services.lexicon import category_for_keyword, match_keywords
 log = logging.getLogger(__name__)
 _pipe = None
 _pipe_failed = False
+_MODEL_LOCK = threading.Lock()
+_INFER_LOCK = threading.Lock()
 
 
 def status() -> dict:
@@ -39,15 +42,18 @@ def status() -> dict:
             available = True
             detail = f"transformers ready ({settings.gpu_icm_model})"
         except Exception as exc:
-            detail = f"transformers unavailable: {exc}; pillow bridge"
+            detail = f"transformers unavailable: {exc}"
     else:
-        detail = "SADT_GPU_ICM_MODEL empty — pillow bridge"
+        detail = "SADT_GPU_ICM_MODEL empty"
+    if settings.gpu_bridge_fallbacks_enabled:
+        detail += "; legacy Pillow bridge enabled"
     return {
         "name": "ICM-Assistant",
         "configured": configured,
         "available": available,
         "model": settings.gpu_icm_model,
         "plugin": plugin,
+        "bridge_fallback": bool(settings.gpu_bridge_fallbacks_enabled),
         "detail": detail,
     }
 
@@ -59,23 +65,29 @@ def _try_load_hf():
         return _pipe
     if _pipe_failed or not settings.gpu_icm_model:
         return None
-    try:
-        import torch
-        from transformers import pipeline
+    with _MODEL_LOCK:
+        if _pipe is not None:
+            return _pipe
+        if _pipe_failed:
+            return None
+        try:
+            import torch
+            from transformers import pipeline
 
-        device = 0 if torch.cuda.is_available() else -1
-        # image-to-text is the widest portable hook; ICM-LLaVA may need custom plugin
-        _pipe = pipeline(
-            "image-to-text",
-            model=settings.gpu_icm_model,
-            device=device,
-            trust_remote_code=True,
-        )
-        return _pipe
-    except Exception as exc:
-        log.info("ICM HF pipeline not ready (%s) — pillow bridge", exc)
-        _pipe_failed = True
-        return None
+            device = 0 if torch.cuda.is_available() else -1
+            # image-to-text is the widest portable hook; ICM-LLaVA may need custom plugin
+            _pipe = pipeline(
+                "image-to-text",
+                model=settings.gpu_icm_model,
+                device=device,
+                trust_remote_code=True,
+                local_files_only=bool(settings.content_models_local_only),
+            )
+            return _pipe
+        except Exception as exc:
+            log.info("ICM HF pipeline not ready (%s)", exc)
+            _pipe_failed = True
+            return None
 
 
 def _moderate_hf(path: Path) -> list[ModerationHit]:
@@ -83,7 +95,10 @@ def _moderate_hf(path: Path) -> list[ModerationHit]:
     if not pipe:
         return []
     try:
-        out = pipe(str(path))
+        from app.services.inference_guard import gpu_inference_slot
+
+        with _INFER_LOCK, gpu_inference_slot():
+            out = pipe(str(path))
         text = ""
         if isinstance(out, list) and out:
             text = str(out[0].get("generated_text", out[0]))
@@ -158,5 +173,6 @@ def moderate(path: Path) -> list[ModerationHit]:
     hf_hits = _moderate_hf(path)
     if hf_hits:
         return hf_hits
-
-    return _bridge_pillow(path)
+    if settings.gpu_bridge_fallbacks_enabled:
+        return _bridge_pillow(path)
+    return []

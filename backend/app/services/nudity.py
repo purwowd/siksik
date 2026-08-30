@@ -98,9 +98,10 @@ def _package_version() -> str:
 
 
 def onnx_execution_providers(available: Sequence[str]) -> list[str]:
-    """Prefer CUDA; skip TensorRT. NudeNet 3.4.2 ignores its own providers= argument."""
+    """Select an explicit provider list; never let ORT guess an unsafe CUDA path."""
+    requested = str(settings.nudity_onnx_device or "cpu").strip().casefold()
     providers: list[str] = []
-    if "CUDAExecutionProvider" in available:
+    if requested in {"cuda", "auto"} and "CUDAExecutionProvider" in available:
         providers.append("CUDAExecutionProvider")
     providers.append("CPUExecutionProvider")
     return providers
@@ -133,30 +134,39 @@ def _prepend_nvidia_cuda_libs() -> None:
                 continue
 
 
-def _bind_accelerated_session(detector: Any) -> None:
+def _create_detector(inference_resolution: int = 320) -> Any:
+    """Construct NudeNet with a provider-explicit session.
+
+    NudeNet 3.4.2 accepts ``providers`` but does not forward it to ONNX Runtime.
+    Building the few constructor fields here avoids ORT first trying a broken
+    CUDA provider and crashing the process before Python can handle the error.
+    """
     import onnxruntime
+    from nudenet import NudeDetector  # type: ignore
+    import nudenet.nudenet as nudenet_mod  # type: ignore
 
-    session = getattr(detector, "onnx_session", None)
-    if session is None:
-        return
     wanted = onnx_execution_providers(onnxruntime.get_available_providers())
-    current = list(session.get_providers())
-    if current and current[0] == wanted[0]:
-        return
+    model_path = os.path.join(os.path.dirname(nudenet_mod.__file__), "320n.onnx")
+    detector = NudeDetector.__new__(NudeDetector)
     try:
-        import nudenet.nudenet as nudenet_mod  # type: ignore
-
-        model_path = os.path.join(os.path.dirname(nudenet_mod.__file__), "320n.onnx")
         detector.onnx_session = onnxruntime.InferenceSession(
             model_path,
             providers=wanted,
         )
-        log.info("NudeNet ONNX providers=%s", detector.onnx_session.get_providers())
     except Exception as exc:
-        log.warning(
-            "NudeNet CUDA session unavailable (%s); staying on CPU",
-            type(exc).__name__,
+        if wanted == ["CPUExecutionProvider"]:
+            raise
+        log.warning("NudeNet CUDA unavailable (%s); retrying CPU", type(exc).__name__)
+        detector.onnx_session = onnxruntime.InferenceSession(
+            model_path,
+            providers=["CPUExecutionProvider"],
         )
+    model_inputs = detector.onnx_session.get_inputs()
+    detector.input_width = inference_resolution
+    detector.input_height = inference_resolution
+    detector.input_name = model_inputs[0].name
+    log.info("NudeNet ONNX providers=%s", detector.onnx_session.get_providers())
+    return detector
 
 
 def _get_detector() -> Any | None:
@@ -169,13 +179,9 @@ def _get_detector() -> Any | None:
             return _state.detector
         _state.attempted = True
         try:
-            _prepend_nvidia_cuda_libs()
-            from nudenet import NudeDetector  # type: ignore
-
-            # No model path is accepted here: the small model packaged with the
-            # pinned dependency is the only production source.
-            _state.detector = NudeDetector(inference_resolution=320)
-            _bind_accelerated_session(_state.detector)
+            if str(settings.nudity_onnx_device).strip().casefold() in {"cuda", "auto"}:
+                _prepend_nvidia_cuda_libs()
+            _state.detector = _create_detector(inference_resolution=320)
         except Exception as exc:
             _state.error = type(exc).__name__
             log.warning("Nudity detector unavailable: %s", _state.error)
@@ -235,7 +241,9 @@ def _triggering(raw: object) -> list[Detection]:
 
 
 def _detect_one(detector: Any, path: Path) -> object:
-    with _inference_lock:
+    from app.services.inference_guard import gpu_inference_slot
+
+    with _inference_lock, gpu_inference_slot():
         return detector.detect(str(path))
 
 
@@ -243,7 +251,9 @@ def _detect_many(detector: Any, paths: Sequence[Path]) -> list[object]:
     values = [str(path) for path in paths]
     if not values:
         return []
-    with _inference_lock:
+    from app.services.inference_guard import gpu_inference_slot
+
+    with _inference_lock, gpu_inference_slot():
         if len(values) == 1:
             return [detector.detect(values[0])]
         try:
@@ -597,6 +607,70 @@ def analyze_video_result(path: Path) -> NudityAnalysisResult:
     prefix = (
         f"{_engine_label()} | sampled={len(frames)} positive={len(positive_frames)} "
         f"sampler={samplers} | "
+    )
+    return NudityAnalysisResult(
+        (
+            {
+                "category": CATEGORY,
+                "label": f"Ketelanjangan terdeteksi pada video: {_class_summary(detections)}",
+                "confidence": round(evidence[0][1].score, 3),
+                "layer_origin": Layer.L4.value,
+                "evidence": f"{prefix}{'; '.join(evidence_items)}"[:320],
+            },
+        ),
+        True,
+    )
+
+
+def analyze_video_frames_result(
+    video_path: Path,
+    frame_paths: Sequence[Path],
+) -> NudityAnalysisResult:
+    """Analyze an already-decoded shared frame set without another ffmpeg pass."""
+    if not settings.nudity_detection_enabled:
+        return NudityAnalysisResult((), True)
+    detector = _get_detector()
+    if detector is None:
+        return NudityAnalysisResult((), False, _state.error or "detector_unavailable")
+    selected_paths = list(frame_paths)[: _video_frame_limit()]
+    if not selected_paths:
+        return NudityAnalysisResult((), False, "shared_video_frames_empty")
+    try:
+        duration = _probe_duration(video_path)
+    except VideoSamplingError:
+        duration = float(len(selected_paths))
+    spacing = duration / max(len(selected_paths), 1)
+    frames = tuple(
+        FrameSample(path, index, index * spacing, "shared-ffmpeg")
+        for index, path in enumerate(selected_paths)
+    )
+    try:
+        raw_batches = _detect_many(detector, [frame.path for frame in frames])
+        if len(raw_batches) != len(frames):
+            return NudityAnalysisResult((), False, "video_batch_incomplete")
+        evidence: list[tuple[FrameSample, Detection]] = []
+        positive_frames: set[int] = set()
+        for frame, raw in zip(frames, raw_batches):
+            matches = _triggering(raw)
+            if matches:
+                positive_frames.add(frame.index)
+                evidence.extend((frame, match) for match in matches)
+    except Exception as exc:
+        log.debug("Shared-frame nudity analysis skipped: %s", type(exc).__name__)
+        return NudityAnalysisResult((), False, "video_inference_failed")
+    if len(positive_frames) < settings.nudity_video_min_positive_frames:
+        return NudityAnalysisResult((), True)
+    evidence.sort(key=lambda item: item[1].score, reverse=True)
+    top = evidence[: settings.nudity_max_evidence_items]
+    detections = [item[1] for item in evidence]
+    evidence_items = [
+        f"t={frame.timestamp_s:.2f}s {detection.label}={detection.score:.3f}"
+        f"{_box_text(detection.box)}"
+        for frame, detection in top
+    ]
+    prefix = (
+        f"{_engine_label()} | sampled={len(frames)} positive={len(positive_frames)} "
+        "sampler=shared-ffmpeg | "
     )
     return NudityAnalysisResult(
         (

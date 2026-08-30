@@ -64,7 +64,12 @@ def get_stack_status() -> StackStatus:
     )
 
 
-def analyze_image_gpu(path: Path, *, include_ocr: bool = True) -> list[dict]:
+def analyze_image_gpu(
+    path: Path,
+    *,
+    include_ocr: bool = True,
+    include_reasoning: bool = True,
+) -> list[dict]:
     """ICM-Assistant + PaddleOCR (+ optional Qwen VL synthesis)."""
     if not stack_enabled():
         return []
@@ -74,8 +79,8 @@ def analyze_image_gpu(path: Path, *, include_ocr: bool = True) -> list[dict]:
     hits.extend(image_icm.moderate(path))
     if include_ocr:
         hits.extend(ocr_paddle.moderate_image(path))
-    # reasoning over image if available
-    hits.extend(reason_qwen.moderate_image(path))
+    if include_reasoning:
+        hits.extend(reason_qwen.moderate_image(path))
     return [h.as_finding() for h in hits]
 
 
@@ -88,55 +93,102 @@ def analyze_image_reasoning(path: Path) -> list[dict]:
     return [hit.as_finding() for hit in reason_qwen.moderate_image(path)]
 
 
-def analyze_video_gpu(path: Path) -> list[dict]:
-    """SafeWatch + Whisper audio + OCR/ICM on keyframes + optional Qwen."""
+def analyze_video_gpu(path: Path, *, frames: list[Path] | None = None) -> list[dict]:
+    """Analyze one shared keyframe set and escalate only suspicious frames."""
     if not stack_enabled():
         return []
-    from app.services import content_visual
+    from app.services import content_policy, content_visual, media_text
     from app.services.gpu_stack import audio_whisper, image_icm, ocr_paddle, reason_qwen, video_safewatch
     from app.services.vision import extract_video_keyframes
 
-    hits: list[ModerationHit] = []
-    hits.extend(video_safewatch.moderate(path))
-    hits.extend(audio_whisper.moderate(path))
+    findings: list[dict] = [
+        hit.as_finding()
+        for hit in (
+            list(video_safewatch.moderate(path))
+            + list(audio_whisper.moderate(path))
+        )
+    ]
 
-    frames = extract_video_keyframes(path, max_frames=settings.gpu_video_keyframes)
+    owns_frames = frames is None
+    frame_values = (
+        extract_video_keyframes(path, max_frames=settings.gpu_video_keyframes)
+        if frames is None
+        else list(frames)
+    )
     try:
-        for fr in frames:
-            for finding in content_visual.analyze_image(fr):
-                hits.append(
-                    ModerationHit(
-                        category=str(finding["category"]),
-                        label=str(finding["label"]),
-                        confidence=float(finding["confidence"]),
-                        layer_origin=Layer.L4.value,
-                        evidence=str(finding["evidence"]),
-                        backend="content-visual-keyframe",
-                    )
-                )
-            for h in image_icm.moderate(fr):
-                h.layer_origin = Layer.L4.value
-                h.label = f"Video keyframe ICM: {h.label}"
-                hits.append(h)
-            for h in ocr_paddle.moderate_image(fr):
-                h.layer_origin = Layer.L4.value
-                h.label = f"Video keyframe OCR: {h.label}"
-                hits.append(h)
-            for h in reason_qwen.moderate_image(fr):
-                h.layer_origin = Layer.L4.value
-                h.label = f"Video keyframe VL: {h.label}"
-                hits.append(h)
-    finally:
-        for fr in frames:
-            try:
-                fr.unlink(missing_ok=True)
-            except OSError:
-                pass
-        if frames:
-            try:
-                frames[0].parent.rmdir()
-            except OSError:
-                pass
+        reasoning_used = 0
+        ocr_used = 0
+        for fr in frame_values:
+            visual_candidates = content_visual.analyze_image(fr)
+            frame_support: list[dict] = []
 
-    hits.extend(reason_qwen.moderate_video_summary(path, hits))
-    return [h.as_finding() for h in hits]
+            if (
+                ocr_used < int(settings.video_ocr_max_frames)
+                and media_text.looks_like_text_heavy_image(fr)
+            ):
+                for hit in ocr_paddle.moderate_image(fr):
+                    finding = hit.as_finding()
+                    finding["layer_origin"] = Layer.L4.value
+                    finding["label"] = f"Video keyframe OCR: {finding['label']}"
+                    frame_support.append(finding)
+                ocr_used += 1
+
+            for hit in image_icm.moderate(fr):
+                finding = hit.as_finding()
+                finding["layer_origin"] = Layer.L4.value
+                finding["label"] = f"Video keyframe ICM: {finding['label']}"
+                frame_support.append(finding)
+
+            ambiguous_visual = content_policy.visual_candidates_requiring_reasoning(
+                visual_candidates
+            )
+            decision = None
+            if (
+                settings.gpu_qwen_enabled
+                and ambiguous_visual
+                and reasoning_used < int(settings.gpu_qwen_video_max_frames)
+            ):
+                context = " ".join(
+                    str(item.get("evidence") or "") for item in frame_support
+                )[:3000]
+                decision = reason_qwen.moderate_image_decision(
+                    fr,
+                    context_text=context,
+                    candidate_categories=[
+                        str(item.get("category") or "")
+                        for item in ambiguous_visual
+                    ],
+                )
+                reasoning_used += 1
+                for hit in decision.hits:
+                    finding = hit.as_finding()
+                    finding["layer_origin"] = Layer.L4.value
+                    finding["label"] = f"Video keyframe VL: {finding['label']}"
+                    frame_support.append(finding)
+
+            promoted = content_policy.confirm_visual_candidates(
+                visual_candidates,
+                frame_support,
+                reasoning_verdict=(
+                    decision.verdict if decision is not None else "unavailable"
+                ),
+            )
+            for finding in promoted:
+                finding["layer_origin"] = Layer.L4.value
+                finding["label"] = f"Video keyframe: {finding['label']}"
+            findings.extend(frame_support)
+            findings.extend(promoted)
+    finally:
+        if owns_frames:
+            for fr in frame_values:
+                try:
+                    fr.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if frame_values:
+                try:
+                    frame_values[0].parent.rmdir()
+                except OSError:
+                    pass
+
+    return content_policy.merge_content_findings(findings)

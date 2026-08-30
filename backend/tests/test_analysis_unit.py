@@ -208,6 +208,39 @@ def test_image_cross_detector_hits_are_one_finding(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_media_binary_keeps_canonical_text_as_evidence(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services.analysis import analyze_content_result
+
+    image = tmp_path / "opaque-name.jpg"
+    image.write_bytes(b"placeholder")
+    monkeypatch.setattr(
+        "app.services.nudity.analyze_image_result",
+        lambda _path: SimpleNamespace(findings=(), cacheable=True),
+    )
+    monkeypatch.setattr(
+        "app.services.vision.analyze_lightweight_image_file",
+        lambda _path, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "app.services.analysis._skip_heavy_ocr_for_gallery",
+        lambda *_args, **_kwargs: True,
+    )
+
+    outcome = analyze_content_result(
+        image,
+        "image/jpeg",
+        "media_image",
+        "Rencana makar malam ini",
+        ["makar"],
+    )
+
+    assert any(item["category"] == "incitement" for item in outcome.findings)
+    assert any("makar" in item["evidence"].lower() for item in outcome.findings)
+
+
+@pytest.mark.unit
 def test_comments_body_ocr_strips_chrome():
     from app.acquisition.social_ocr import _comments_body_from_ocr
 

@@ -2,7 +2,7 @@
 
 Wiring order:
   1. Optional plugin (`SADT_GPU_SAFEWATCH_PLUGIN` or ``{model}/sadt_adapter.py``)
-  2. Fall back to path/keyframe lexicon bridge (jangan return [] bila checkpoint ada)
+  2. Optional legacy path/keyframe bridge when explicitly enabled
 
 Refs: https://github.com/BillChan226/SafeWatch · https://safewatch-aiguard.github.io/
 """
@@ -39,15 +39,18 @@ def status() -> dict:
                 "; sadt_adapter.py found" if adapter.is_file() else "; set plugin or sadt_adapter.py"
             )
         else:
-            detail = f"path missing: {p} — keyframe/path bridge"
+            detail = f"path missing: {p}"
     else:
-        detail = "SADT_GPU_SAFEWATCH_MODEL empty — keyframe/path bridge"
+        detail = "SADT_GPU_SAFEWATCH_MODEL empty"
+    if settings.gpu_bridge_fallbacks_enabled:
+        detail += "; legacy keyframe/path bridge enabled"
     return {
         "name": "SafeWatch",
         "configured": configured,
         "available": available,
         "model": settings.gpu_safewatch_model,
         "plugin": plugin,
+        "bridge_fallback": bool(settings.gpu_bridge_fallbacks_enabled),
         "detail": detail,
     }
 
@@ -117,5 +120,6 @@ def moderate(path: Path) -> list[ModerationHit]:
     )
     if plugin_hits is not None:
         return plugin_hits
-
-    return _bridge_policy(path)
+    if settings.gpu_bridge_fallbacks_enabled:
+        return _bridge_policy(path)
+    return []

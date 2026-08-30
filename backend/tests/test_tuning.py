@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,6 +12,22 @@ from app.core import config
 from app.services import hash_cache
 from app.services.ocr import FakeOCRBackend, prepare_ocr_path, run_ocr
 from app.services.gpu_stack import audio_whisper
+
+
+@pytest.mark.unit
+def test_clip_feature_api_accepts_pooled_transformers_output():
+    from app.services import clip_tokoh
+
+    class TensorLike:
+        def norm(self):
+            return 1
+
+    tensor = TensorLike()
+
+    assert clip_tokoh._pooled_feature_tensor(tensor) is tensor
+    assert clip_tokoh._pooled_feature_tensor(
+        SimpleNamespace(pooler_output=tensor)
+    ) is tensor
 
 
 @pytest.mark.unit
@@ -72,7 +89,7 @@ def test_prepare_ocr_path_sharpens_small_when_enabled(tmp_path: Path, monkeypatc
 def test_engine_fingerprint_includes_tuning(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(config.settings, "ocr_max_edge_px", 1280)
     fp = hash_cache.engine_fingerprint()
-    assert "v16" in fp
+    assert "v18" in fp
     assert "ocr_px=1280" in fp
     assert "wh1st=" in fp
     assert "clip=" in fp
@@ -116,7 +133,8 @@ def test_fuse_tokoh_and_hate_text(tmp_path: Path):
         tokoh_findings=tokoh,
         ocr_findings=ocr_findings,
     )
-    assert any("Meme/poster tokoh + ujaran" in f["label"] for f in fused)
+    assert any(f["category"] == "political_meme" for f in fused)
+    assert sum(f["category"] == "anti_pemerintah" for f in fused) == 1
     assert any(f["label"].startswith("Tokoh:") for f in fused)
     assert any(f["label"].startswith("OCR:") for f in fused)
 
@@ -126,13 +144,11 @@ def test_consolidate_image_findings_merges_ocr_and_drops_meme_dupes():
     from app.services.ocr import consolidate_image_findings
 
     raw = [
-        {"category": "anti_pemerintah", "label": "OCR: presiden", "confidence": 0.86, "layer_origin": "L3", "evidence": "[easyocr] teks"},
         {"category": "anti_pemerintah", "label": "OCR: ganti presiden", "confidence": 0.86, "layer_origin": "L3", "evidence": "[easyocr] teks"},
-        {"category": "anti_pemerintah", "label": "OCR: jokowi", "confidence": 0.86, "layer_origin": "L3", "evidence": "[easyocr] teks"},
         {"category": "konten_visual", "label": "Tokoh: indikasi foto Jokowi", "confidence": 0.8, "layer_origin": "L3", "evidence": "clip"},
         {
-            "category": "anti_pemerintah",
-            "label": "Meme/poster tokoh + ujaran: ganti presiden",
+            "category": "political_meme",
+            "label": "Meme politik",
             "confidence": 0.93,
             "layer_origin": "L3",
             "evidence": "fuse",
@@ -140,11 +156,16 @@ def test_consolidate_image_findings_merges_ocr_and_drops_meme_dupes():
     ]
     out = consolidate_image_findings(raw)
     assert len(out) == 1
-    assert out[0]["label"].startswith("Meme/poster tokoh + ujaran:")
+    assert out[0]["category"] == "political_meme"
 
-    merged = consolidate_image_findings(raw[:3])
+    merged = consolidate_image_findings(
+        [
+            {"category": "anti_pemerintah", "label": "OCR: anti pemerintah", "confidence": 0.86, "layer_origin": "L3", "evidence": "teks"},
+            {"category": "anti_pemerintah", "label": "OCR: ganti presiden", "confidence": 0.86, "layer_origin": "L3", "evidence": "teks"},
+        ]
+    )
     assert len(merged) == 1
-    assert merged[0]["label"] == "OCR: presiden, ganti presiden, jokowi"
+    assert merged[0]["label"] == "OCR: anti pemerintah, ganti presiden"
 
 
 @pytest.mark.unit
@@ -166,9 +187,40 @@ def test_fuse_no_composite_without_hate(tmp_path: Path):
                 "evidence": "x",
             }
         ],
-        ocr_findings=[{"category": "anti_pemerintah", "label": "OCR: presiden", "confidence": 0.8, "layer_origin": "L3", "evidence": "x"}],
+        ocr_findings=[],
     )
-    assert not any("Meme/poster tokoh + ujaran" in f["label"] for f in fused)
+    assert not any(
+        f["category"] in {"political_meme", "political_insult"} for f in fused
+    )
+
+
+@pytest.mark.unit
+def test_visual_public_figure_plus_bare_insult_is_political_insult(tmp_path: Path):
+    from app.services.ocr import fuse_tokoh_and_text
+
+    path = tmp_path / "edited-prabowo.jpg"
+    path.write_bytes(b"x")
+    fused = fuse_tokoh_and_text(
+        path=path,
+        ocr_text="tolol",
+        ocr_backend="fake",
+        tokoh_findings=[
+            {
+                "category": "konten_visual",
+                "label": "Tokoh: indikasi foto Prabowo",
+                "confidence": 0.8,
+                "layer_origin": "L3",
+                "evidence": "clip",
+            }
+        ],
+        ocr_findings=[],
+    )
+
+    assert {item["category"] for item in fused} == {
+        "konten_visual",
+        "political_insult",
+    }
+    assert not any(item["category"] == "anti_pemerintah" for item in fused)
 
 
 @pytest.mark.unit
@@ -233,12 +285,15 @@ def test_easyocr_lines_filters_low_conf_and_sorts():
 
 
 @pytest.mark.unit
-def test_ocr_corpus_includes_tokoh():
+def test_ocr_corpus_keeps_tokoh_context_only():
     from app.services.ocr import ocr_keyword_corpus
 
     corpus = [k.lower() for k in ocr_keyword_corpus()]
-    assert "presiden" in corpus
-    assert "jokowi" in corpus or "joko widodo" in corpus
+    assert "presiden" not in corpus
+    assert "jokowi" not in corpus
+    assert "joko widodo" not in corpus
+    assert "prabowo" not in corpus
+    assert "anti pemerintah" in corpus
 
 
 @pytest.mark.unit

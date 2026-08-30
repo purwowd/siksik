@@ -51,6 +51,7 @@ def explicit(label: str, score: float, box: list[int] | None = None) -> dict:
 @pytest.fixture(autouse=True)
 def nudity_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(config.settings, "nudity_detection_enabled", True)
+    monkeypatch.setattr(config.settings, "nudity_onnx_device", "cpu")
     monkeypatch.setattr(config.settings, "nudity_threshold_anus", 0.50)
     monkeypatch.setattr(config.settings, "nudity_threshold_buttocks", 0.60)
     monkeypatch.setattr(config.settings, "nudity_threshold_female_breast", 0.55)
@@ -64,10 +65,17 @@ def nudity_defaults(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.unit
-def test_onnx_providers_prefer_cuda_over_tensorrt() -> None:
+def test_onnx_providers_are_explicit_and_skip_tensorrt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config.settings, "nudity_onnx_device", "cuda")
     assert nudity.onnx_execution_providers(
         ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
     ) == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    monkeypatch.setattr(config.settings, "nudity_onnx_device", "cpu")
+    assert nudity.onnx_execution_providers(
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    ) == ["CPUExecutionProvider"]
     assert nudity.onnx_execution_providers(["CPUExecutionProvider"]) == [
         "CPUExecutionProvider"
     ]
@@ -287,12 +295,15 @@ def test_video_analysis_adds_nudity_without_replacing_existing_vision(
         "layer_origin": "L4",
         "evidence": "existing",
     }
+    from types import SimpleNamespace
+
     monkeypatch.setattr(
-        nudity,
-        "analyze_video_result",
-        lambda _path: nudity.NudityAnalysisResult((nude_flag,), True),
+        "app.services.vision.analyze_video_file_result",
+        lambda _path: SimpleNamespace(
+            findings=(nude_flag, old_flag),
+            cacheable=True,
+        ),
     )
-    monkeypatch.setattr("app.services.vision.analyze_video_file", lambda _path: [old_flag])
 
     findings = analysis.analyze_content(target, "video/mp4", "video", "", [])
 

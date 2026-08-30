@@ -6,7 +6,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Sequence
 
 from app.core.config import settings
 from app.models.schemas import Layer
@@ -30,6 +32,12 @@ VISUAL_RISK_TAGS = (
     "gulingkan",
 )
 # Note: "anti" sengaja dihapus — terlalu pendek & substring FP (anti⊂ganti)
+
+
+@dataclass(frozen=True)
+class VideoAnalysisResult:
+    findings: tuple[dict[str, Any], ...]
+    cacheable: bool
 
 
 def _filename_norm(name: str) -> str:
@@ -105,15 +113,15 @@ def _analyze_pil_image(path: Path) -> list[dict]:
             hit_tags = [t for t in _risk_lexicon() if contains_phrase(hay, t)]
             score = 0.0
             reasons: list[str] = []
-            if red_ratio > 1.35 and edge_mean > 18:
-                score += 0.35
-                reasons.append(f"red_dom={red_ratio:.2f},edge={edge_mean:.1f}")
             if hit_tags:
-                score += 0.45
+                score += 0.55
                 reasons.append("tags=" + ",".join(hit_tags[:4]))
-            if edge_mean > 40 and (r + g + b) / 3 < 90:
-                score += 0.2
-                reasons.append("high_contrast_dark")
+                if red_ratio > 1.35 and edge_mean > 18:
+                    score += 0.25
+                    reasons.append(f"red_dom={red_ratio:.2f},edge={edge_mean:.1f}")
+                if edge_mean > 40 and (r + g + b) / 3 < 90:
+                    score += 0.15
+                    reasons.append("high_contrast_dark")
 
             if score >= 0.45:
                 findings.append(
@@ -143,6 +151,7 @@ def analyze_image_file(
     precomputed_ocr_text: str | None = None,
     precomputed_ocr_backend: str | None = None,
     origin_hint: str | None = None,
+    context_text: str | None = None,
 ) -> list[dict]:
     from app.services import clip_tokoh
     from app.services import content_policy
@@ -157,11 +166,12 @@ def analyze_image_file(
     ocr_text = precomputed_ocr_text or ""
     ocr_backend: str | None = precomputed_ocr_backend
     ocr_findings: list[dict] = []
-    if ocr_text:
-        ocr_findings = ocr_mod.ocr_findings_from_text(
-            ocr_text,
-            backend=ocr_backend or "host_ocr",
-        )
+    if precomputed_ocr_text is not None:
+        if ocr_text:
+            ocr_findings = ocr_mod.ocr_findings_from_text(
+                ocr_text,
+                backend=ocr_backend or "host_ocr",
+            )
     elif settings.ocr_enabled or settings.media_text_enabled:
         # Legacy path when OCR flag on
         if settings.ocr_enabled:
@@ -180,8 +190,74 @@ def analyze_image_file(
                     ocr_text = ev.split("] ", 1)[-1] if "] " in ev else ev
                     ocr_backend = "media_text"
 
-    tokoh_findings = clip_tokoh.analyze_image_tokoh(path)
-    findings.extend(content_visual.analyze_image(path))
+    combined_context = "\n".join(
+        value
+        for value in ((context_text or "").strip(), ocr_text.strip())
+        if value
+    )[:6000]
+    text_signal = content_policy.should_adjudicate_text(combined_context)
+    text_heavy = media_text.looks_like_text_heavy_image(path, origin_hint)
+    visual_skip_ui = media_text.should_skip_generic_visual_model(path, origin_hint)
+    visual_candidates = []
+    if not (
+        settings.content_visual_skip_text_heavy_without_signal
+        and text_heavy
+        and visual_skip_ui
+        and not text_signal
+    ):
+        visual_candidates = content_visual.analyze_image(path)
+
+    # Optional real image model only. Qwen is candidate-gated below and must
+    # not run unconditionally for every gallery item.
+    findings.extend(
+        gpu_stack.analyze_image_gpu(
+            path,
+            include_ocr=False,
+            include_reasoning=False,
+        )
+    )
+    decision = None
+    reasoning_findings: list[dict] = []
+    ambiguous_visual = content_policy.visual_candidates_requiring_reasoning(
+        visual_candidates
+    )
+    if (
+        settings.gpu_stack_enabled
+        and settings.gpu_qwen_enabled
+        and (ambiguous_visual or text_signal)
+    ):
+        from app.services.gpu_stack import reason_qwen
+
+        decision = reason_qwen.moderate_image_decision(
+            path,
+            context_text=combined_context,
+            candidate_categories=[
+                str(item.get("category") or "") for item in ambiguous_visual
+            ],
+        )
+        reasoning_findings = [hit.as_finding() for hit in decision.hits]
+
+    support = list(ocr_findings) + reasoning_findings
+    promoted_visual = content_policy.confirm_visual_candidates(
+        visual_candidates,
+        support,
+        reasoning_verdict=decision.verdict if decision is not None else "unavailable",
+    )
+    findings.extend(promoted_visual)
+    findings.extend(reasoning_findings)
+
+    # Identity-like CLIP prompts are another expensive zero-shot pass. Run them
+    # only after explicit text or contextual reasoning identifies political
+    # material; they are supporting evidence, never the initial trigger.
+    political_categories = {"political_meme", "political_campaign", "political_insult"}
+    supported_categories = {
+        str(item.get("category") or "") for item in support + promoted_visual
+    }
+    tokoh_findings = (
+        clip_tokoh.analyze_image_tokoh(path)
+        if text_signal or bool(political_categories & supported_categories)
+        else []
+    )
     findings.extend(
         ocr_mod.consolidate_image_findings(
             ocr_mod.fuse_tokoh_and_text(
@@ -194,9 +270,6 @@ def analyze_image_file(
         )
     )
 
-    # OCR has already run above and its text is shared with the legacy lexicon
-    # and content policy.  Do not invoke the GPU OCR adapter a second time.
-    findings.extend(gpu_stack.analyze_image_gpu(path, include_ocr=False))
     if findings and gpu_device_name():
         for f in findings:
             f["evidence"] = (f["evidence"] + f" | gpu={gpu_device_name()}")[:320]
@@ -209,6 +282,8 @@ def analyze_lightweight_image_file(
     precomputed_ocr_text: str | None = None,
     precomputed_ocr_backend: str | None = None,
     include_reasoning: bool = False,
+    origin_hint: str | None = None,
+    context_text: str | None = None,
 ) -> list[dict]:
     """Visual/content pass without starting another OCR engine.
 
@@ -216,7 +291,7 @@ def analyze_lightweight_image_file(
     the anti-stall OCR policy while still detecting flags, campaigns, protests,
     political memes, and (for social screenshots) Qwen contextual categories.
     """
-    from app.services import content_policy, content_visual, gpu_stack
+    from app.services import content_policy, content_visual, media_text
     from app.services import ocr as ocr_mod
 
     findings = _analyze_pil_image(path)
@@ -224,12 +299,50 @@ def analyze_lightweight_image_file(
     backend = precomputed_ocr_backend or "host_ocr"
     if text:
         findings.extend(ocr_mod.ocr_findings_from_text(text, backend=backend))
-    visual_content = content_visual.analyze_image(path)
-    findings.extend(visual_content)
-    if include_reasoning and (
-        visual_content or content_policy.should_adjudicate_text(text)
+    combined_context = "\n".join(
+        value
+        for value in ((context_text or "").strip(), text)
+        if value
+    )[:6000]
+    text_signal = content_policy.should_adjudicate_text(combined_context)
+    text_heavy = bool(text) or media_text.looks_like_text_heavy_image(path, origin_hint)
+    visual_skip_ui = media_text.should_skip_generic_visual_model(path, origin_hint)
+    visual_candidates = []
+    if not (
+        settings.content_visual_skip_text_heavy_without_signal
+        and text_heavy
+        and visual_skip_ui
+        and not text_signal
     ):
-        findings.extend(gpu_stack.analyze_image_reasoning(path))
+        visual_candidates = content_visual.analyze_image(path)
+    decision = None
+    reasoning_findings: list[dict] = []
+    ambiguous_visual = content_policy.visual_candidates_requiring_reasoning(
+        visual_candidates
+    )
+    if (
+        include_reasoning
+        and settings.gpu_stack_enabled
+        and settings.gpu_qwen_enabled
+        and (ambiguous_visual or text_signal)
+    ):
+        from app.services.gpu_stack import reason_qwen
+
+        decision = reason_qwen.moderate_image_decision(
+            path,
+            context_text=combined_context,
+            candidate_categories=[
+                str(item.get("category") or "") for item in ambiguous_visual
+            ],
+        )
+        reasoning_findings = [hit.as_finding() for hit in decision.hits]
+    promoted = content_policy.confirm_visual_candidates(
+        visual_candidates,
+        list(findings) + reasoning_findings,
+        reasoning_verdict=decision.verdict if decision is not None else "unavailable",
+    )
+    findings.extend(promoted)
+    findings.extend(reasoning_findings)
     return _dedupe_findings(content_policy.merge_content_findings(findings))
 
 
@@ -280,9 +393,9 @@ def extract_video_keyframes(path: Path, max_frames: int = 3) -> list[Path]:
     out_dir = Path(tempfile.mkdtemp(prefix="sadt_kf_"))
     pattern = str(out_dir / "kf_%02d.jpg")
     dur = video_duration_s(path)
-    if dur and dur > 30 and max_frames > 0:
-        interval = max(1, int(dur / max_frames))
-        vf = f"fps=1/{interval}"
+    if dur and max_frames > 0:
+        interval = max(1.0, float(dur) / max_frames)
+        vf = f"fps=1/{interval:.6f}"
     else:
         vf = "fps=1"
     probes = [
@@ -317,14 +430,32 @@ def extract_video_keyframes(path: Path, max_frames: int = 3) -> list[Path]:
         frames = sorted(out_dir.glob("kf_*.jpg"))[:max_frames]
         if frames:
             return frames
+    shutil.rmtree(out_dir, ignore_errors=True)
     return []
 
 
-def analyze_video_file(path: Path) -> list[dict]:
+def _even_frame_subset(frames: Sequence[Path], limit: int) -> list[Path]:
+    values = list(frames)
+    if limit <= 0 or not values:
+        return []
+    if len(values) <= limit:
+        return values
+    if limit == 1:
+        return [values[len(values) // 2]]
+    last = len(values) - 1
+    indexes = sorted({round(index * last / (limit - 1)) for index in range(limit)})
+    return [values[index] for index in indexes]
+
+
+def analyze_video_file_result(path: Path) -> VideoAnalysisResult:
     from app.services import gpu_stack
     from app.services import media_text
+    from app.services import nudity
+    from app.services.hash_cache import get_analysis_mode
+    from app.models.schemas import AcquisitionMode
 
     findings: list[dict] = []
+    cacheable = True
     # filename / path cues against full risk lexicon
     hay = _filename_norm(f"{path.parent.name} {path.name}")
     from app.services.lexicon import contains_phrase
@@ -341,17 +472,65 @@ def analyze_video_file(path: Path) -> list[dict]:
             }
         )
 
-    if gpu_stack.stack_enabled():
-        findings.extend(gpu_stack.analyze_video_gpu(path))
-        from app.services import content_policy
+    nudity_frames = (
+        settings.nudity_video_frames_quick
+        if get_analysis_mode() == AcquisitionMode.QUICK
+        else settings.nudity_video_frames_full
+    )
+    analyzer_frames = (
+        settings.gpu_video_keyframes
+        if gpu_stack.stack_enabled()
+        else max(3, settings.video_overlay_keyframes)
+    )
+    shared_frames = extract_video_keyframes(
+        path,
+        max_frames=max(int(nudity_frames), int(analyzer_frames)),
+    )
+    try:
+        nudity_outcome = (
+            nudity.analyze_video_frames_result(path, shared_frames)
+            if shared_frames
+            else nudity.analyze_video_result(path)
+        )
+        findings.extend(nudity_outcome.findings)
+        cacheable = cacheable and nudity_outcome.cacheable
 
-        return _dedupe_findings(content_policy.merge_content_findings(findings))
+        selected = _even_frame_subset(shared_frames, int(analyzer_frames))
+        if gpu_stack.stack_enabled():
+            findings.extend(
+                gpu_stack.analyze_video_gpu(
+                    path,
+                    frames=selected if shared_frames else None,
+                )
+            )
+        else:
+            findings.extend(
+                media_text.analyze_video_enrichment(
+                    path,
+                    frames=selected if shared_frames else None,
+                )
+            )
+    finally:
+        for frame in shared_frames:
+            try:
+                frame.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if shared_frames:
+            try:
+                shared_frames[0].parent.rmdir()
+            except OSError:
+                pass
 
-    # ASR (Whisper) + keyframe visual + on-screen OCR — satu pass
-    findings.extend(media_text.analyze_video_enrichment(path))
     from app.services import content_policy
 
-    return _dedupe_findings(content_policy.merge_content_findings(findings))
+    merged = _dedupe_findings(content_policy.merge_content_findings(findings))
+    return VideoAnalysisResult(tuple(merged), cacheable)
+
+
+def analyze_video_file(path: Path) -> list[dict]:
+    """Compatibility wrapper returning findings only."""
+    return list(analyze_video_file_result(path).findings)
 
 
 def vision_status() -> dict:
@@ -376,6 +555,7 @@ def vision_status() -> dict:
     info["media_text"] = {
         "enabled": bool(cfg.media_text_enabled),
         "video_overlay_keyframes": cfg.video_overlay_keyframes,
+        "video_ocr_max_frames": cfg.video_ocr_max_frames,
         "video_whisper_max_duration_s": cfg.video_whisper_max_duration_s,
         "video_whisper_transcribe_first_s": cfg.video_whisper_transcribe_first_s,
         "whisper": bool(cfg.gpu_whisper_enabled),
@@ -405,6 +585,8 @@ def vision_status() -> dict:
             "visual": content_visual.status(),
             "text": content_text.status(),
             "qwen_structured": bool(cfg.content_qwen_structured),
+            "qwen_candidate_only": True,
+            "bridge_fallbacks": bool(cfg.gpu_bridge_fallbacks_enabled),
         }
     except Exception:
         info["content_detection"] = {"configured": False}
