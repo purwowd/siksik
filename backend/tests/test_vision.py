@@ -16,6 +16,7 @@ def test_vision_status_keys():
     assert "ffmpeg" in st
     assert "torch_cuda" in st
     assert "nudity" in st
+    assert "sd_detector" in st
 
 
 @pytest.mark.unit

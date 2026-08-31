@@ -220,6 +220,12 @@ def engine_fingerprint() -> str:
                 f"{int(shutil.which('ffmpeg') is not None)}:"
                 f"{int(shutil.which('ffprobe') is not None)}"
             ),
+            (
+                f"sd={int(bool(settings.sd_detector_enabled))}:"
+                f"{str(settings.sd_mode or 'balanced').strip().casefold()}:"
+                f"{settings.sd_llama_host}:"
+                f"{settings.sd_llama_port}"
+            ),
         ]
     )
 

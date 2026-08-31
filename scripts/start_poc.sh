@@ -102,11 +102,13 @@ export SATRIA_UI_PORT="${SATRIA_UI_PORT:-$UI_PORT}"
 # pakai SADT_OCR_ENABLED=1 untuk image-to-text eksplisit.
 : "${SADT_MEDIA_TEXT_ENABLED:=0}"
 : "${SADT_NUDITY_DETECTION_ENABLED:=1}"
+: "${SADT_SD_DETECTOR_ENABLED:=0}"
 
 export SADT_OCR_ENABLED SADT_OCR_BACKEND SADT_OCR_GPU \
   SADT_GPU_STACK_ENABLED SADT_GPU_WHISPER_ENABLED \
   SADT_GPU_SAFEWATCH_ENABLED SADT_GPU_ICM_ENABLED SADT_GPU_QWEN_ENABLED \
-  SADT_CLIP_TOKOH_ENABLED SADT_MEDIA_TEXT_ENABLED SADT_NUDITY_DETECTION_ENABLED
+  SADT_CLIP_TOKOH_ENABLED SADT_MEDIA_TEXT_ENABLED SADT_NUDITY_DETECTION_ENABLED \
+  SADT_SD_DETECTOR_ENABLED
 
 # EasyOCR CPU + worker_concurrency=4 OOM Mac (uvicorn Killed:9). When GPU is off,
 # serialize analysis OCR and shrink preprocess unless caller overrides.
@@ -159,13 +161,69 @@ if [[ "${SADT_PIP_INSTALL:-0}" == "1" ]] || ! python -c "import uvicorn, fastapi
   echo "Installing Python deps (set SADT_PIP_INSTALL=1 to force)…"
   pip install -q -r requirements.txt
 fi
+if [[ "${SADT_SD_DETECTOR_ENABLED}" == "1" ]] && ! python -c "import sd_detector" >/dev/null 2>&1; then
+  echo "Installing sexual-deviance detector (editable)…"
+  pip install -q -e "$ROOT/sexual-deviance"
+fi
+
+SD_HOST="${SADT_SD_LLAMA_HOST:-127.0.0.1}"
+SD_PORT="${SADT_SD_LLAMA_PORT:-8080}"
+SIDECAR_PID=""
+SIDECAR_OWNED=0
+
+sd_sidecar_healthy() {
+  command -v curl >/dev/null 2>&1 || return 1
+  curl -fsS --max-time 2 "http://${SD_HOST}:${SD_PORT}/health" >/dev/null 2>&1
+}
+
+start_sd_sidecar() {
+  local script="$ROOT/sexual-deviance/scripts/start_sidecar.sh"
+  local log_dir="$ROOT/logs"
+  local log_file="$log_dir/sd-sidecar.log"
+  if sd_sidecar_healthy; then
+    echo "  sd sidecar:       already up at ${SD_HOST}:${SD_PORT}"
+    return 0
+  fi
+  if [[ ! -f "$script" ]]; then
+    echo "WARNING: sidecar script tidak ada: $script"
+    echo "         analisis tetap jalan; fallback NudeNet"
+    return 0
+  fi
+  mkdir -p "$log_dir"
+  echo "Starting sexual-deviance sidecar on ${SD_HOST}:${SD_PORT} (load model dulu, warmup GPU)…"
+  bash "$script" >>"$log_file" 2>&1 &
+  SIDECAR_PID=$!
+  SIDECAR_OWNED=1
+  local i
+  for i in $(seq 1 90); do
+    if sd_sidecar_healthy; then
+      echo "  sd sidecar:       ready (${i}s)"
+      return 0
+    fi
+    if ! kill -0 "$SIDECAR_PID" 2>/dev/null; then
+      echo "WARNING: sidecar exit sebelum /health. Lihat $log_file"
+      echo "         analisis tetap jalan; fallback NudeNet"
+      SIDECAR_PID=""
+      SIDECAR_OWNED=0
+      return 0
+    fi
+    sleep 2
+  done
+  echo "WARNING: sidecar belum ready setelah ~180s di ${SD_HOST}:${SD_PORT}"
+  echo "         analisis tetap jalan; fallback NudeNet. Log: $log_file"
+}
 
 echo "Starting API on $API_HOST:$API_PORT (auto-restart on crash)"
 echo "  OCR (image→text): ${SADT_OCR_ENABLED:-0}  backend=${SADT_OCR_BACKEND:-default}  gpu=${SADT_OCR_GPU:-0}"
 echo "  workers:          ${SADT_WORKER_CONCURRENCY:-4}"
 echo "  media_text:       ${SADT_MEDIA_TEXT_ENABLED}"
 echo "  nudity detector:  ${SADT_NUDITY_DETECTION_ENABLED}"
+echo "  sd detector:      ${SADT_SD_DETECTOR_ENABLED}  sidecar=${SD_HOST}:${SD_PORT}"
 echo "  GPU AI stack:     ${SADT_GPU_STACK_ENABLED}  (whisper=${SADT_GPU_WHISPER_ENABLED} icm=${SADT_GPU_ICM_ENABLED} qwen=${SADT_GPU_QWEN_ENABLED} clip=${SADT_CLIP_TOKOH_ENABLED})"
+
+if [[ "${SADT_SD_DETECTOR_ENABLED}" == "1" ]]; then
+  start_sd_sidecar
+fi
 
 # Watchdog: if uvicorn dies (OOM/Killed:9), bring it back without killing Vite.
 API_WATCHDOG_PID=""
@@ -208,6 +266,10 @@ cleanup() {
         kill $PIDS 2>/dev/null || true
       fi
     fi
+  fi
+  if [[ "${SIDECAR_OWNED}" == "1" && -n "${SIDECAR_PID}" ]]; then
+    kill "$SIDECAR_PID" 2>/dev/null || true
+    wait "$SIDECAR_PID" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT INT TERM

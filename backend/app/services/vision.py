@@ -451,6 +451,7 @@ def analyze_video_file_result(path: Path) -> VideoAnalysisResult:
     from app.services import gpu_stack
     from app.services import media_text
     from app.services import nudity
+    from app.services import sd_detector
     from app.services.hash_cache import get_analysis_mode
     from app.models.schemas import AcquisitionMode
 
@@ -487,13 +488,20 @@ def analyze_video_file_result(path: Path) -> VideoAnalysisResult:
         max_frames=max(int(nudity_frames), int(analyzer_frames)),
     )
     try:
-        nudity_outcome = (
-            nudity.analyze_video_frames_result(path, shared_frames)
-            if shared_frames
-            else nudity.analyze_video_result(path)
-        )
-        findings.extend(nudity_outcome.findings)
-        cacheable = cacheable and nudity_outcome.cacheable
+        sd_outcome = sd_detector.analyze_video_result(path)
+        if sd_outcome.used:
+            findings.extend(sd_outcome.findings)
+            cacheable = cacheable and sd_outcome.cacheable
+        else:
+            nudity_outcome = (
+                nudity.analyze_video_frames_result(path, shared_frames)
+                if shared_frames
+                else nudity.analyze_video_result(path)
+            )
+            findings.extend(nudity_outcome.findings)
+            cacheable = cacheable and nudity_outcome.cacheable
+            if sd_outcome.warning:
+                cacheable = False
 
         selected = _even_frame_subset(shared_frames, int(analyzer_frames))
         if gpu_stack.stack_enabled():
@@ -537,6 +545,7 @@ def vision_status() -> dict:
     from app.services.ocr import ocr_status
     from app.services import gpu_stack
     from app.services import nudity
+    from app.services import sd_detector
     from app.core.config import settings as cfg
 
     pil_ok = False
@@ -561,6 +570,7 @@ def vision_status() -> dict:
         "whisper": bool(cfg.gpu_whisper_enabled),
     }
     info["nudity"] = nudity.status()
+    info["sd_detector"] = sd_detector.status()
     info["tuning"] = {
         "ocr_max_edge_px": cfg.ocr_max_edge_px,
         "ocr_sharpen": cfg.ocr_sharpen,

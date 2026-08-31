@@ -47,3 +47,5 @@ qwen-vl-utils>=0.0.8
 #   https://github.com/BillChan226/SafeWatch
 #   https://github.com/zhaoyuzhi/icm-assistant
 # - Di macOS tanpa CUDA: Whisper/OCR bisa CPU; MLLM guardrail butuh server NVIDIA
+# - Sexual-deviance (SmolVLM sidecar): pip install -e ../sexual-deviance
+#   lalu jalankan sexual-deviance/scripts/start_sidecar.sh dan SADT_SD_DETECTOR_ENABLED=1

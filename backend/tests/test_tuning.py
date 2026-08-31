@@ -97,6 +97,7 @@ def test_engine_fingerprint_includes_tuning(monkeypatch: pytest.MonkeyPatch):
     assert "nudity=" in fp
     assert "nudity_video=" in fp
     assert "nudity_codec=" in fp
+    assert "sd=" in fp
 
     monkeypatch.setattr(config.settings, "ocr_max_edge_px", 640)
     assert hash_cache.engine_fingerprint() != fp

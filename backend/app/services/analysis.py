@@ -486,11 +486,18 @@ def analyze_content_result(
     # Independent visual flag: run before the OCR/vision branches so QUICK gallery
     # and social screenshots (which intentionally bypass heavy OCR) are covered too.
     if is_image and ext != ".imgmeta":
-        from app.services import nudity
+        from app.services import nudity, sd_detector
 
-        outcome = nudity.analyze_image_result(path)
-        findings.extend(outcome.findings)
-        cacheable = cacheable and outcome.cacheable
+        sd_outcome = sd_detector.analyze_image_result(path)
+        if sd_outcome.used:
+            findings.extend(sd_outcome.findings)
+            cacheable = cacheable and sd_outcome.cacheable
+        else:
+            outcome = nudity.analyze_image_result(path)
+            findings.extend(outcome.findings)
+            cacheable = cacheable and outcome.cacheable
+            if sd_outcome.warning:
+                cacheable = False
 
     if ext == ".imgmeta":
         findings.extend(analyze_image_meta_l3(text))

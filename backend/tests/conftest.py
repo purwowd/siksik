@@ -23,6 +23,11 @@ def disable_live_notes_acquisition(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config.settings, "android_notes_enabled", False)
 
 
+@pytest.fixture(autouse=True)
+def disable_sd_detector(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config.settings, "sd_detector_enabled", False)
+
+
 async def cancel_session_tasks() -> None:
     tasks = list(sessions._tasks.values())
     for task in tasks:

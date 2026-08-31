@@ -449,6 +449,8 @@ def _detector_name(finding: dict[str, Any]) -> str:
     bracket = re.match(r"\[([^\]]+)]", evidence)
     if bracket:
         return bracket.group(1)[:40]
+    if evidence.startswith("Berkas:"):
+        return "sd"
     label = str(finding.get("label") or "").casefold()
     for needle, name in (
         ("qwen", "qwen"),
@@ -503,10 +505,14 @@ def merge_content_findings(findings: Iterable[dict[str, Any]]) -> list[dict[str,
         strongest = max(entries, key=lambda value: float(value[1].get("confidence", 0.0)))[1]
         layers = [str(item.get("layer_origin") or Layer.L3.value) for _, item in entries]
         layer = max(layers, key=lambda value: int(value[1:]) if value.startswith("L") and value[1:].isdigit() else 0)
+        preserved = next(
+            (item.get("label") for _, item in entries if item.get("keep_label") and item.get("label")),
+            None,
+        )
         combined = {
             **strongest,
             "category": category,
-            "label": CONTENT_CATEGORY_LABELS[category],
+            "label": preserved or CONTENT_CATEGORY_LABELS[category],
             "confidence": round(
                 min(0.99, max(float(item.get("confidence", 0.0)) for _, item in entries)),
                 3,
@@ -514,6 +520,7 @@ def merge_content_findings(findings: Iterable[dict[str, Any]]) -> list[dict[str,
             "layer_origin": layer,
             "evidence": _combined_evidence(item for _, item in entries),
         }
+        combined.pop("keep_label", None)
         merged.append((first_index, combined))
 
     merged.sort(key=lambda value: value[0])
@@ -521,7 +528,10 @@ def merge_content_findings(findings: Iterable[dict[str, Any]]) -> list[dict[str,
     # another label-only de-duplication here: legacy analyzers may legitimately
     # emit the same label with different evidence, and their behavior must stay
     # unchanged.  Existing callers retain their original label+evidence de-dupe.
-    return [finding for _, finding in merged]
+    out = [finding for _, finding in merged]
+    for finding in out:
+        finding.pop("keep_label", None)
+    return out
 
 
 def confirm_visual_candidates(

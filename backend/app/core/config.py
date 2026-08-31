@@ -435,6 +435,16 @@ class Settings(BaseSettings):
     nudity_video_probe_timeout_s: int = Field(default=30, ge=1, le=300)
     nudity_video_extract_timeout_s: int = Field(default=180, ge=10, le=1800)
 
+    # Sexual-deviance (NudeNet + SmolVLM llama.cpp sidecar). Off unless enabled;
+    # start_poc.sh launches the sidecar when this flag is on.
+    sd_detector_enabled: bool = False
+    sd_llama_host: str = "127.0.0.1"
+    sd_llama_port: int = Field(default=8080, ge=1, le=65535)
+    sd_mode: str = "balanced"  # fast | balanced | full
+    sd_timeout_sec: float = Field(default=30.0, ge=5.0, le=120.0)
+    sd_video_timeout_sec: float = Field(default=180.0, ge=15.0, le=900.0)
+    sd_config_path: Path = PROJECT_ROOT / "sexual-deviance" / "config.yaml"
+
     # CLIP zero-shot tokoh / presiden (butuh: pip install transformers)
     clip_tokoh_enabled: bool = True
     clip_tokoh_model: str = "openai/clip-vit-base-patch32"
