@@ -39,6 +39,23 @@ def test_ocr_findings_clean_text():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Prabowo menghadiri rapat kabinet",
+        "Presiden Prabowo meresmikan sekolah",
+        "Jokowi menghadiri acara keluarga",
+        "Wakil Presiden membuka kegiatan resmi",
+    ],
+)
+def test_public_figure_name_is_context_not_risk(text: str):
+    findings = ocr_findings_from_text(text, backend="fake")
+
+    assert findings == []
+    assert not any(item["category"] == "anti_pemerintah" for item in findings)
+
+
+@pytest.mark.unit
 def test_fake_backend_extract(tmp_path: Path):
     pytest.importorskip("PIL")
     from PIL import Image
@@ -128,6 +145,53 @@ def test_paddle_v3_result_contract(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert result.confidence == pytest.approx(0.915)
     assert len(result.regions) == 2
     assert result.regions[0].left == 1
+
+
+@pytest.mark.unit
+def test_paddle_cuda_failure_falls_back_to_cpu_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    monkeypatch.setattr(config.settings, "ocr_gpu", True)
+    backend = ocr_mod.PaddleOCRBackend()
+    attempts: list[str] = []
+
+    def fake_extract(_path: Path):
+        attempts.append("gpu" if backend.accelerator_requested else "cpu")
+        if backend.accelerator_requested:
+            raise RuntimeError("Cannot load cudnn shared library")
+        return ocr_mod.OcrResult(
+            text="Pengaturan akun dan privasi",
+            backend="paddleocr",
+            confidence=0.99,
+            device="cpu",
+        )
+
+    monkeypatch.setattr(backend, "extract", fake_extract)
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (64, 64), "white").save(image)
+
+    first = ocr_mod.run_ocr(
+        image,
+        backend=backend,
+        max_edge_px=0,
+        min_edge_px=0,
+        sharpen=False,
+    )
+    second = ocr_mod.run_ocr(
+        image,
+        backend=backend,
+        max_edge_px=0,
+        min_edge_px=0,
+        sharpen=False,
+    )
+
+    assert first is not None and first.device == "cpu"
+    assert second is not None and second.device == "cpu"
+    assert attempts == ["gpu", "cpu", "cpu"]
 
 
 @pytest.mark.gpu

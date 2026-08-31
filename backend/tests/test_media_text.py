@@ -30,6 +30,39 @@ def test_looks_like_chat_screenshot():
 
 
 @pytest.mark.unit
+def test_gpu_stack_does_not_force_ocr_on_plain_camera_photo(tmp_path, monkeypatch):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    monkeypatch.setattr(config.settings, "gpu_stack_enabled", True)
+    monkeypatch.setattr(config.settings, "media_text_enabled", True)
+    monkeypatch.setattr(config.settings, "ocr_full_gallery", False)
+    image = tmp_path / "DCIM" / "Camera" / "IMG_0001.jpg"
+    image.parent.mkdir(parents=True)
+    Image.new("RGB", (128, 128), (128, 128, 128)).save(image)
+
+    assert not media_text.should_try_ocr(image)
+
+
+@pytest.mark.unit
+def test_visual_skip_distinguishes_flat_ui_from_color_photo(tmp_path):
+    pytest.importorskip("PIL")
+    from PIL import Image, ImageDraw
+
+    ui = tmp_path / "settings.png"
+    Image.new("RGB", (360, 800), (245, 245, 245)).save(ui)
+    photo = tmp_path / "protest.jpg"
+    canvas = Image.new("RGB", (800, 520), (40, 120, 190))
+    draw = ImageDraw.Draw(canvas)
+    for index, color in enumerate(("red", "yellow", "green", "blue")):
+        draw.rectangle((index * 200, 180, (index + 1) * 200, 520), fill=color)
+    canvas.save(photo)
+
+    assert media_text.should_skip_generic_visual_model(ui)
+    assert not media_text.should_skip_generic_visual_model(photo)
+
+
+@pytest.mark.unit
 def test_ocr_documents_best_effort(tmp_path: Path, monkeypatch):
     pytest.importorskip("PIL")
     from PIL import Image

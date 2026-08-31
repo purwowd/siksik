@@ -79,6 +79,7 @@ def test_safewatch_bridge_on_path_keyword(monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setattr(config.settings, "gpu_safewatch_enabled", True)
     monkeypatch.setattr(config.settings, "gpu_safewatch_model", "")
     monkeypatch.setattr(config.settings, "gpu_safewatch_plugin", "")
+    monkeypatch.setattr(config.settings, "gpu_bridge_fallbacks_enabled", True)
     # Bridge must not go silent when checkpoint "available" either
     vid = tmp_path / "video_makar_demo.mp4"
     vid.write_bytes(b"ftyp")
@@ -154,6 +155,26 @@ def test_qwen_structured_aman_is_zero_findings():
 
 
 @pytest.mark.unit
+def test_qwen_decision_distinguishes_safe_from_unavailable():
+    safe = reason_qwen._decision_from_answer(
+        '{"status":"AMAN","detections":[]}',
+        layer="L3",
+        backend="test",
+    )
+    flagged = reason_qwen._decision_from_answer(
+        '{"status":"FLAGGED","detections":[{"category":"demonstration",'
+        '"confidence":0.91,"evidence":"massa membawa poster tuntutan"}]}',
+        layer="L3",
+        backend="test",
+    )
+
+    assert safe.verdict == "safe"
+    assert safe.hits == ()
+    assert flagged.verdict == "flagged"
+    assert flagged.hits[0].category == "demonstration"
+
+
+@pytest.mark.unit
 def test_qwen_malformed_structured_answer_is_not_reinterpreted():
     hits = reason_qwen._hits_from_text(
         '{"status":"FLAGGED","detections":[{"category":"extremism"}',
@@ -173,6 +194,35 @@ def test_qwen_plain_answer_can_still_flag_new_taxonomy():
     )
 
     assert [hit.category for hit in hits] == ["lgbt_content"]
+
+
+@pytest.mark.unit
+def test_qwen_prompt_focuses_candidates_without_inferring_orientation():
+    prompt = reason_qwen._moderation_prompt(
+        "gambar",
+        candidate_categories=["lgbt_content", "demonstration"],
+    )
+
+    assert "Prioritaskan verifikasi kandidat CLIP" in prompt
+    assert "lgbt_content, demonstration" in prompt
+    assert "kedekatan orang, wajah, pakaian, atau perkiraan orientasi" in prompt
+    assert "decision confirmed, rejected, atau uncertain" in prompt
+    assert "satu JSON saja tanpa markdown" in prompt
+
+
+@pytest.mark.unit
+def test_qwen_structured_parser_ignores_rejected_and_uncertain_candidates():
+    answer = (
+        '{"status":"FLAGGED","detections":['
+        '{"category":"demonstration","decision":"rejected","confidence":0.95},'
+        '{"category":"extremism","decision":"uncertain","confidence":0.80},'
+        '{"category":"political_campaign","decision":"confirmed",'
+        '"confidence":0.91,"evidence":"nomor urut dan ajakan memilih"}]}'
+    )
+
+    hits = reason_qwen._hits_from_text(answer, layer="L3", backend="test")
+
+    assert [hit.category for hit in hits] == ["political_campaign"]
 
 
 @pytest.mark.unit

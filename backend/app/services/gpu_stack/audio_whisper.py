@@ -6,6 +6,7 @@ import logging
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 from app.core.config import settings
@@ -15,6 +16,8 @@ from app.services.gpu_stack.types import ModerationHit
 log = logging.getLogger(__name__)
 _model = None
 _model_key: str | None = None
+_MODEL_LOCK = threading.Lock()
+_INFER_LOCK = threading.Lock()
 
 # Prompt netral — jangan tanam keyword risiko (Whisper sering meniru prompt → FP)
 _ID_PROMPT = "Berikut adalah ucapan atau lirik lagu dalam bahasa Indonesia."
@@ -60,11 +63,14 @@ def _get_model():
         device = "cpu"
     key = f"{settings.gpu_whisper_model}:{device}"
     if _model is None or _model_key != key:
-        import whisper
+        with _MODEL_LOCK:
+            if _model is not None and _model_key == key:
+                return _model
+            import whisper
 
-        log.info("Loading Whisper model=%s device=%s", settings.gpu_whisper_model, device)
-        _model = whisper.load_model(settings.gpu_whisper_model, device=device)
-        _model_key = key
+            log.info("Loading Whisper model=%s device=%s", settings.gpu_whisper_model, device)
+            _model = whisper.load_model(settings.gpu_whisper_model, device=device)
+            _model_key = key
     return _model
 
 
@@ -134,7 +140,7 @@ def transcribe(path: Path) -> str:
         from app.services.vision import video_duration_s
 
         dur = video_duration_s(path)
-        if dur is not None and dur > max_d:
+        if dur is not None and dur > max_d and first_s <= 0:
             log.info("Whisper skip %s (%.0fs > cap %ds)", path.name, dur, max_d)
             return ""
     tmp: Path | None = None
@@ -148,7 +154,10 @@ def transcribe(path: Path) -> str:
             if first_s > 0:
                 log.info("Whisper ASR first %ds of %s", first_s, path.name)
         model = _get_model()
-        result = model.transcribe(str(audio), **_transcribe_kwargs())
+        from app.services.inference_guard import gpu_inference_slot
+
+        with _INFER_LOCK, gpu_inference_slot():
+            result = model.transcribe(str(audio), **_transcribe_kwargs())
         return str(result.get("text") or "").strip()
     except Exception as exc:
         log.warning("Whisper failed on %s: %s", path.name, exc)

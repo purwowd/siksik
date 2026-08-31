@@ -15,10 +15,20 @@
 # Vision / torch base
 torch>=2.1.0
 
-# OCR — PaddleOCR 3.x (PaddleX / PP-OCRv6) needs PaddlePaddle 3.x.
-# Mixing 3.7 + 2.6.2 crashes: AnalysisConfig.set_optimization_level missing.
-paddlepaddle-gpu>=2.5.0,<3; platform_system != "Darwin"
-paddleocr>=2.7.0,<3
+# OCR — one CUDA 12.6/cuDNN 9 stack shared safely with current Torch wheels.
+# Driver >=550.54.14 is sufficient; the physical toolkit need not be 12.6.
+# The extra index is required because Paddle GPU 3.x is not published on PyPI.
+--extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/
+paddlepaddle-gpu==3.2.0; platform_system != "Darwin"
+paddleocr>=3.3.0,<4
+# Keep Paddle/PaddleOCR preprocessing on a mutually compatible numeric stack.
+numpy==1.26.4
+scipy==1.12.0
+scikit-image==0.22.0
+tifffile==2024.2.12
+opencv-python==4.10.0.84
+opencv-python-headless==4.10.0.84
+opencv-contrib-python==4.10.0.84
 easyocr>=1.7.0
 # Replaces the CPU `onnxruntime` wheel pulled by nudenet.
 # 1.29+ on PyPI is CUDA 13; this venv's torch is CUDA 12.4 (libcublasLt.so.12).

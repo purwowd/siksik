@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import re
@@ -14,6 +15,7 @@ from app.core.config import settings
 from app.core.db import db, utcnow
 from app.models.schemas import AcquisitionMode, Layer, ReviewStatus, SessionStatus
 from app.services.acquisition import IMG_EXT, TEXT_EXT, VID_EXT
+from app.services import document_text
 from app.services import vision as vis
 
 CANONICAL_CRAWL_RECORD_MIME = "application/vnd.siksik.crawl-record+json"
@@ -32,13 +34,18 @@ def _skip_heavy_ocr_for_gallery(
     source: str,
     origin_hint: str | None = None,
 ) -> bool:
-    """QUICK camera-roll: skip EasyOCR unless screenshot/chat/dokumen/edge."""
+    """Skip OCR on ordinary gallery photos; retain it for text-bearing media."""
     if source not in {"gallery", "media_image", "media_video"}:
         return False
     from app.services.hash_cache import get_analysis_mode
     from app.services import media_text
 
-    if get_analysis_mode() != AcquisitionMode.QUICK:
+    mode = get_analysis_mode()
+    # Direct library/test callers have no acquisition policy; preserve the
+    # exhaustive legacy branch unless QUICK/FULL explicitly selected a policy.
+    if mode is None:
+        return False
+    if mode == AcquisitionMode.FULL and settings.ocr_full_gallery:
         return False
     return not media_text.should_try_ocr(path, origin_hint=origin_hint)
 
@@ -96,9 +103,21 @@ def analyze_text_l1_l2(text: str, keywords: list[str]) -> list[dict]:
         return []
     findings: list[dict] = []
     for kw in match_keywords(text, keywords):
+        words = [re.escape(value) for value in str(kw).split() if value]
+        match = re.search(r"[\s\-/]+".join(words), text, flags=re.IGNORECASE) if words else None
+        if match is not None:
+            start = max(0, match.start() - 100)
+            end = min(len(text), match.end() + 180)
+            evidence = " ".join(text[start:end].replace("\x00", " ").split())
+        else:
+            evidence = " ".join(text.replace("\x00", " ").split())[:280]
+        local_context = normalize_text(evidence)
         boost = (
             0.08
-            if any(x in norm for x in ("grup", "rahasia", "rencana", "segera", "malam ini"))
+            if any(
+                x in local_context
+                for x in ("grup", "rahasia", "rencana", "segera", "malam ini")
+            )
             else 0.0
         )
         conf = min(0.99, 0.72 + len(kw) * 0.01 + boost)
@@ -108,7 +127,7 @@ def analyze_text_l1_l2(text: str, keywords: list[str]) -> list[dict]:
                 "label": f"Indikasi: {kw}",
                 "confidence": round(conf, 3),
                 "layer_origin": Layer.L2.value if boost else Layer.L1.value,
-                "evidence": text[:320],
+                "evidence": evidence[:320],
             }
         )
     return findings
@@ -283,13 +302,65 @@ async def read_preview(path: Path, mime: str, max_bytes: int = 200_000) -> str:
         return await asyncio.to_thread(_read_meta)
     if ext in IMG_EXT or ext in VID_EXT or mime.startswith("image/") or mime.startswith("video/"):
         return ""
-    if ext in {".pdf", ".doc", ".docx", ".rtf", ".odt", ".zip", ".rar", ".7z"}:
+    if ext in document_text.DOCUMENT_EXTENSIONS or mime == "application/pdf":
+        # A short-lived executor keeps slow PDF tools off the event loop and is
+        # explicitly joined. This avoids orphaned default-executor threads when
+        # CLI/tests create and close many temporary asyncio loops.
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="siksik-document",
+        )
+        future = executor.submit(
+            document_text.extract_document_text,
+            path,
+            mime,
+            max_chars=max_bytes,
+        )
+        try:
+            while not future.done():
+                await asyncio.sleep(0.01)
+            return future.result()
+        except Exception:
+            future.cancel()
+            return ""
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+    if ext == ".json" or mime == "application/json":
+
+        def _read_json_values() -> str:
+            try:
+                limit = int(settings.document_extract_max_bytes)
+                if path.stat().st_size > limit:
+                    return ""
+                with path.open("r", encoding="utf-8", errors="ignore") as stream:
+                    raw = stream.read(limit + 1)
+                if len(raw) > limit:
+                    return ""
+            except OSError:
+                return ""
+            return document_text.extract_json_text(raw, max_chars=max_bytes)
+
+        return await asyncio.to_thread(_read_json_values)
+    if ext in {".html", ".htm"} or mime == "text/html":
+
+        def _read_visible_html() -> str:
+            try:
+                limit = int(settings.document_extract_max_bytes)
+                with path.open("r", encoding="utf-8", errors="ignore") as stream:
+                    raw = stream.read(limit)
+            except OSError:
+                return ""
+            return document_text.extract_html_text(raw, max_chars=max_bytes)
+
+        return await asyncio.to_thread(_read_visible_html)
+    if ext in {".zip", ".rar", ".7z"}:
         return ""
     if _is_probably_text(path, mime):
 
         def _read() -> str:
             try:
-                return path.read_text(encoding="utf-8", errors="ignore")[:max_bytes]
+                with path.open("r", encoding="utf-8", errors="ignore") as stream:
+                    return stream.read(max_bytes)
             except OSError:
                 return ""
 
@@ -301,11 +372,13 @@ async def read_preview(path: Path, mime: str, max_bytes: int = 200_000) -> str:
 
 from app.services.hash_cache import (
     get_cached,
+    get_stage_cached,
+    ocr_stage_fingerprint,
     reset_analysis_mode,
     set_analysis_mode,
     set_cached,
+    set_stage_cached,
 )
-from app.services.inference_guard import run_guarded
 
 
 def analyze_content_result(
@@ -369,9 +442,11 @@ def analyze_content_result(
         ):
             from app.services.gpu_stack import reason_qwen
 
-            findings.extend(
-                hit.as_finding()
-                for hit in reason_qwen.moderate_text(combined_content_text)
+            decision = reason_qwen.moderate_text_decision(combined_content_text)
+            findings.extend(hit.as_finding() for hit in decision.hits)
+            findings = content_policy.apply_text_adjudication(
+                findings,
+                reasoning_verdict=decision.verdict,
             )
         findings = content_policy.merge_content_findings(findings)
         seen: set[str] = set()
@@ -391,18 +466,29 @@ def analyze_content_result(
     )
     is_video = ext in VID_EXT or source == "video" or mime.startswith("video/")
 
+    # Direct-transfer binaries replace their canonical JSON companion during
+    # indexing. Preserve that verified text as first-class evidence instead of
+    # using it only as a cache-key salt or a Qwen prompt hint.
+    if (is_image or is_video) and text.strip():
+        from app.services import content_policy
+
+        findings.extend(analyze_text_l1_l2(text, keywords))
+        if settings.content_detection_enabled:
+            findings.extend(
+                content_policy.findings_from_text(
+                    text,
+                    backend="canonical_media_context",
+                    layer=Layer.L2.value,
+                    image_context=is_image,
+                )
+            )
+
     # Independent visual flag: run before the OCR/vision branches so QUICK gallery
     # and social screenshots (which intentionally bypass heavy OCR) are covered too.
     if is_image and ext != ".imgmeta":
         from app.services import nudity
 
         outcome = nudity.analyze_image_result(path)
-        findings.extend(outcome.findings)
-        cacheable = cacheable and outcome.cacheable
-    elif is_video and ext != ".vidmeta":
-        from app.services import nudity
-
-        outcome = nudity.analyze_video_result(path)
         findings.extend(outcome.findings)
         cacheable = cacheable and outcome.cacheable
 
@@ -418,6 +504,8 @@ def analyze_content_result(
                     precomputed_ocr_text=precomputed_ocr_text,
                     precomputed_ocr_backend=precomputed_ocr_backend,
                     include_reasoning=True,
+                    origin_hint=origin_hint,
+                    context_text=text,
                 )
             )
         elif _skip_heavy_ocr_for_gallery(path, source, origin_hint):
@@ -428,6 +516,8 @@ def analyze_content_result(
                     path,
                     precomputed_ocr_text=precomputed_ocr_text,
                     precomputed_ocr_backend=precomputed_ocr_backend,
+                    origin_hint=origin_hint,
+                    context_text=text,
                 )
             )
         else:
@@ -437,13 +527,20 @@ def analyze_content_result(
                     precomputed_ocr_text=precomputed_ocr_text,
                     precomputed_ocr_backend=precomputed_ocr_backend,
                     origin_hint=origin_hint,
+                    context_text=text,
                 )
             )
     elif ext == ".vidmeta":
         findings.extend(analyze_video_meta_l4(text))
     elif is_video:
-        findings.extend(vis.analyze_video_file(path))
-    elif _is_probably_text(path, mime) and text.strip():
+        video_outcome = vis.analyze_video_file_result(path)
+        findings.extend(video_outcome.findings)
+        cacheable = cacheable and video_outcome.cacheable
+    elif (
+        _is_probably_text(path, mime)
+        or ext in document_text.DOCUMENT_EXTENSIONS
+        or mime == "application/pdf"
+    ) and text.strip():
         findings.extend(analyze_text_l1_l2(text, keywords))
         if settings.content_detection_enabled:
             from app.services import content_policy
@@ -463,10 +560,13 @@ def analyze_content_result(
             ):
                 from app.services.gpu_stack import reason_qwen
 
-                findings.extend(
-                    hit.as_finding() for hit in reason_qwen.moderate_text(text)
+                decision = reason_qwen.moderate_text_decision(text)
+                findings.extend(hit.as_finding() for hit in decision.hits)
+                findings = content_policy.apply_text_adjudication(
+                    findings,
+                    reasoning_verdict=decision.verdict,
                 )
-    # pdf/docx/binaries lain: path signals saja sampai ada extractor khusus
+    # Unsupported/encrypted binaries retain path-only signals.
 
     from app.services import content_policy
 
@@ -763,7 +863,8 @@ async def _analyze_session_body(
             if not analysis_plan.allows_file_source(row["source"]):
                 return []
             canonical_text = str(meta.get("canonical_normalized_text") or "").strip()
-            cache_key = str(row["sha256"] or "")
+            content_cache_key = str(row["sha256"] or "")
+            cache_key = content_cache_key
             if cache_key and str(row["mime"] or "") == WHATSAPP_MESSAGE_MIME:
                 cache_key = hashlib.sha256(
                     f"{cache_key}\0whatsapp-analysis-v2".encode("utf-8")
@@ -837,6 +938,55 @@ async def _analyze_session_body(
                     str(meta.get(key) or "")
                     for key in ("directory_hint", "display_name", "album")
                 ).strip() or None
+                is_image_media = (
+                    ext in IMG_EXT or (row["mime"] or "").startswith("image/")
+                )
+                if (
+                    precomputed is None
+                    and content_cache_key
+                    and is_image_media
+                    and bool(settings.ocr_enabled or settings.media_text_enabled)
+                    and row["source"] not in {"visible_ui", "accessibility_visible_ui"}
+                    and not _skip_heavy_ocr_for_gallery(
+                        path,
+                        str(row["source"] or ""),
+                        origin_hint,
+                    )
+                ):
+                    stage_fingerprint = ocr_stage_fingerprint()
+                    cached_ocr = await get_stage_cached(
+                        content_cache_key,
+                        stage="ocr-text",
+                        fingerprint=stage_fingerprint,
+                    )
+                    if cached_ocr is None:
+                        from app.services import media_text, ocr as ocr_mod
+
+                        backend = (
+                            ocr_mod.get_backend()
+                            if settings.ocr_enabled
+                            else media_text._pick_ocr_backend()
+                        )
+                        ocr_result = (
+                            await asyncio.to_thread(ocr_mod.run_ocr, path, backend=backend)
+                            if backend is not None
+                            else None
+                        )
+                        cached_ocr = {
+                            "text": str(ocr_result.text or "") if ocr_result else "",
+                            "backend": str(ocr_result.backend or "") if ocr_result else "",
+                        }
+                        if backend is not None and ocr_result is not None:
+                            await set_stage_cached(
+                                content_cache_key,
+                                stage="ocr-text",
+                                fingerprint=stage_fingerprint,
+                                value=cached_ocr,
+                            )
+                    precomputed = (
+                        str(cached_ocr.get("text") or ""),
+                        str(cached_ocr.get("backend") or "stage-cache"),
+                    )
                 is_heavy = (
                     ext in VID_EXT
                     or ext in IMG_EXT
@@ -856,7 +1006,6 @@ async def _analyze_session_body(
                     )
                 if is_heavy:
                     outcome = await asyncio.to_thread(
-                        run_guarded,
                         analyze_content_result,
                         path,
                         row["mime"] or "",

@@ -15,6 +15,7 @@ import logging
 import os
 import tempfile
 import threading
+from contextlib import nullcontext
 from importlib.metadata import PackageNotFoundError, version
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -331,6 +332,17 @@ class PaddleOCRBackend(OcrBackend):
     def __init__(self) -> None:
         self._ocr = None
         self._device = "cpu"
+        self._force_cpu = False
+
+    @property
+    def accelerator_requested(self) -> bool:
+        return bool(settings.ocr_gpu and not self._force_cpu)
+
+    def fallback_to_cpu(self) -> None:
+        """Keep this shared instance on CPU after a broken CUDA/cuDNN runtime."""
+        self._force_cpu = True
+        self._ocr = None
+        self._device = "cpu"
 
     def available(self) -> bool:
         try:
@@ -357,7 +369,7 @@ class PaddleOCRBackend(OcrBackend):
                 major = 2
             if major >= 3:
                 device = "cpu"
-                if settings.ocr_gpu:
+                if self.accelerator_requested:
                     try:
                         import paddle
 
@@ -374,11 +386,12 @@ class PaddleOCRBackend(OcrBackend):
                     use_textline_orientation=False,
                 )
             else:
-                self._device = "cuda" if settings.ocr_gpu else "cpu"
+                use_gpu = self.accelerator_requested
+                self._device = "cuda" if use_gpu else "cpu"
                 self._ocr = PaddleOCR(
                     use_angle_cls=True,
                     lang=lang,
-                    use_gpu=bool(settings.ocr_gpu),
+                    use_gpu=use_gpu,
                     show_log=False,
                 )
         return self._ocr
@@ -517,6 +530,7 @@ def ocr_status() -> dict:
         "enabled": bool(settings.ocr_enabled),
         "backend": chosen,
         "gpu": bool(settings.ocr_gpu),
+        "preload": bool(settings.ocr_preload),
         "available": inst.available() if settings.ocr_enabled or chosen == "fake" else inst.available(),
         "langs": settings.ocr_langs,
         "max_edge_px": settings.ocr_max_edge_px,
@@ -554,6 +568,38 @@ def get_backend() -> OcrBackend | None:
     return get_shared_backend(settings.ocr_backend)
 
 
+def warmup_backend() -> dict[str, str | bool]:
+    """Load the configured OCR predictors before the first analysis session."""
+    backend = get_backend()
+    if backend is None:
+        return {"ready": False, "backend": settings.ocr_backend, "device": "unavailable"}
+    try:
+        if isinstance(backend, PaddleOCRBackend):
+            try:
+                backend._get()
+            except Exception as exc:
+                if backend.accelerator_requested and _is_paddle_accelerator_error(exc):
+                    log.warning(
+                        "PaddleOCR GPU warmup failed (%s); preloading CPU fallback",
+                        type(exc).__name__,
+                    )
+                    backend.fallback_to_cpu()
+                    backend._get()
+                else:
+                    raise
+            device = backend._device
+        elif isinstance(backend, EasyOCRBackend):
+            backend._get_reader()
+            device = "cuda" if settings.ocr_gpu else "cpu"
+        else:
+            device = "cpu"
+        log.info("OCR backend preloaded backend=%s device=%s", backend.name, device)
+        return {"ready": True, "backend": backend.name, "device": device}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("OCR preload failed backend=%s: %s", backend.name, exc)
+        return {"ready": False, "backend": backend.name, "device": "unavailable"}
+
+
 def reset_backend_cache() -> None:
     get_backend.cache_clear()
     with _SHARED_BACKENDS_LOCK:
@@ -561,12 +607,18 @@ def reset_backend_cache() -> None:
 
 
 def ocr_keyword_corpus() -> list[str]:
-    """Lexicon OCR: risiko + sindiran meme + nama tokoh."""
-    from app.services.lexicon import meme_hate_corpus
+    """Lexicon OCR for findings; public-figure names stay context-only.
 
+    ``tokoh_keywords`` are intentionally excluded.  They are consumed by
+    :func:`fuse_tokoh_and_text` to identify the target of a meme/insult, but a
+    name such as Prabowo, Jokowi, or ``presiden`` is not itself risky content.
+    """
     seen: set[str] = set()
     out: list[str] = []
-    for kw in list(meme_hate_corpus()) + list(settings.tokoh_keywords):
+    # Contextual meme/insult phrases are classified by ``content_policy``
+    # below. Keeping this legacy pass limited to the explicit risk corpus also
+    # prevents token fallback from reducing "lengserkan Jokowi" to "Jokowi".
+    for kw in settings.risk_keywords:
         low = kw.lower().strip()
         if not low or low in seen:
             continue
@@ -618,8 +670,23 @@ def fuse_tokoh_and_text(
     tokoh_findings: list[dict],
     ocr_findings: list[dict],
 ) -> list[dict]:
-    """Gabungkan wajah/tokoh (CLIP) + teks ujaran/sindiran di gambar yang sama (meme)."""
-    from app.services.lexicon import hate_or_sindiran_hits, layer_l3, match_keywords, meme_insult_corpus, tokoh_name_hits
+    """Combine a public figure with explicit meme/insult text on one image.
+
+    A detected public figure is supporting context, never an
+    ``anti_pemerintah`` finding by itself.  Canonical political categories are
+    emitted only when the text contains an actual satire or insult cue.
+    """
+    from app.services.content_policy import (
+        CONTENT_CATEGORY_LABELS,
+        POLITICAL_INSULT,
+        POLITICAL_MEME,
+    )
+    from app.services.lexicon import (
+        layer_l3,
+        match_keywords,
+        meme_insult_corpus,
+        tokoh_name_hits,
+    )
 
     if not ocr_text.strip() and not tokoh_findings:
         return list(ocr_findings) + list(tokoh_findings)
@@ -637,10 +704,13 @@ def fuse_tokoh_and_text(
     if not has_tokoh or not ocr_text.strip():
         return fused
 
-    political = hate_or_sindiran_hits(ocr_text, include_insults=False)
+    political = match_keywords(
+        ocr_text,
+        list(settings.meme_hate_keywords),
+        allow_token_fallback=False,
+    )
     insults = match_keywords(ocr_text, meme_insult_corpus(), allow_token_fallback=False)
-    hate = list(dict.fromkeys(political + insults))
-    if not hate:
+    if not political and not insults:
         return fused
 
     tokoh_bits: list[str] = []
@@ -658,20 +728,32 @@ def fuse_tokoh_and_text(
             seen_t.add(k)
             tokoh_uniq.append(t)
 
-    hate_s = ", ".join(hate[:5])
     tokoh_s = ", ".join(tokoh_uniq[:3]) or "tokoh"
     be = ocr_backend or "ocr"
-    fused.append(
-        {
-            "category": "anti_pemerintah",
-            "label": f"Meme/poster tokoh + ujaran: {hate_s}",
-            "confidence": 0.93,
-            "layer_origin": layer_l3(),
-            "evidence": (
-                f"[{be}+clip] {path.name} | tokoh={tokoh_s} | teks={ocr_text[:220]}"
-            )[:320],
-        }
-    )
+    evidence = (
+        f"[{be}+clip] {path.name} | tokoh={tokoh_s} | teks={ocr_text[:220]}"
+    )[:320]
+    existing_categories = {str(item.get("category") or "") for item in fused}
+    if political and POLITICAL_MEME not in existing_categories:
+        fused.append(
+            {
+                "category": POLITICAL_MEME,
+                "label": CONTENT_CATEGORY_LABELS[POLITICAL_MEME],
+                "confidence": 0.93,
+                "layer_origin": layer_l3(),
+                "evidence": evidence,
+            }
+        )
+    if insults and POLITICAL_INSULT not in existing_categories:
+        fused.append(
+            {
+                "category": POLITICAL_INSULT,
+                "label": CONTENT_CATEGORY_LABELS[POLITICAL_INSULT],
+                "confidence": 0.93,
+                "layer_origin": layer_l3(),
+                "evidence": evidence,
+            }
+        )
     return fused
 
 
@@ -684,7 +766,10 @@ def consolidate_image_findings(findings: list[dict]) -> list[dict]:
     for f in findings:
         lab = str(f.get("label", ""))
         low = lab.lower()
-        if low.startswith("meme/poster tokoh + ujaran:"):
+        if (
+            low.startswith("meme/poster tokoh + ujaran:")
+            or str(f.get("category") or "") in {"political_meme", "political_insult"}
+        ):
             meme.append(f)
         elif low.startswith("tokoh:"):
             tokoh.append(f)
@@ -744,9 +829,33 @@ def run_ocr(
         sharpen=sharpen,
     )
     try:
-        if isinstance(engine, EasyOCRBackend):
-            return engine.extract(ocr_path, mag_ratio=mag_ratio)
-        return engine.extract(ocr_path)
+        from app.services.inference_guard import gpu_inference_slot
+
+        accelerator_requested = bool(settings.ocr_gpu)
+        if isinstance(engine, PaddleOCRBackend):
+            accelerator_requested = engine.accelerator_requested
+        gpu_slot = gpu_inference_slot() if accelerator_requested else nullcontext()
+        # Every shared backend instance is single-flight. PaddleOCR is not
+        # thread-safe either, while EasyOCR already uses this re-entrant lock.
+        with _OCR_EXTRACT_LOCK, gpu_slot:
+            try:
+                if isinstance(engine, EasyOCRBackend):
+                    return engine.extract(ocr_path, mag_ratio=mag_ratio)
+                return engine.extract(ocr_path)
+            except Exception as exc:
+                if (
+                    isinstance(engine, PaddleOCRBackend)
+                    and engine.accelerator_requested
+                    and _is_paddle_accelerator_error(exc)
+                ):
+                    log.warning(
+                        "PaddleOCR GPU runtime unavailable (%s); switching the "
+                        "shared backend to CPU",
+                        type(exc).__name__,
+                    )
+                    engine.fallback_to_cpu()
+                    return engine.extract(ocr_path)
+                raise
     except Exception as exc:  # noqa: BLE001
         log.exception("OCR failed on %s: %s", image_path, exc)
         return None
@@ -756,6 +865,21 @@ def run_ocr(
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def _is_paddle_accelerator_error(exc: BaseException) -> bool:
+    message = f"{type(exc).__name__}: {exc}".casefold()
+    return any(
+        marker in message
+        for marker in (
+            "cudnn",
+            "cublas",
+            "libcudart",
+            "cuda error",
+            "cuda driver",
+            "gpu place",
+        )
+    )
 
 
 def analyze_image_ocr(image_path: Path, *, backend: OcrBackend | None = None) -> list[dict]:

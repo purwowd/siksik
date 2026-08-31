@@ -12,12 +12,14 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
 from app.services.gpu_stack.types import ModerationHit
 
 log = logging.getLogger(__name__)
+_PLUGIN_INFER_LOCK = threading.Lock()
 
 
 def _dicts_to_hits(
@@ -87,7 +89,10 @@ def run_plugin(
     if fn is None:
         return None
     try:
-        raw = fn(path)
+        from app.services.inference_guard import gpu_inference_slot
+
+        with _PLUGIN_INFER_LOCK, gpu_inference_slot():
+            raw = fn(path)
         if raw is None:
             return None
         return _dicts_to_hits(list(raw), default_layer=default_layer, default_backend=default_backend)

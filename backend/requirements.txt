@@ -1,3 +1,5 @@
+# PaddleOCR / scikit-image / scipy wheels require numpy 1.x ABI (numpy 2.x → import crash / SIGBUS at startup).
+numpy>=1.26.4,<2
 fastapi>=0.115.0
 uvicorn[standard]>=0.34.0
 pydantic>=2.11.0
@@ -12,3 +14,6 @@ nudenet==3.4.2
 # CLIP tokoh/presiden (foto) — opsional tapi disarankan di lab:
 #   pip install transformers
 transformers>=4.40.0
+# Bounded native-text extraction for PDF; backend falls back to pdftotext when
+# unavailable, so existing offline installations remain operational.
+pypdf>=5.0.0,<7

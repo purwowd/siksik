@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import time
 
@@ -25,6 +26,10 @@ async def lifespan(_app: FastAPI):
     ensure_dirs()
     await db.connect()
     await ensure_auth_schema()
+    if settings.ocr_enabled and settings.ocr_preload:
+        from app.services import ocr as ocr_mod
+
+        await asyncio.to_thread(ocr_mod.warmup_backend)
     yield
     from app.acquisition.bootstrap import agent_bootstrap
 

@@ -80,10 +80,10 @@ class Settings(BaseSettings):
     video_cap_quick: int = 0
     video_cap_full: int = 0  # 0 = tanpa batas (FULL)
     max_file_size_mb: int = 4096
-    cv_batch_size: int = 16
-    worker_concurrency: int = 4
+    cv_batch_size: int = 32
+    worker_concurrency: int = 8
     # Resize sebelum OCR — 0 = tanpa downscale; 2200 lebih baik untuk poster/meme
-    ocr_max_edge_px: int = 2200
+    ocr_max_edge_px: int = 1600
     # Upscale foto kecil (meme WA/crop) agar EasyOCR baca lebih jelas; 0 = off
     ocr_min_edge_px: int = 1200
     # Sharpen ringan sebelum OCR (poster/screenshot)
@@ -398,6 +398,9 @@ class Settings(BaseSettings):
     ocr_enabled: bool = False
     ocr_backend: str = "paddleocr"  # paddleocr | easyocr | tesseract | fake
     ocr_gpu: bool = True
+    # Load OCR predictors during API startup so a session does not appear to
+    # stall when the first text-bearing image is reached.
+    ocr_preload: bool = True
     ocr_langs: str = "id,en"
     # EasyOCR model dir (default: data/easyocr) — hindari ~/.EasyOCR di lab Mac
     ocr_model_dir: Path | None = None
@@ -406,13 +409,18 @@ class Settings(BaseSettings):
     # Default ON — jalan jika engine terpasang; tanpa engine = no-op
     media_text_enabled: bool = True
     # Mode FULL: OCR semua gambar di gallery/pictures/dcim (bukan hanya edge/screenshot)
-    ocr_full_gallery: bool = True
+    # Selective by default: screenshots/documents/posters still use OCR, while
+    # ordinary photos avoid a redundant text pass. Set true for exhaustive FULL.
+    ocr_full_gallery: bool = False
     video_overlay_keyframes: int = 5
     gpu_whisper_enabled: bool = True
 
     # Explicit nudity detection — lightweight bundled NudeNet 320n.
     # Runs for every selected image/video in QUICK and FULL, independent of OCR/GPU stack.
     nudity_detection_enabled: bool = True
+    # CPU is the safe default: onnxruntime-gpu can advertise CUDA even when the
+    # installed driver/runtime pair cannot create a session.
+    nudity_onnx_device: str = "cpu"  # cpu | cuda | auto
     nudity_threshold_anus: float = Field(default=0.50, ge=0.2, le=1.0)
     nudity_threshold_buttocks: float = Field(default=0.60, ge=0.2, le=1.0)
     nudity_threshold_female_breast: float = Field(default=0.55, ge=0.2, le=1.0)
@@ -430,8 +438,8 @@ class Settings(BaseSettings):
     # CLIP zero-shot tokoh / presiden (butuh: pip install transformers)
     clip_tokoh_enabled: bool = True
     clip_tokoh_model: str = "openai/clip-vit-base-patch32"
-    clip_tokoh_threshold: float = 0.24
-    clip_tokoh_margin: float = 0.04
+    clip_tokoh_threshold: float = 0.55
+    clip_tokoh_margin: float = 0.08
 
     # Shared multimodal content taxonomy.  The learned backends are optional;
     # explicit OCR/text rules remain portable on CPU-only Ubuntu/macOS.
@@ -441,6 +449,41 @@ class Settings(BaseSettings):
     # checkpoint can be selected without changing code.
     content_visual_model: str = ""
     content_visual_threshold: float = Field(default=0.70, ge=0.5, le=0.99)
+    # Per-category floors. The global value may raise all floors for a
+    # precision-first deployment, while these defaults reflect category risk.
+    content_visual_threshold_lgbt: float = Field(default=0.70, ge=0.5, le=0.99)
+    content_visual_threshold_political_meme: float = Field(default=0.76, ge=0.5, le=0.99)
+    content_visual_threshold_political_campaign: float = Field(default=0.76, ge=0.5, le=0.99)
+    content_visual_threshold_demonstration: float = Field(default=0.76, ge=0.5, le=0.99)
+    content_visual_threshold_extremism: float = Field(default=0.84, ge=0.5, le=0.99)
+    # CLIP logits are only a candidate signal.  Requiring some probability mass
+    # across the complete prompt set prevents every positive/hard-negative pair
+    # from independently becoming a high-confidence finding.
+    content_visual_min_share: float = Field(default=0.12, ge=0.0, le=1.0)
+    content_visual_max_candidates: int = Field(default=2, ge=1, le=8)
+    content_visual_require_confirmation: bool = True
+    # A very strong pride/trans flag match may bypass Qwen when CLIP and a
+    # cheap stripe-geometry check agree. This is the sub-500 ms warm path;
+    # lower-confidence/contextual candidates still require independent proof.
+    content_visual_fast_path_enabled: bool = True
+    content_visual_strong_threshold: float = Field(default=0.82, ge=0.8, le=0.999)
+    content_visual_strong_min_share: float = Field(default=0.12, ge=0.0, le=1.0)
+    content_visual_flag_stripe_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
+    content_visual_fast_demonstration_threshold: float = Field(default=0.88, ge=0.8, le=0.999)
+    content_visual_fast_manipulated_meme_threshold: float = Field(
+        default=0.98,
+        ge=0.8,
+        le=0.999,
+    )
+    content_visual_fast_satire_meme_threshold: float = Field(
+        default=0.995,
+        ge=0.8,
+        le=0.9999,
+    )
+    # Text-heavy screenshots/documents are classified from OCR first.  Running
+    # generic zero-shot vision over application chrome is both slow and a major
+    # source of political/flag false positives.
+    content_visual_skip_text_heavy_without_signal: bool = True
     content_models_local_only: bool = True
     # Optional fine-tuned multi-label checkpoint (base IndoBERTweet alone is
     # deliberately not treated as a classifier).
@@ -453,20 +496,38 @@ class Settings(BaseSettings):
     # Aktif: python run.py … --gpu  atau  SADT_GPU_STACK_ENABLED=1
     gpu_stack_enabled: bool = False
     gpu_video_keyframes: int = 5
+    video_ocr_max_frames: int = Field(default=2, ge=0, le=32)
+    # Empty SafeWatch/ICM model paths previously enabled heuristic "bridges"
+    # which duplicated OCR/Pillow work while looking like real model output.
+    gpu_bridge_fallbacks_enabled: bool = False
     gpu_safewatch_enabled: bool = True
     gpu_safewatch_model: str = ""  # path checkpoint SafeWatch
     gpu_safewatch_plugin: str = ""  # dotted module with moderate(path) → hits
     gpu_icm_enabled: bool = True
     gpu_icm_model: str = ""  # e.g. zhaoyuzhi/ICM-LLaVA-v1.5-7B atau path lokal
     gpu_icm_plugin: str = ""  # dotted module with moderate(path) → hits
-    gpu_qwen_enabled: bool = True
+    # Qwen is an optional deep adjudicator, not part of the default synchronous
+    # path. CLIP/OCR/NudeNet remain usable when it is disabled.
+    gpu_qwen_enabled: bool = False
     gpu_qwen_model: str = ""  # e.g. Qwen/Qwen2.5-VL-7B-Instruct
     gpu_qwen_plugin: str = ""  # optional override for VL moderate(path)
     # Camera JPEGs can be 12k; VL generate on the full frame stalls 6GB labs.
-    gpu_qwen_max_edge_px: int = Field(default=1280, ge=320, le=4096)
+    gpu_qwen_max_edge_px: int = Field(default=768, ge=320, le=4096)
+    gpu_qwen_image_max_new_tokens: int = Field(default=64, ge=16, le=512)
+    gpu_qwen_text_max_new_tokens: int = Field(default=160, ge=16, le=768)
+    gpu_qwen_video_max_frames: int = Field(default=2, ge=0, le=16)
     gpu_whisper_model: str = "base"  # tiny|base|small|medium|large-v3
     gpu_whisper_lang: str = "id"  # kosongkan untuk auto
     gpu_ocr_backend: str = "paddleocr"
+
+    # Bounded server-side document extraction.  Android preprocessed text is
+    # still preferred when present; these limits protect ZIP/XML/PDF fallbacks.
+    document_extract_max_chars: int = Field(default=200_000, ge=1_024, le=2_000_000)
+    document_extract_max_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=1 * 1024 * 1024,
+        le=512 * 1024 * 1024,
+    )
 
     risk_keywords: list[str] = [
         "anti pemerintah",

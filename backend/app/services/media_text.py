@@ -82,13 +82,36 @@ def looks_like_text_heavy_image(path: Path, origin_hint: str | None = None) -> b
         return False
 
 
+def should_skip_generic_visual_model(path: Path, origin_hint: str | None = None) -> bool:
+    """Identify flat application/document UI, not merely any high-edge image.
+
+    Natural protest/campaign photos often have high edge density and readable
+    banners, so they should receive both OCR and CLIP. Predominantly low-color
+    portrait screenshots can safely use OCR/context without generic CLIP, which
+    strongly confuses application settings pages with political posters.
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(path) as source:
+            image = source.convert("HSV")
+            image.thumbnail((96, 96))
+            width, height = image.size
+            pixels = list(image.getdata())
+    except Exception:
+        return False
+    if not pixels or width <= 0:
+        return False
+    portrait_ratio = height / width
+    low_saturation_ratio = sum(pixel[1] < 38 for pixel in pixels) / len(pixels)
+    return portrait_ratio >= 1.45 and low_saturation_ratio >= 0.62
+
+
 def should_try_ocr(path: Path, *, force: bool = False, origin_hint: str | None = None) -> bool:
     if force:
         return True
     if not settings.media_text_enabled and not settings.gpu_stack_enabled:
         return False
-    if settings.gpu_stack_enabled:
-        return True
     if looks_like_text_heavy_image(path, origin_hint):
         return True
     # Mode FULL + ocr_full_gallery: OCR semua gambar di gallery / pictures / dcim
@@ -177,7 +200,11 @@ def ocr_image_best_effort(
     return findings
 
 
-def analyze_video_enrichment(path: Path) -> list[dict]:
+def analyze_video_enrichment(
+    path: Path,
+    *,
+    frames: list[Path] | None = None,
+) -> list[dict]:
     """Whisper (ucapan/lirik) + visual keyframe + OCR teks on-screen (satu pass ffmpeg)."""
     from app.services.vision import _analyze_pil_image, extract_video_keyframes
 
@@ -193,43 +220,62 @@ def analyze_video_enrichment(path: Path) -> list[dict]:
             log.warning("Video ASR skip: %s", exc)
 
     n = max(3, int(settings.video_overlay_keyframes))
-    frames = extract_video_keyframes(path, max_frames=n)
+    owns_frames = frames is None
+    frame_values = extract_video_keyframes(path, max_frames=n) if frames is None else list(frames)
     try:
         from app.models.schemas import AcquisitionMode
         from app.services.hash_cache import get_analysis_mode
 
         # QUICK + OCR flag: still skip per-keyframe EasyOCR (iOS .mov dumps lag hard).
         # FULL keeps on-screen OCR when SADT_OCR_ENABLED / media_text on.
-        do_frame_ocr = bool(settings.media_text_enabled) or (
-            bool(settings.ocr_enabled) and get_analysis_mode() != AcquisitionMode.QUICK
-        )
-        from app.services import content_visual
+        do_frame_ocr = bool(settings.media_text_enabled or settings.ocr_enabled)
+        quick_mode = get_analysis_mode() == AcquisitionMode.QUICK
+        from app.services import content_policy, content_visual
 
-        for fr in frames:
+        ocr_used = 0
+        for fr in frame_values:
+            frame_findings: list[dict] = []
             for f in _analyze_pil_image(fr):
                 f["label"] = f"Video keyframe: {f['label']}"
                 f["layer_origin"] = Layer.L4.value
-                findings.append(f)
+                frame_findings.append(f)
 
-            for f in content_visual.analyze_image(fr):
-                f["layer_origin"] = Layer.L4.value
-                findings.append(f)
+            visual_candidates = content_visual.analyze_image(fr)
 
-            if do_frame_ocr:
+            should_ocr_frame = (
+                do_frame_ocr
+                and ocr_used < int(settings.video_ocr_max_frames)
+                and (
+                    not quick_mode
+                    or should_try_ocr(fr)
+                )
+            )
+            if should_ocr_frame:
                 for f in ocr_image_best_effort(fr, force=True):
                     f["label"] = f"Video on-screen {f['label']}"
                     f["layer_origin"] = Layer.L4.value
-                    findings.append(f)
+                    frame_findings.append(f)
+                ocr_used += 1
+            promoted = content_policy.confirm_visual_candidates(
+                visual_candidates,
+                frame_findings,
+            )
+            for f in promoted:
+                f["label"] = f"Video keyframe: {f['label']}"
+                f["layer_origin"] = Layer.L4.value
+            findings.extend(frame_findings)
+            findings.extend(promoted)
     finally:
-        for fr in frames:
-            try:
-                fr.unlink(missing_ok=True)
-            except OSError:
-                pass
-        if frames:
-            try:
-                frames[0].parent.rmdir()
-            except OSError:
-                pass
+        if owns_frames:
+            for fr in frame_values:
+                try:
+                    fr.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if frame_values:
+                try:
+                    frame_values[0].parent.rmdir()
+                except OSError:
+                    pass
 
     return findings
