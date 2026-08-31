@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, can, type AcquisitionMode, type AnalysisScope, type SessionSummary } from "@/shared/api/client";
 import { ACTIVE } from "@/shared/constants";
 import {
@@ -18,6 +18,13 @@ import {
   DEFAULT_ANALYSIS_SCOPE,
   planForScope,
 } from "@/features/operator/analysisScope";
+
+const EMPTY_PARTICIPANT = {
+  fullName: "",
+  registrationNo: "",
+  nik: "",
+  organization: "",
+};
 
 export function useConsoleApp() {
   const [error, setError] = useState<string | null>(null);
@@ -47,22 +54,14 @@ export function useConsoleApp() {
   const [acqSource, setAcqSource] = useState<"live" | "zip">("live");
   const [zipFile, setZipFile] = useState<File | null>(null);
   const [authorizeNote, setAuthorizeNote] = useState("");
-  const [participant, setParticipantState] = useState({
-    fullName: "",
-    registrationNo: "",
-    nik: "",
-    organization: "",
-  });
+  const [participant, setParticipantState] = useState(EMPTY_PARTICIPANT);
+  const hydratedParticipantSessionId = useRef<string | null>(null);
   const setParticipant = useCallback((patch: Partial<typeof participant>) => {
     setParticipantState((prev) => ({ ...prev, ...patch }));
   }, []);
   const resetParticipant = useCallback(() => {
-    setParticipantState({
-      fullName: "",
-      registrationNo: "",
-      nik: "",
-      organization: "",
-    });
+    hydratedParticipantSessionId.current = null;
+    setParticipantState(EMPTY_PARTICIPANT);
   }, []);
 
   const [tourActive, setTourActive] = useState(false);
@@ -70,6 +69,20 @@ export function useConsoleApp() {
   const [expandedEvidence, setExpandedEvidence] = useState<string | null>(null);
   const [focusedFindingId, setFocusedFindingId] = useState<string | null>(null);
   const teleRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const id = session?.id ?? null;
+    const saved = session?.participant;
+    const hasIdentity = !!(saved?.full_name?.trim() || saved?.registration_no?.trim());
+    if (!id || !hasIdentity || hydratedParticipantSessionId.current === id) return;
+    hydratedParticipantSessionId.current = id;
+    setParticipantState({
+      fullName: saved?.full_name ?? "",
+      registrationNo: saved?.registration_no ?? "",
+      nik: saved?.nik ?? "",
+      organization: saved?.organization ?? "",
+    });
+  }, [session?.id, session?.participant]);
 
   const {
     auth,
@@ -192,6 +205,7 @@ export function useConsoleApp() {
   logoutResetRef.current = () => {
     workspace.resetWorkspace();
     queries.resetQueries();
+    resetParticipant();
   };
 
   const changeReviewFilter = useCallback(
@@ -235,7 +249,6 @@ export function useConsoleApp() {
     zipMaxMb: runtime.zipMaxMb,
     zipEnabled: runtime.zipEnabled,
     participant,
-    resetParticipant,
     authorizeNote,
     setAuthorizeNote,
     teleRef,

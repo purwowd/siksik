@@ -11,7 +11,6 @@ import { PipelineTrack } from "@/features/operator/components/PipelineTrack";
 import { StatusPill } from "@/shared/ui/StatusPill";
 import { VerdictNotice } from "@/features/findings/components/VerdictNotice";
 import { ACTIVE, isThreatRecommendation } from "@/shared/constants";
-import { humanLabel } from "@/features/dashboard/lib/dashboardLabels";
 import { FEATURE_PAGE_META, OPERATOR_TELEMETRY_META } from "@/shared/lib/featurePages";
 import {
   ANALYSIS_SCOPE_OPTIONS,
@@ -101,20 +100,6 @@ export function OperatorPage(p: Props) {
   const liveTotalMs = active
     ? Math.max(timing?.t_total_ms ?? 0, measuredTotalMs)
     : timing?.t_total_ms || measuredTotalMs;
-  const inventoried = Math.max(
-    progress?.files_listed ?? 0,
-    progress?.crawl_discovered ?? 0,
-    progress?.preprocessing_total ?? 0,
-    progress?.selection_evaluated ?? 0,
-  );
-  const selectedRecords = Math.max(
-    progress?.selection_selected ?? 0,
-    progress?.transfer_records ?? 0,
-  );
-  const indexedFiles = Math.max(
-    progress?.files_indexed ?? 0,
-    progress?.files_pulled ?? 0,
-  );
 
   const identityReady =
     p.participant.fullName.trim().length > 0 &&
@@ -485,9 +470,6 @@ export function OperatorPage(p: Props) {
               <div className="tel-live">
                 <StatusPill status={p.session.status} recommendation={p.session.recommendation} />
                 <span className="pill muted">{p.session.mode === "full" ? "Penuh" : "Cepat"}</span>
-                <span className="pill muted">
-                  {humanLabel("method", progress?.acquisition_method || "unknown")}
-                </span>
                 {p.session.participant?.full_name ? (
                   <span className="pill muted">{p.session.participant.full_name}</span>
                 ) : (
@@ -523,17 +505,6 @@ export function OperatorPage(p: Props) {
               </div>
 
               <div className="timing">
-                <div>
-                  Rekam
-                  <strong>
-                    {selectedRecords}
-                    {inventoried ? ` / ${inventoried}` : ""}
-                  </strong>
-                </div>
-                <div>
-                  Berkas
-                  <strong>{indexedFiles}</strong>
-                </div>
                 <div>
                   Dianalisis
                   <strong>{progress?.files_analyzed ?? 0}</strong>

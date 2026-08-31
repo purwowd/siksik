@@ -30,7 +30,6 @@ type Params = {
   zipMaxMb: number;
   zipEnabled: boolean;
   participant: ParticipantForm;
-  resetParticipant: () => void;
   authorizeNote: string;
   setAuthorizeNote: React.Dispatch<React.SetStateAction<string>>;
   teleRef: React.RefObject<HTMLElement | null>;
@@ -124,7 +123,6 @@ export function useAcquisitionControls(p: Params) {
         force_simulated: false,
       });
       p.setSession(s);
-      p.resetParticipant();
       try {
         localStorage.setItem(SESSION_STORAGE_KEY, s.id);
       } catch {
@@ -167,7 +165,6 @@ export function useAcquisitionControls(p: Params) {
         onUploadProgress: (pct) => setUploadPct(pct),
       });
       p.setSession(s);
-      p.resetParticipant();
       try {
         localStorage.setItem(SESSION_STORAGE_KEY, s.id);
       } catch {
