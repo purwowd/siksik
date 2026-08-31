@@ -159,10 +159,6 @@ export function ReportPage({
                   </div>
                 )}
                 <div>
-                  <dt>Metode</dt>
-                  <dd>{humanLabel("method", progress?.acquisition_method || "unknown")}</dd>
-                </div>
-                <div>
                   <dt>Mode</dt>
                   <dd>{session.mode === "full" ? "Penuh" : "Cepat"}</dd>
                 </div>

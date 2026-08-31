@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 CATEGORY_NUDITY = "ketelanjangan"
 CATEGORY_LGBT = "lgbt_content"
 EVIDENCE_MAX = 320
+MAPPING_REVISION = "lgbt-explicit-v3"
+_WEAK_LGBT_CLOTHING = frozenset({"rainbow clothing", "rainbow outfit", "rainbow_clothing"})
 _DEVICE_MARKERS = (
     "content://",
     "/sdcard",
@@ -207,10 +209,17 @@ def findings_from_verdict(
 
     lgbt = _lgbt_context(verdict)
     present = bool(getattr(lgbt, "present", False)) if lgbt is not None else False
-    if present and action == "allow":
-        flags = _translate_tokens(getattr(lgbt, "flag_colors", ()), _FLAG_ID)
-        symbols = _translate_tokens(getattr(lgbt, "symbols", ()), _FLAG_ID)
-        clothing = _translate_tokens(getattr(lgbt, "clothing", ()), _FLAG_ID)
+    flags = _translate_tokens(getattr(lgbt, "flag_colors", ()), _FLAG_ID) if lgbt is not None else []
+    symbols = _translate_tokens(getattr(lgbt, "symbols", ()), _FLAG_ID) if lgbt is not None else []
+    clothing = [
+        item
+        for item in (
+            _translate_tokens(getattr(lgbt, "clothing", ()), _FLAG_ID) if lgbt is not None else []
+        )
+        if item.casefold() not in _WEAK_LGBT_CLOTHING
+    ]
+    # Weak "present" with no flag/symbol/clothing is a VLM false positive (office photo, national flag).
+    if present and action == "allow" and (flags or symbols or clothing):
         lgbt_parts = [f"Berkas: {berkas}"]
         if flags:
             lgbt_parts.append(f"Bendera: {', '.join(flags)}")

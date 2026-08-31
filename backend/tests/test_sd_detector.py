@@ -107,7 +107,15 @@ def test_allow_with_lgbt_is_pending_lgbt_finding():
 
 
 @pytest.mark.unit
-def test_allow_without_lgbt_writes_no_finding():
+def test_allow_lgbt_without_visual_tokens_is_not_a_finding():
+    assert (
+        sd_detector.findings_from_verdict(
+            _verdict(action="allow", lgbt=_lgbt(present=True)),
+            relative_path="gallery/office.jpg",
+            layer="L3",
+        )
+        == []
+    )
     assert (
         sd_detector.findings_from_verdict(
             _verdict(action="allow"),
@@ -252,5 +260,54 @@ def test_engine_fingerprint_tracks_sd_flag(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(config.settings, "sd_llama_port", 8080)
     on = engine_fingerprint()
     assert "sd=0" in off
-    assert "sd=1:balanced:127.0.0.1:8080" in on
+    assert "sd=1:balanced:127.0.0.1:8080:lgbt-explicit-v3" in on
     assert off != on
+
+
+@pytest.mark.unit
+def test_lgbt_text_ignores_national_flag_and_office_scenes():
+    pytest.importorskip("cv2")
+    from sd_detector.lgbt import infer_lgbt_from_text
+
+    indonesia = infer_lgbt_from_text(
+        "A child holding an Indonesian red and white flag. Text: Indonesia Emas atau Indonesia Cemas."
+    )
+    office = infer_lgbt_from_text(
+        "A man sitting at a desk in an office looking at a laptop. No flag."
+    )
+    office_clothing = infer_lgbt_from_text(
+        "A man sitting alone in an office chair wearing a black shirt. rainbow clothing visible."
+    )
+    holding = infer_lgbt_from_text("A person waving a flag in the wind.")
+    pride = infer_lgbt_from_text("Two women holding a rainbow pride flag.")
+    outdoor = infer_lgbt_from_text(
+        "Two people on a rocky trail holding small rainbow flags. One wears a rainbow tank top."
+    )
+
+    assert indonesia.present is False
+    assert office.present is False
+    assert office_clothing.present is False
+    assert holding.present is False
+    assert pride.present is True
+    assert "rainbow" in pride.flag_colors or "pride_flag" in pride.symbols
+    assert outdoor.present is True
+    assert "rainbow" in outdoor.flag_colors or "rainbow_clothing" in outdoor.clothing
+    protest = infer_lgbt_from_text(
+        "People holding a white protest banner that says HAPUS KKN and NAWACITA."
+    )
+    assert protest.present is False
+
+
+@pytest.mark.unit
+def test_allow_lgbt_rainbow_clothing_only_is_not_a_finding():
+    assert (
+        sd_detector.findings_from_verdict(
+            _verdict(
+                action="allow",
+                lgbt=_lgbt(present=True, clothing=["rainbow_clothing"]),
+            ),
+            relative_path="gallery/office.jpg",
+            layer="L3",
+        )
+        == []
+    )

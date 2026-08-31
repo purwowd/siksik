@@ -35,6 +35,7 @@ def _visual_bank_logits(pair_values: list[float]) -> list[float]:
         ("Acara LGBT Pride Month dan bendera transgender", {"lgbt_content"}),
         ("Kampanye pemilu: coblos paslon nomor dua", {"political_campaign"}),
         ("Demo mahasiswa dan aksi unjuk rasa di depan gedung", {"demonstration"}),
+        ("HAPUS KKN! Kami selalu ingat Nawacita", {"demonstration"}),
         ("Ayo serbu dan bakar gedung pemerintah malam ini", {"incitement"}),
         ("Materi propaganda ekstremis ISIS dan ajakan baiat ISIS", {"extremism"}),
         ("Basmi kaum gay, mereka tidak layak hidup", {"lgbt_content", "hate_speech"}),
@@ -78,6 +79,8 @@ def test_image_political_text_can_emit_meme_and_insult(monkeypatch: pytest.Monke
         "Janji jalan mulus, realita infrastruktur rusak",
         "Dulu hutan, sekarang tambang",
         "Kalau anggaran pendidikan besar, kenapa sekolah masih rusak?",
+        "Indonesia Emas atau Indonesia Cemas #INDONESIACEMAS",
+        "#INDONESIACEMAS bersama bendera merah putih",
     ],
 )
 def test_general_public_policy_satire_structures(text: str):

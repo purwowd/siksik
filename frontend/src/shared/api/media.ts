@@ -1,13 +1,25 @@
 import { authHeaders, BASE, req } from "./http";
 
-export function mediaUrl(sessionId: string, path: string, ticket?: string) {
+export function mediaUrl(
+  sessionId: string,
+  path: string,
+  ticket?: string,
+  options?: { thumb?: boolean },
+) {
   const q = new URLSearchParams({ path });
   if (ticket) q.set("ticket", ticket);
+  if (options?.thumb) q.set("thumb", "1");
   return `${BASE}/sessions/${sessionId}/media?${q}`;
 }
 
-export async function fetchMediaBlobUrl(sessionId: string, path: string): Promise<string> {
-  const res = await fetch(mediaUrl(sessionId, path), { headers: authHeaders() });
+export async function fetchMediaBlobUrl(
+  sessionId: string,
+  path: string,
+  options?: { thumb?: boolean },
+): Promise<string> {
+  const res = await fetch(mediaUrl(sessionId, path, undefined, options), {
+    headers: authHeaders(),
+  });
   if (!res.ok) {
     throw new Error(`Media ${res.status}`);
   }

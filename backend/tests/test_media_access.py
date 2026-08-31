@@ -79,3 +79,40 @@ async def test_media_ticket_is_scoped_and_supports_range_streaming(client) -> No
         params={"path": "video/second.mp4"},
     )
     assert bearer.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_video_thumbnail_returns_jpeg_and_rejects_non_video(
+    client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = "session-media-thumb"
+    await _insert_session(session_id)
+    staging = config.settings.staging_dir / session_id
+    video_dir = staging / "video"
+    video_dir.mkdir(parents=True)
+    clip = video_dir / "clip.mp4"
+    clip.write_bytes(b"not-a-real-mp4")
+    photo = staging / "photo.jpg"
+    photo.parent.mkdir(parents=True, exist_ok=True)
+    photo.write_bytes(b"\xff\xd8\xff\xd9")
+
+    jpeg = tmp_path / "poster.jpg"
+    jpeg.write_bytes(b"\xff\xd8\xff\xd9")
+    monkeypatch.setattr(
+        "app.services.video_poster.extract_video_poster",
+        lambda _path: jpeg,
+    )
+
+    ok = await client.get(
+        f"/api/v1/sessions/{session_id}/media",
+        params={"path": "video/clip.mp4", "thumb": "1"},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.headers["content-type"].startswith("image/jpeg")
+    assert ok.content == jpeg.read_bytes()
+
+    bad = await client.get(
+        f"/api/v1/sessions/{session_id}/media",
+        params={"path": "photo.jpg", "thumb": "1"},
+    )
+    assert bad.status_code == 400

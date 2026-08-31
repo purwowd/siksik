@@ -29,6 +29,17 @@ class ContentAnalysisResult:
     cacheable: bool
 
 
+def _is_ocr_progress_hit(label: str, evidence: str = "") -> bool:
+    """Progress OCR count includes taxonomy labels whose evidence came from OCR."""
+    blob = f"{label}\n{evidence}".casefold()
+    return "ocr" in blob or "on-screen" in blob
+
+
+def _is_asr_progress_hit(label: str, evidence: str = "") -> bool:
+    blob = f"{label}\n{evidence}".casefold()
+    return any(value in blob for value in ("audio", "lirik", "whisper"))
+
+
 def _skip_heavy_ocr_for_gallery(
     path: Path,
     source: str,
@@ -792,7 +803,7 @@ async def _analyze_session_body(
     ):
         source_counts[str(row["source"])] = int(row["total"])
     existing_labels = await db.fetchall(
-        "SELECT label FROM findings WHERE session_id = ?",
+        "SELECT label, evidence FROM findings WHERE session_id = ?",
         (session_id,),
     )
     seen_finding_keys: set[tuple[str, str]] = {
@@ -811,15 +822,12 @@ async def _analyze_session_body(
     hits_ocr = sum(
         1
         for row in existing_labels
-        if "ocr" in str(row["label"]).lower() or "on-screen" in str(row["label"]).lower()
+        if _is_ocr_progress_hit(str(row["label"]), str(row["evidence"]))
     )
     hits_asr = sum(
         1
         for row in existing_labels
-        if any(
-            value in str(row["label"]).lower()
-            for value in ("audio", "lirik", "whisper")
-        )
+        if _is_asr_progress_hit(str(row["label"]), str(row["evidence"]))
     )
     social_ocr_rows = await db.fetchall(
         "SELECT record_id, ocr_text, ocr_backend FROM social_snapshot_enrichments "
@@ -843,12 +851,11 @@ async def _analyze_session_body(
         findings_count=findings_count,
     )
 
-    def _count_media_kinds(label: str) -> None:
+    def _count_media_kinds(label: str, evidence: str = "") -> None:
         nonlocal hits_ocr, hits_asr
-        low = label.lower()
-        if "ocr" in low or "on-screen" in low:
+        if _is_ocr_progress_hit(label, evidence):
             hits_ocr += 1
-        if "audio" in low or "lirik" in low or "whisper" in low:
+        if _is_asr_progress_hit(label, evidence):
             hits_asr += 1
 
     async def process(row) -> list[tuple]:
@@ -1147,7 +1154,7 @@ async def _analyze_session_body(
                 layer_counts[item[8]] = layer_counts.get(item[8], 0) + 1
                 category_counts[item[5]] = category_counts.get(item[5], 0) + 1
                 source_counts[item[3]] = source_counts.get(item[3], 0) + 1
-                _count_media_kinds(str(item[6]))
+                _count_media_kinds(str(item[6]), str(item[9]))
         await publish_progress()
 
     async def process_with_row(row) -> tuple[Any, list[tuple]]:

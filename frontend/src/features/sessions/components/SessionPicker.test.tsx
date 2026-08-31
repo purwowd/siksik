@@ -23,4 +23,30 @@ describe("SessionPicker", () => {
     );
     expect(markup).toContain("Sesi berjalan dikunci sampai akuisisi selesai");
   });
+
+  it("does not show the acquisition-method pipeline on the session card", () => {
+    const sessions = [
+      {
+        id: "done",
+        status: "completed",
+        label: "Sesi selesai",
+        mode: "quick",
+        recommendation: "MENUNGGU REVIEW",
+        progress: {
+          acquisition_method:
+            "android_agent_inventory_complete+preprocessing_partial+chrome_cdp",
+          findings_count: 17,
+        },
+      },
+    ] as SessionSummary[];
+
+    const markup = renderToStaticMarkup(
+      <SessionPicker sessions={sessions} value="done" onChange={() => undefined} />,
+    );
+
+    expect(markup).not.toContain("Inventaris Android");
+    expect(markup).not.toContain("Pra-pemrosesan");
+    expect(markup).not.toContain("Riwayat browser Chrome");
+    expect(markup).toContain("17 temuan");
+  });
 });

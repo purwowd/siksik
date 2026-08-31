@@ -873,9 +873,11 @@ async def session_media(
     session_id: str,
     path: str = Query(..., min_length=1, max_length=1024),
     ticket: str | None = Query(default=None, min_length=32, max_length=256),
+    thumb: bool = Query(False),
     authorization: Annotated[str | None, Header()] = None,
 ):
     from app.services.media_access import validate_media_ticket
+    from app.services.video_poster import extract_video_poster, is_video_path
 
     rel, target, indexed_mime = await _resolve_session_media(session_id, path)
     authorized = bool(ticket) and await validate_media_ticket(ticket or "", session_id, rel)
@@ -884,6 +886,13 @@ async def session_media(
         if user is None:
             raise HTTPException(status_code=401, detail="Autentikasi diperlukan")
         user.require("findings:read")
+    if thumb:
+        if not is_video_path(target, indexed_mime):
+            raise HTTPException(status_code=400, detail="Thumbnail hanya untuk video")
+        poster = await asyncio.to_thread(extract_video_poster, target)
+        if poster is None:
+            raise HTTPException(status_code=404, detail="Thumbnail video tidak tersedia")
+        return FileResponse(poster, media_type="image/jpeg")
     media_type = indexed_mime or mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     return FileResponse(target, media_type=media_type)
 

@@ -112,6 +112,7 @@ def engine_fingerprint() -> str:
     from app.services.content_text import CONTENT_TEXT_REVISION
     from app.services.content_visual import CONTENT_VISUAL_REVISION
     from app.services.document_text import DOCUMENT_TEXT_REVISION
+    from app.services.sd_detector import MAPPING_REVISION as SD_MAPPING_REVISION
     from app.services.gpu_stack.reason_qwen import (
         QWEN_DECODER_REVISION,
         QWEN_INPUT_REVISION,
@@ -224,7 +225,8 @@ def engine_fingerprint() -> str:
                 f"sd={int(bool(settings.sd_detector_enabled))}:"
                 f"{str(settings.sd_mode or 'balanced').strip().casefold()}:"
                 f"{settings.sd_llama_host}:"
-                f"{settings.sd_llama_port}"
+                f"{settings.sd_llama_port}:"
+                f"{SD_MAPPING_REVISION}"
             ),
         ]
     )

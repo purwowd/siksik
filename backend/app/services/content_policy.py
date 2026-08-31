@@ -13,7 +13,7 @@ from typing import Any
 
 from app.models.schemas import Layer
 
-CONTENT_POLICY_REVISION = "general-category-contracts-v3"
+CONTENT_POLICY_REVISION = "general-category-contracts-v5"
 CONTENT_FUSION_REVISION = "public-figure-context-only-v2"
 
 LGBT_CONTENT = "lgbt_content"
@@ -120,7 +120,8 @@ _CAMPAIGN_RE = re.compile(
 )
 _DEMONSTRATION_RE = re.compile(
     r"\b(?:demonstrasi|unjuk\s+rasa|aksi\s+massa|aksi\s+unjuk\s+rasa|"
-    r"turun\s+ke\s+jalan|long\s+march|massa\s+aksi|demo\s+(?:mahasiswa|buruh|massa))\b",
+    r"turun\s+ke\s+jalan|long\s+march|massa\s+aksi|demo\s+(?:mahasiswa|buruh|massa)|"
+    r"hapus(?:kan)?\s+kkn|tolak\s+kkn)\b",
     re.IGNORECASE,
 )
 _INCITEMENT_RE = re.compile(
@@ -168,9 +169,12 @@ _HATE_ACTION_RE = re.compile(
 )
 _MEME_RE = re.compile(r"\b(?:meme|satir|parodi|template\s+meme)\b", re.IGNORECASE)
 _POLITICAL_MEME_CUE_RE = re.compile(
+    r"#indonesiacemas|"
     r"\b(?:ganti\s+presiden|lengserkan|turunkan|tenggelamkan|diktator|firaun|"
-    r"boneka\s+asing|jual\s+negara|antek\s+(?:asing|aseng)|cebong|kampret|kadrun)\b",
-    re.IGNORECASE,
+    r"boneka\s+asing|jual\s+negara|antek\s+(?:asing|aseng)|cebong|kampret|kadrun|"
+    r"indonesia\s*cemas|indonesiacemas|emas\s+atau\s+cemas|"
+    r"indonesia\s+emas.{0,80}indonesia\s*cemas)\b",
+    re.IGNORECASE | re.DOTALL,
 )
 _PUBLIC_POLICY_TOPIC_RE = re.compile(
     r"\b(?:pemerintah|presiden|menteri|pejabat|dpr|partai|pemilu|kebijakan|"

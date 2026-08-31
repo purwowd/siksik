@@ -252,3 +252,15 @@ def test_comments_body_ocr_strips_chrome():
     assert "Makar" in cleaned
     assert "Komentar" not in cleaned
     assert "Pilih" not in cleaned
+
+
+@pytest.mark.unit
+def test_ocr_progress_counts_paddle_evidence_not_only_ocr_label():
+    from app.services.analysis import _is_ocr_progress_hit
+
+    assert _is_ocr_progress_hit("OCR: ganti presiden", "") is True
+    assert _is_ocr_progress_hit(
+        "Meme politik",
+        "[paddleocr] MENUJU INDONESIA EMAS ATAU INDONESIA CEMAS",
+    ) is True
+    assert _is_ocr_progress_hit("Indikasi visual LGBT", "Berkas: gallery/a.jpg") is False

@@ -1,35 +1,37 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import Iterable, Optional
 
 import cv2
 import numpy as np
 
+from .prescreen import skin_ratio
 from .schema import LgbtContext, Orientation, Severity
 
 # --- Teks: bendera, simbol, pakaian, scene ---
 
 FLAG_COLOR_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
-    ("rainbow", ("rainbow flag", "rainbow banner", "rainbow colors", "rainbow stripe", "pride flag", "lgbt flag", "lgbtq flag")),
-    ("progress", ("progress flag", "progress pride", "inclusive flag", "philadelphia flag")),
-    ("trans", ("trans flag", "transgender flag", "trans pride", "light blue pink white flag")),
-    ("bisexual", ("bisexual flag", "bi flag", "bi pride", "pink purple blue flag")),
-    ("lesbian", ("lesbian flag", "sapphic flag", "orange pink white flag")),
-    ("gay", ("gay flag", "mlm flag", "green blue teal flag")),
-    ("pansexual", ("pansexual flag", "pan flag", "pan pride")),
-    ("asexual", ("asexual flag", "ace flag", "ace pride")),
+    ("rainbow", ("rainbow flag", "rainbow banner", "rainbow stripe", "pride flag", "lgbt flag", "lgbtq flag")),
+    ("progress", ("progress flag", "progress pride", "philadelphia flag")),
+    ("trans", ("trans flag", "transgender flag", "trans pride")),
+    ("bisexual", ("bisexual flag", "bi pride flag")),
+    ("lesbian", ("lesbian flag", "sapphic flag")),
+    ("gay", ("gay pride flag", "mlm flag")),
+    ("pansexual", ("pansexual flag", "pan pride flag")),
+    ("asexual", ("asexual flag", "ace pride flag")),
 ]
 
 SYMBOL_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
-    ("pride_flag", ("rainbow flag", "pride flag", "lgbt flag", "holding a flag", "waving a flag")),
-    ("rainbow_symbol", ("rainbow", "rainbow badge", "rainbow pin", "rainbow emblem")),
-    ("pride_symbol", ("pride symbol", "lgbt symbol", "equality symbol", "triangle badge")),
-    ("rainbow_crosswalk", ("rainbow crosswalk", "rainbow pavement", "rainbow street")),
+    ("pride_flag", ("rainbow flag", "pride flag", "lgbt flag", "lgbtq flag")),
+    ("rainbow_symbol", ("rainbow badge", "rainbow pin", "rainbow emblem", "rainbow lanyard")),
+    ("pride_symbol", ("pride symbol", "lgbt symbol")),
+    ("rainbow_crosswalk", ("rainbow crosswalk", "rainbow pavement")),
 ]
 
 CLOTHING_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
-    ("rainbow_clothing", ("rainbow shirt", "rainbow t-shirt", "rainbow clothing", "rainbow outfit", "rainbow dress")),
+    ("rainbow_clothing", ("rainbow shirt", "rainbow t-shirt", "rainbow tank", "rainbow dress")),
     ("pride_merch", ("pride shirt", "pride clothing", "pride outfit", "pride merchandise", "pride apparel")),
     ("rainbow_accessory", ("rainbow bracelet", "rainbow necklace", "rainbow hat", "rainbow bandana")),
     ("trans_colors_clothing", ("trans colored", "trans pride shirt", "pink blue white shirt")),
@@ -42,8 +44,26 @@ SCENE_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 LGBT_GENERAL = (
-    "lgbt", "lgbtq", "lgbtqia", "queer", "pride", "homosexual",
-    "same-sex", "same sex", "gender identity",
+    "lgbt", "lgbtq", "lgbtqia", "queer", "homosexual",
+    "same-sex", "same sex",
+)
+
+EXPLICIT_PRIDE = (
+    "rainbow flag", "pride flag", "lgbt flag", "lgbtq flag", "trans flag",
+    "rainbow banner", "pride parade", "pride march", "pride shirt", "pride t-shirt",
+    "rainbow shirt", "rainbow t-shirt", "rainbow tank",
+)
+
+# Street demo / spanduk politik — bukan bendera pelangi.
+NON_PRIDE_PROTEST = (
+    "protest", "demonstration", "demonstrasi", "unjuk rasa", "spanduk",
+    "megaphone", "megafon", "picket", "rally", "nawacita", "hapus kkn",
+)
+
+NATIONAL_FLAG = (
+    "indonesian flag", "indonesia flag", "red and white flag", "red-and-white flag",
+    "merah putih", "sang saka", "bendera merah", "national flag",
+    "indonesia emas", "indonesia cemas",
 )
 
 NATURAL_RAINBOW = (
@@ -95,15 +115,11 @@ def _is_classical_art_scene(texts: list[str]) -> bool:
 
 def _is_natural_rainbow_scene(texts: list[str]) -> bool:
     combined = " ".join(texts).lower()
+    if any(k in combined for k in EXPLICIT_PRIDE):
+        return False
     if any(k in combined for k in ("waterfall", "cliff", "riverbank", "stream", "mountain", "hiking", "desert", "rocky")):
         if not any(k in combined for k in ("pride parade", "pride march", "pride festival", "pride event")):
             return True
-    strong_lgbt = any(k in combined for k in (
-        "rainbow flag", "pride flag", "lgbt flag", "lgbtq flag", "pride parade",
-        "pride march", "pride shirt", "pride t-shirt", "rainbow shirt", "rainbow t-shirt",
-    ))
-    if strong_lgbt:
-        return False
     return (
         any(k in combined for k in NATURAL_RAINBOW)
         or ("rainbow" in combined and any(k in combined for k in ("sky", "cloud", "mountain", "landscape", "over the")))
@@ -116,6 +132,9 @@ def infer_lgbt_from_text(*texts: str) -> LgbtContext:
         return LgbtContext()
 
     combined = " ".join(texts).lower()
+    if any(k in combined for k in NATIONAL_FLAG) and not any(k in combined for k in EXPLICIT_PRIDE):
+        return LgbtContext()
+
     flag_colors = _match_patterns(combined, FLAG_COLOR_PATTERNS)
     symbols = _match_patterns(combined, SYMBOL_PATTERNS)
     clothing = _match_patterns(combined, CLOTHING_PATTERNS)
@@ -134,15 +153,11 @@ def infer_lgbt_from_text(*texts: str) -> LgbtContext:
     signals: list[str] = []
     for group in (flag_colors, symbols, clothing, scene):
         signals.extend(group)
-    if any(k in combined for k in LGBT_GENERAL):
+    explicit_text = any(k in combined for k in LGBT_GENERAL)
+    if explicit_text:
         signals.append("lgbt_context")
-    if "rainbow" in combined and not _is_natural_rainbow_scene(list(texts)):
-        if "rainbow" not in flag_colors:
-            signals.append("rainbow")
-            if "rainbow" not in flag_colors:
-                flag_colors.append("rainbow")
 
-    present = bool(signals) or bool(flag_colors)
+    present = bool(flag_colors or symbols or clothing or scene or explicit_text)
 
     orientation_hint = "none"
     men, women = _gender_counts(combined)
@@ -183,6 +198,81 @@ def infer_lgbt_from_text(*texts: str) -> LgbtContext:
     )
 
 
+def _thumb_bgr(bgr: np.ndarray, max_side: int = 160) -> np.ndarray:
+    h, w = bgr.shape[:2]
+    if max(h, w) <= max_side:
+        return bgr
+    scale = max_side / max(h, w)
+    return cv2.resize(
+        bgr,
+        (max(1, int(w * scale)), max(1, int(h * scale))),
+        interpolation=cv2.INTER_AREA,
+    )
+
+
+def _local_pride_stripe(bgr: np.ndarray) -> bool:
+    """True when a compact window has several adjacent saturated hue bands.
+
+    Whole-image 6-band medians miss handheld flags; office clutter rarely
+    forms coherent stripes. Graphic posters can, so callers still gate on
+    national-flag text and photographic skin range.
+    """
+    small = _thumb_bgr(bgr, 160)
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    height, width = hsv.shape[:2]
+    bins = np.full((height, width), -1, dtype=np.int16)
+    mask = (hsv[:, :, 1] >= 90) & (hsv[:, :, 2] >= 80)
+    bins[mask] = (hsv[:, :, 0][mask] // 22).astype(np.int16)
+
+    def axis_score(arr: np.ndarray) -> float:
+        labels: list[int | None] = []
+        for line in arr:
+            values = line[line >= 0]
+            if len(values) < max(3, int(len(line) * 0.4)):
+                labels.append(None)
+                continue
+            listed = values.tolist()
+            dominant, count = Counter(listed).most_common(1)[0]
+            if count / len(listed) < 0.62:
+                labels.append(None)
+                continue
+            labels.append(int(dominant))
+        coherent = [value for value in labels if value is not None]
+        uniq = set(coherent)
+        # Rainbow flags include yellow + green; red/white/blue protest banners do not.
+        if (
+            len(coherent) / max(1, len(labels)) < 0.48
+            or len(uniq) < 4
+            or 1 not in uniq
+            or not uniq.intersection({2, 3})
+        ):
+            return 0.0
+        compressed: list[int] = []
+        for value in labels:
+            if value is not None and (not compressed or compressed[-1] != value):
+                compressed.append(value)
+        return float(len(set(coherent))) * max(0, len(compressed) - 1)
+
+    best = 0.0
+    for window_w, window_h in ((12, 8), (20, 12), (28, 16), (40, 24), (56, 32)):
+        if window_w > width or window_h > height:
+            continue
+        step_x = max(2, window_w // 3)
+        step_y = max(2, window_h // 3)
+        for y0 in range(0, height - window_h + 1, step_y):
+            for x0 in range(0, width - window_w + 1, step_x):
+                win = bins[y0 : y0 + window_h, x0 : x0 + window_w]
+                best = max(best, axis_score(win), axis_score(win.T))
+                if best >= 12.0:
+                    return True
+    return best >= 12.0
+
+
+def _photographic_people(bgr: np.ndarray) -> bool:
+    """Skin in a range typical of photos of people, not red/orange graphics."""
+    return 0.04 <= skin_ratio(_thumb_bgr(bgr, 160)) <= 0.35
+
+
 def detect_rainbow_pixels(bgr: np.ndarray) -> list[str]:
     """Heuristic: deteksi stripe warna pelangi di pixel (tanpa filename)."""
     if bgr is None or bgr.size == 0:
@@ -191,12 +281,13 @@ def detect_rainbow_pixels(bgr: np.ndarray) -> list[str]:
     if h < 32 or w < 32:
         return []
 
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    small = _thumb_bgr(bgr, 160)
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
     found: list[str] = []
+    sh = hsv.shape[0]
 
-    # Cek beberapa horizontal band (typical pride flag stripes)
     bands = 6
-    band_h = max(1, h // bands)
+    band_h = max(1, sh // bands)
     hue_hits: set[str] = set()
 
     for i in range(bands):
@@ -223,10 +314,9 @@ def detect_rainbow_pixels(bgr: np.ndarray) -> list[str]:
         else:
             hue_hits.add("purple")
 
-    if len(hue_hits) >= 4:
+    if len(hue_hits) >= 4 or _local_pride_stripe(small):
         found.append("rainbow")
 
-    # Trans flag: dominasi pink + biru muda
     pink_mask = ((hsv[:, :, 0] < 10) | (hsv[:, :, 0] > 160)) & (hsv[:, :, 1] > 40) & (hsv[:, :, 2] > 150)
     blue_mask = (hsv[:, :, 0] > 95) & (hsv[:, :, 0] < 115) & (hsv[:, :, 1] > 40) & (hsv[:, :, 2] > 150)
     pink_ratio = pink_mask.sum() / max(1, pink_mask.size)
@@ -275,6 +365,15 @@ def merge_lgbt_contexts(contexts: Iterable[LgbtContext]) -> LgbtContext:
     )
 
 
+def _is_non_pride_protest(texts: list[str]) -> bool:
+    combined = " ".join(texts).lower()
+    if any(k in combined for k in EXPLICIT_PRIDE):
+        return False
+    if any(k in combined for k in NON_PRIDE_PROTEST):
+        return True
+    return "banner" in combined and "rainbow" not in combined and "pride" not in combined
+
+
 def analyze_lgbt(
     bgr: Optional[np.ndarray],
     texts: list[str],
@@ -282,18 +381,27 @@ def analyze_lgbt(
     if _is_classical_art_scene(texts) or _is_natural_rainbow_scene(texts):
         return LgbtContext()
 
-    text_ctx = infer_lgbt_from_text(*texts)
-    pixel_colors: list[str] = []
-    if bgr is not None and not _is_natural_rainbow_scene(texts):
-        pixel_colors = detect_rainbow_pixels(bgr)
+    joined = " ".join(texts).lower()
+    if any(k in joined for k in NATIONAL_FLAG) and not any(k in joined for k in EXPLICIT_PRIDE):
+        return LgbtContext()
 
-    # Pixel rainbow saja tanpa teks pride/LGBT → abaikan (langit/pelangi alami / false positive)
+    text_ctx = infer_lgbt_from_text(*texts)
+    skip_pixels = _is_non_pride_protest(texts)
+    pixel_colors: list[str] = []
+    local_flag = False
+    if bgr is not None and not skip_pixels and not _is_natural_rainbow_scene(texts):
+        pixel_colors = detect_rainbow_pixels(bgr)
+        local_flag = _local_pride_stripe(bgr)
+
     text_has_lgbt = text_ctx.present or any(
-        k in " ".join(texts).lower()
-        for k in ("pride", "lgbt", "flag", "parade", "queer", "rainbow flag", "bisexual", "transgender")
+        k in joined
+        for k in EXPLICIT_PRIDE + ("lgbt", "lgbtq", "queer", "transgender", "bisexual")
     )
+    # Whole-image hue soup needs explicit pride/LGBT text. Compact handheld
+    # flags in a photo of people do not. Protest/spanduk scenes skip pixels.
     if pixel_colors and not text_has_lgbt:
-        pixel_colors = []
+        if not (local_flag and bgr is not None and _photographic_people(bgr)):
+            pixel_colors = []
 
     if pixel_colors:
         flags = sorted(set(text_ctx.flag_colors + pixel_colors))

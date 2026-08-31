@@ -140,9 +140,9 @@ export function MediaPreview({
     setFailed(false);
     setLoading(false);
     setModalOpen(false);
-    if (!sessionId || !mediaPath || !isImg) return;
+    if (!sessionId || !mediaPath || !(isImg || isVid)) return;
     setLoading(true);
-    enqueueMediaTask(() => fetchMediaBlobUrl(sessionId, mediaPath))
+    enqueueMediaTask(() => fetchMediaBlobUrl(sessionId, mediaPath, { thumb: isVid }))
       .then((url) => {
         if (cancelled) {
           URL.revokeObjectURL(url);
@@ -161,7 +161,7 @@ export function MediaPreview({
       cancelled = true;
       if (revoke) URL.revokeObjectURL(revoke);
     };
-  }, [sessionId, mediaPath, isImg]);
+  }, [sessionId, mediaPath, isImg, isVid]);
 
   useEffect(() => {
     if (!modalOpen) return;
@@ -220,6 +220,58 @@ export function MediaPreview({
           onError={() => setFailed(true)}
         />
       </a>
+    );
+  }
+
+  if (isVid) {
+    const poster = imageUrl && !failed ? (
+      <img
+        src={imageUrl}
+        alt={`Pratinjau video ${fileName}`}
+        loading="lazy"
+        onError={() => setFailed(true)}
+      />
+    ) : (
+      <span className="media-preview-kind">{loading ? "Memuat" : "Video"}</span>
+    );
+    return (
+      <>
+        <button
+          type="button"
+          className={`media-preview video${imageUrl && !failed ? "" : " media-preview-action"}`}
+          onClick={() => void openPreview()}
+          disabled={loading || !mediaPath}
+          title={`Buka ${fileName}`}
+        >
+          {loading && !imageUrl ? (
+            <span className="media-preview skeleton-fill" aria-busy="true" />
+          ) : (
+            poster
+          )}
+        </button>
+        {failed && !imageUrl ? <span className="media-preview-error">Preview gagal dimuat</span> : null}
+        {modalOpen ? (
+          <div className="media-modal-backdrop" role="presentation" onClick={() => setModalOpen(false)}>
+            <section
+              className="media-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label={`Pratinjau ${fileName}`}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <header className="media-modal-header">
+                <strong>{fileName}</strong>
+                <button type="button" onClick={() => setModalOpen(false)} aria-label="Tutup">
+                  Tutup
+                </button>
+              </header>
+              <div className="media-modal-body">
+                {contentUrl ? <video src={contentUrl} controls autoPlay preload="metadata" /> : null}
+              </div>
+            </section>
+          </div>
+        ) : null}
+      </>
     );
   }
 

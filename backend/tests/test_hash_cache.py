@@ -63,7 +63,7 @@ def test_engine_fingerprint_tracks_content_taxonomy_and_ocr_language(
 
     assert first != second
     assert "ol=id,en" in first
-    assert "general-category-contracts-v3" in first
+    assert "general-category-contracts-v5" in first
     assert "public-figure-context-only-v2" in first
 
 
