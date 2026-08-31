@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -286,6 +287,7 @@ class FakeAutomationAdb:
         self.restart_failure = False
         self.force_stopped = False
         self.suspended = False
+        self.events: list[str] = []
 
     async def install_apk(self, _serial, apk_path, **_kwargs) -> None:
         self.installs.append(apk_path)
@@ -297,18 +299,25 @@ class FakeAutomationAdb:
 
     async def run_instrumentation(self, _serial, **kwargs) -> ProcessResult:
         target = kwargs["arguments"]["target_package"]
+        self.events.append("instrumentation")
         self.instrumented.append(target)
         self.instrumentation_arguments.append(kwargs["arguments"])
         payload = self.results[target].model_dump_json()
         return ProcessResult(("adb",), 0, RESULT_PREFIX + payload, "")
 
     async def start_activity(self, _serial, component, extras, **_kwargs) -> None:
+        self.events.append("restart_agent")
         self.restarted.append((component, extras))
         if self.restart_failure:
             raise AcquisitionError(ErrorCategory.ADB_COMMAND_FAILED, "restart failed")
 
     async def force_stop(self, _serial, _package_name) -> None:
+        self.events.append("force_stop")
         self.force_stopped = True
+
+    async def pull_social_debug_mapping(self, _serial, **_kwargs) -> int:
+        self.events.append("pull_debug_mapping")
+        return 1
 
     async def current_user_id(self, _serial) -> int:
         return 0
@@ -477,7 +486,55 @@ async def test_orchestrator_builds_installs_and_reports_missing_target(
             },
         ),
     ]
+    assert adb.force_stopped is True
     assert [result.state for result in results] == ["complete", "target_missing"]
+
+
+@pytest.mark.unit
+async def test_orchestrator_stops_instrumentation_before_debug_pull(
+    tmp_path: Path,
+) -> None:
+    apk = tmp_path / "automation-debug.apk"
+    apk.write_bytes(b"fixture")
+    result = AutomationResultV1(
+        schema_version=1,
+        target_package="com.instagram.android",
+        state="complete",
+        reason=None,
+        scroll_count=3,
+        screenshot_ids=["shot_fixture"],
+        duration_ms=100,
+    )
+    adb = FakeAutomationAdb({"com.instagram.android": result})
+    config = replace(
+        automation_config(apk),
+        debug_snapshots=True,
+        debug_dir=tmp_path / "debug",
+    )
+    orchestrator = AndroidUiAutomationOrchestrator(
+        config,
+        adb,
+        FakeBuilder(),
+        package_coordinator=FakePackageCoordinator(adb, apk),
+    )
+
+    await orchestrator.run(
+        serial="serial-fixture",
+        session_id=SESSION_ID,
+        session_token=SESSION_TOKEN,
+        token_expires_at_epoch_ms=TOKEN_EXPIRY_EPOCH_MS,
+        crawl_id=CRAWL_ID,
+        mode="quick",
+        target_packages=("com.instagram.android",),
+        request_id="request-fixture",
+    )
+
+    assert adb.events == [
+        "instrumentation",
+        "force_stop",
+        "restart_agent",
+        "pull_debug_mapping",
+    ]
 
 
 @pytest.mark.unit

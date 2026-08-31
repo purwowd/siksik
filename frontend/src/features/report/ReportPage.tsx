@@ -50,7 +50,7 @@ type Props = {
   setReportPage: (p: number) => void;
   authorizeNote: string;
   setAuthorizeNote: (v: string) => void;
-  setSession: (s: SessionSummary) => void;
+  setSession: React.Dispatch<React.SetStateAction<SessionSummary | null>>;
   refreshSessionList: () => void;
   setError: (e: string | null) => void;
   onToast: (message: string, tone?: "ok" | "warn" | "info") => void;
@@ -123,7 +123,9 @@ export function ReportPage({
             session={session}
             canEdit={canEditParticipant}
             onSaved={(s) => {
-              setSession(s);
+              setSession((current) =>
+                current?.id === s.id ? s : current,
+              );
               refreshSessionList();
             }}
             onError={setError}
@@ -253,12 +255,16 @@ export function ReportPage({
                       aria-label="Sahkan rekomendasi"
                       onClick={async () => {
                         if (blockAuthorize) return;
+                        const sessionId = session.id;
                         try {
                           await api.authorizeSession(
-                            session.id,
+                            sessionId,
                             authorizeNote.trim() || "Disahkan pimpinan (SATRIA)",
                           );
-                          setSession(await api.session(session.id));
+                          const refreshed = await api.session(sessionId);
+                          setSession((current) =>
+                            current?.id === sessionId ? refreshed : current,
+                          );
                           setAuthorizeNote("");
                           void refreshSessionList();
                           onToast("Rekomendasi disahkan", "ok");

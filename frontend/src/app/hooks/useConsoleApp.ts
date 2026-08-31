@@ -1,7 +1,10 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { api, can, type AcquisitionMode, type AnalysisScope, type SessionSummary } from "@/shared/api/client";
 import { ACTIVE } from "@/shared/constants";
-import { type ReviewSummary } from "@/app/hooks/console/constants";
+import {
+  findActiveSession,
+  type ReviewSummary,
+} from "@/app/hooks/console/constants";
 import { useToastStack } from "@/app/hooks/console/useToastStack";
 import { useAllowedTabs, useAuthSession } from "@/app/hooks/console/useAuthSession";
 import { useConsoleNavigation } from "@/app/hooks/console/useConsoleNavigation";
@@ -88,6 +91,7 @@ export function useConsoleApp() {
 
   const { allowedTabs, landingTab } = useAllowedTabs(auth);
   const runtime = useRuntimeHealth(auth, setAuth, setError);
+  const activeSessionId = findActiveSession(sessionList)?.id ?? null;
 
   const { tab, goToTab } = useConsoleNavigation({
     auth,
@@ -96,6 +100,7 @@ export function useConsoleApp() {
     allowedTabs,
     landingTab,
     sessionId: session?.id,
+    activeSessionId,
     reviewFilter,
     moduleFilter,
     galleryAlbum,
@@ -259,6 +264,7 @@ export function useConsoleApp() {
     setDashFindings: queries.setDashFindings,
     setFindingsPage: queries.setFindingsPage,
     refreshReviewSummary: workspace.refreshReviewSummary,
+    isSessionCurrent: workspace.isSessionCurrent,
     refreshSessionList: workspace.refreshSessionList,
     refreshGlobalPending,
     pushToast,

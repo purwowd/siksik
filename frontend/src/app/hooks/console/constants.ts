@@ -12,6 +12,20 @@ export type ReviewSummary = {
   total: number;
 };
 
+export function findActiveSession(
+  sessions: SessionSummary[],
+): SessionSummary | null {
+  return sessions.find((session) => ACTIVE.has(session.status)) ?? null;
+}
+
+export function canSelectSession(
+  sessions: SessionSummary[],
+  requestedSessionId: string,
+): boolean {
+  const active = findActiveSession(sessions);
+  return active === null || active.id === requestedSessionId;
+}
+
 /** Sesi lab/demo — prioritas saat bootstrap konsol. */
 export function isLabDemoSession(s: SessionSummary): boolean {
   const label = (s.label || "").trim().toLowerCase();
@@ -31,7 +45,7 @@ export function pickBootstrapSession(
 ): SessionSummary | undefined {
   if (!items.length) return undefined;
 
-  const active = items.find((s) => ACTIVE.has(s.status));
+  const active = findActiveSession(items);
   if (active) return active;
 
   const fromPrefer = preferId ? items.find((s) => s.id === preferId) : undefined;

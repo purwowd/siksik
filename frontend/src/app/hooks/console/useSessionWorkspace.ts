@@ -13,6 +13,8 @@ import {
 } from "@/shared/api/client";
 import { ACTIVE } from "@/shared/constants";
 import {
+  canSelectSession,
+  findActiveSession,
   pickBootstrapSession,
   SESSION_STORAGE_KEY,
   TERMINAL,
@@ -71,12 +73,15 @@ type Params = {
 export function useSessionWorkspace(p: Params) {
   const defaultSessionTried = useRef(false);
   const sessionIdRef = useRef<string | null>(null);
+  const sessionRequestEpochRef = useRef(0);
+  const sessionRequestAbortRef = useRef<AbortController | null>(null);
+  const reviewSummaryEpochRef = useRef(0);
   const prevSessionStatusRef = useRef<string | null>(null);
   const completionToastIds = useRef<Set<string>>(new Set());
   const pollEpochRef = useRef(0);
   const liveFindingsCountRef = useRef(0);
   const liveReportRecordsRef = useRef(0);
-  const runningSession = p.sessionList.find((session) => ACTIVE.has(session.status)) ?? null;
+  const runningSession = findActiveSession(p.sessionList);
 
   const refreshSessionList = useCallback(
     async (opts?: { soft?: boolean }) => {
@@ -100,11 +105,19 @@ export function useSessionWorkspace(p: Params) {
   );
 
   const refreshReviewSummary = useCallback(async (sessionId: string) => {
+    if (sessionIdRef.current !== sessionId) return;
+    const epoch = ++reviewSummaryEpochRef.current;
     const [pending, confirmed, rejected] = await Promise.all([
       api.findings(sessionId, 1, 1, { review_status: "pending" }),
       api.findings(sessionId, 1, 1, { review_status: "confirmed" }),
       api.findings(sessionId, 1, 1, { review_status: "rejected" }),
     ]);
+    if (
+      reviewSummaryEpochRef.current !== epoch ||
+      sessionIdRef.current !== sessionId
+    ) {
+      return;
+    }
     p.setReviewSummary({
       pending: pending.total,
       confirmed: confirmed.total,
@@ -115,22 +128,53 @@ export function useSessionWorkspace(p: Params) {
 
   const selectSessionById = useCallback(
     async (id: string) => {
-      const s = await api.session(id);
-      p.setSession(s);
-      p.querySetters.setFindingsPage(1);
-      p.querySetters.setReportPage(1);
+      const epoch = ++sessionRequestEpochRef.current;
+      sessionRequestAbortRef.current?.abort();
+      const controller = new AbortController();
+      sessionRequestAbortRef.current = controller;
       try {
-        localStorage.setItem(SESSION_STORAGE_KEY, id);
-      } catch {
-        /* ignore */
+        const s = await api.session(id, controller.signal);
+        if (controller.signal.aborted || sessionRequestEpochRef.current !== epoch) {
+          return null;
+        }
+        if (s.id !== id) {
+          throw new Error("Respons detail sesi tidak konsisten");
+        }
+        sessionIdRef.current = s.id;
+        p.setSession(s);
+        p.querySetters.setFindingsPage(1);
+        p.querySetters.setReportPage(1);
+        try {
+          localStorage.setItem(SESSION_STORAGE_KEY, id);
+        } catch {
+          /* ignore */
+        }
+        return s;
+      } catch (error) {
+        if (controller.signal.aborted || sessionRequestEpochRef.current !== epoch) {
+          return null;
+        }
+        throw error;
+      } finally {
+        if (sessionRequestAbortRef.current === controller) {
+          sessionRequestAbortRef.current = null;
+        }
       }
-      void refreshReviewSummary(id);
-      return s;
     },
-    [p.setSession, p.querySetters, refreshReviewSummary],
+    [p.setSession, p.querySetters],
+  );
+
+  const isSessionCurrent = useCallback(
+    (sessionId: string) => sessionIdRef.current === sessionId,
+    [],
   );
 
   const resetWorkspace = useCallback(() => {
+    sessionRequestEpochRef.current += 1;
+    sessionRequestAbortRef.current?.abort();
+    sessionRequestAbortRef.current = null;
+    reviewSummaryEpochRef.current += 1;
+    sessionIdRef.current = null;
     p.setSession(null);
     p.setReviewSummary(null);
     p.setSessionList([]);
@@ -140,12 +184,22 @@ export function useSessionWorkspace(p: Params) {
     sessionIdRef.current = p.session?.id ?? null;
   }, [p.session?.id]);
 
+  useEffect(
+    () => () => {
+      sessionRequestEpochRef.current += 1;
+      sessionRequestAbortRef.current?.abort();
+    },
+    [],
+  );
+
   useEffect(() => {
     prevSessionStatusRef.current = null;
     liveFindingsCountRef.current = 0;
     liveReportRecordsRef.current = 0;
     pollEpochRef.current += 1;
-  }, [p.session?.id]);
+    reviewSummaryEpochRef.current += 1;
+    p.setReviewSummary(null);
+  }, [p.session?.id, p.setReviewSummary]);
 
   useEffect(() => {
     if (!p.auth) return;
@@ -188,7 +242,14 @@ export function useSessionWorkspace(p: Params) {
     if (!sesi) return;
     const resolved = resolveSessionId(sesi, p.sessionList);
     if (runningSession && resolved !== runningSession.id) return;
-    if (resolved && resolved !== p.session?.id) {
+    if (!resolved) {
+      p.setError("Sesi dari URL tidak ditemukan");
+      if (p.tab && p.session?.id) {
+        p.goToTab(p.tab, { sesi: p.session.id });
+      }
+      return;
+    }
+    if (resolved !== p.session?.id) {
       void selectSessionById(resolved).catch(() => {
         p.setError("Sesi dari URL tidak ditemukan");
       });
@@ -199,6 +260,8 @@ export function useSessionWorkspace(p: Params) {
     p.sessionList,
     p.session?.id,
     runningSession?.id,
+    p.tab,
+    p.goToTab,
     selectSessionById,
     p.setError,
   ]);
@@ -435,38 +498,30 @@ export function useSessionWorkspace(p: Params) {
     !!p.auth,
   );
 
-  async function onPickSession(id: string) {
-    if (runningSession && id !== runningSession.id) return;
-    try {
-      p.setError(null);
-      await selectSessionById(id);
-    } catch (e) {
-      p.setError(e instanceof Error ? e.message : "Gagal memuat sesi");
-    }
+  function onPickSession(id: string) {
+    if (!canSelectSession(p.sessionList, id) || !p.tab) return;
+    p.setError(null);
+    p.goToTab(p.tab, { sesi: id });
   }
 
-  async function openSession(id: string, nextTab: Tab) {
-    if (runningSession && id !== runningSession.id) return;
-    try {
-      p.setError(null);
-      await selectSessionById(id);
-      p.goToTab(nextTab, { sesi: id, filter: nextTab === "findings" ? p.reviewFilter : null });
-    } catch (e) {
-      p.setError(e instanceof Error ? e.message : "Gagal memuat sesi");
-    }
+  function openSession(id: string, nextTab: Tab) {
+    if (!canSelectSession(p.sessionList, id)) return;
+    p.setError(null);
+    p.goToTab(nextTab, {
+      sesi: id,
+      filter: nextTab === "findings" ? p.reviewFilter : null,
+    });
   }
 
-  async function openSessionWithModule(id: string, modul: import("@/app/routes").ModuleFilterParam) {
-    if (runningSession && id !== runningSession.id) return;
-    try {
-      p.setError(null);
-      await selectSessionById(id);
-      p.setModuleFilter(modul);
-      p.querySetters.setFindingsPage(1);
-      p.goToTab("findings", { sesi: id, modul, filter: "all" });
-    } catch (e) {
-      p.setError(e instanceof Error ? e.message : "Gagal memuat sesi");
-    }
+  function openSessionWithModule(
+    id: string,
+    modul: import("@/app/routes").ModuleFilterParam,
+  ) {
+    if (!canSelectSession(p.sessionList, id)) return;
+    p.setError(null);
+    p.setModuleFilter(modul);
+    p.querySetters.setFindingsPage(1);
+    p.goToTab("findings", { sesi: id, modul, filter: "all" });
   }
 
   return {
@@ -478,6 +533,7 @@ export function useSessionWorkspace(p: Params) {
     refreshSessionList,
     refreshReviewSummary,
     selectSessionById,
+    isSessionCurrent,
     onPickSession,
     openSession,
     openSessionWithModule,

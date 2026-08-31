@@ -327,7 +327,7 @@ class AndroidUiAutomationOrchestrator:
                         target_package=target,
                     )
                 try:
-                    result, instrumented, requires_force_stop = await self._run_target(
+                    result, instrumented = await self._run_target(
                         serial=serial,
                         session_id=session_id,
                         crawl_id=crawl_id,
@@ -338,16 +338,8 @@ class AndroidUiAutomationOrchestrator:
                         on_progress=on_progress,
                         on_scope_progress=on_scope_progress,
                     )
-                    await self._pull_debug_mapping(
-                        serial=serial,
-                        session_id=session_id,
-                        crawl_id=crawl_id,
-                        target_package=target,
-                        request_id=request_id,
-                    )
                     if instrumented:
-                        if requires_force_stop:
-                            await self._stop_instrumentation(serial, request_id)
+                        await self._stop_instrumentation(serial, request_id)
                         if on_progress is not None:
                             await on_progress(target, "restore_agent")
                         try:
@@ -370,6 +362,13 @@ class AndroidUiAutomationOrchestrator:
                             )
                             if on_progress is not None:
                                 await on_progress(target, "restore_agent_failed")
+                    await self._pull_debug_mapping(
+                        serial=serial,
+                        session_id=session_id,
+                        crawl_id=crawl_id,
+                        target_package=target,
+                        request_id=request_id,
+                    )
                     if target not in TEXT_ONLY_SOCIAL_TARGETS and restore_accessibility:
                         if on_progress is not None:
                             await on_progress(target, "restore_accessibility")
@@ -914,17 +913,16 @@ class AndroidUiAutomationOrchestrator:
         request_id: str | None,
         on_progress: AutomationProgressCallback | None = None,
         on_scope_progress: AutomationScopeProgressCallback | None = None,
-    ) -> tuple[AutomationResultV1, bool, bool]:
+    ) -> tuple[AutomationResultV1, bool]:
         if on_progress is not None:
             await on_progress(target_package, "target_probe")
         try:
             installed = await self._adb.package_exists(serial, target_package)
         except AcquisitionError:
-            return failure_result(target_package, "failed", "target_probe_failed"), False, False
+            return failure_result(target_package, "failed", "target_probe_failed"), False
         if not installed:
             return (
                 failure_result(target_package, "target_missing", "target_not_installed"),
-                False,
                 False,
             )
         if target_package in TEXT_ONLY_SOCIAL_TARGETS:
@@ -943,7 +941,6 @@ class AndroidUiAutomationOrchestrator:
                         "failed",
                         await self._accessibility_failure_reason(serial),
                     ),
-                    False,
                     False,
                 )
             if on_progress is not None:
@@ -973,7 +970,6 @@ class AndroidUiAutomationOrchestrator:
                         "failed",
                         "text_only_cover_required",
                     ),
-                    False,
                     False,
                 )
         if on_progress is not None:
@@ -1051,7 +1047,7 @@ class AndroidUiAutomationOrchestrator:
         except AcquisitionError as exc:
             state = "timeout" if exc.category == ErrorCategory.ADB_TIMEOUT else "failed"
             reason = "automation_timeout" if state == "timeout" else "automation_adb_failure"
-            return failure_result(target_package, state, reason), True, True
+            return failure_result(target_package, state, reason), True
         if result.returncode != 0 or result.output_truncated:
             logger.warning(
                 "automation_instrumentation_failed",
@@ -1070,7 +1066,6 @@ class AndroidUiAutomationOrchestrator:
             )
             return (
                 failure_result(target_package, "failed", "instrumentation_failed"),
-                True,
                 True,
             )
         try:
@@ -1099,7 +1094,6 @@ class AndroidUiAutomationOrchestrator:
             return (
                 failure_result(target_package, "failed", "instrumentation_result_invalid"),
                 True,
-                True,
             )
         logger.info(
             "automation_target_completed",
@@ -1115,7 +1109,7 @@ class AndroidUiAutomationOrchestrator:
                 "duration_ms": parsed.duration_ms,
             },
         )
-        return parsed, True, False
+        return parsed, True
 
 
 def instrumentation_failure_token(stdout: str, stderr: str) -> str:

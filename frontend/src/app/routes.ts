@@ -93,3 +93,11 @@ export function resolveSessionId(
   const exact = sessions.find((s) => s.id === querySesi);
   return exact?.id ?? null;
 }
+
+export function resolveWorkspaceRouteSessionId(
+  querySessionId: string | null,
+  selectedSessionId: string | null | undefined,
+  activeSessionId: string | null | undefined,
+): string | null {
+  return activeSessionId ?? querySessionId ?? selectedSessionId ?? null;
+}

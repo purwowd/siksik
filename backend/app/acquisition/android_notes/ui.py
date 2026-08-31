@@ -97,6 +97,7 @@ class UiNode:
     depth: int
     text: str
     description: str
+    package_name: str
     resource_id: str
     class_name: str
     clickable: bool
@@ -132,6 +133,9 @@ class UiSnapshot:
                 if cleaned and cleaned not in output:
                     output.append(cleaned)
         return tuple(output)
+
+    def package_names(self) -> frozenset[str]:
+        return frozenset(node.package_name for node in self.nodes if node.package_name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +184,7 @@ def parse_ui(xml: str, max_nodes: int = 20_000) -> UiSnapshot:
                 depth=depth,
                 text=normalize_text(element.attrib.get("text", ""), 4096),
                 description=normalize_text(element.attrib.get("content-desc", ""), 4096),
+                package_name=element.attrib.get("package", "")[:255],
                 resource_id=element.attrib.get("resource-id", "")[:512],
                 class_name=element.attrib.get("class", "")[:256],
                 clickable=element.attrib.get("clickable") == "true",

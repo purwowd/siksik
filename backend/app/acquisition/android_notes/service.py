@@ -27,6 +27,16 @@ from app.models.schemas import AcquisitionMode, SessionStatus
 
 logger = logging.getLogger("siksik.acquisition.android_notes")
 GatewayFactory = Callable[[str], NotesGateway]
+NOTES_LAUNCH_BLOCKING_WARNINGS = frozenset(
+    {
+        "notes_launch_failed",
+        "notes_foreground_unavailable",
+        "notes_foreground_mismatch",
+        "notes_foreground_changed",
+        "notes_ui_surface_mismatch",
+        "notes_export_surface_unrecognized",
+    }
+)
 
 
 class AndroidNotesAcquisitionService:
@@ -47,7 +57,15 @@ class AndroidNotesAcquisitionService:
     ) -> NotesAcquisitionResult:
         started = time.perf_counter()
         if simulated:
-            return NotesAcquisitionResult(0, 0.0, None, NotesState.UNAVAILABLE, None, None, None)
+            return NotesAcquisitionResult(
+                0,
+                0.0,
+                None,
+                NotesState.UNAVAILABLE,
+                None,
+                None,
+                None,
+            )
         policy = build_notes_policy(mode, reference=reference)
         gateway = self._gateway_factory(serial)
         await on_progress(
@@ -58,6 +76,17 @@ class AndroidNotesAcquisitionService:
             notes_captured=0,
             notes_skipped=0,
             notes_warning_count=0,
+            crawl_state=None,
+            crawl_source=None,
+            crawl_target=None,
+            crawl_scope=None,
+            crawl_stage=None,
+            crawl_attempt=None,
+            crawl_attempt_state=None,
+            crawl_failure_class=None,
+            crawl_reason=None,
+            crawl_scroll_count=None,
+            crawl_screenshot_count=None,
         )
         try:
             apps = await gateway.detect_apps()
@@ -111,10 +140,21 @@ class AndroidNotesAcquisitionService:
         try:
             async with asyncio.timeout(policy.timeout_s):
                 if app.flow == NotesFlow.SAMSUNG_EXPORT:
-                    extraction = await SamsungNotesExtractor(gateway).extract(app, policy)
+                    extraction = await SamsungNotesExtractor(gateway).extract(
+                        app,
+                        policy,
+                    )
                     warnings.update(extraction.warnings)
-                    if not extraction.records:
-                        fallback = await GenericNotesExtractor(gateway).extract(app, policy)
+                    if (
+                        not extraction.records
+                        and set(extraction.warnings).isdisjoint(
+                            NOTES_LAUNCH_BLOCKING_WARNINGS
+                        )
+                    ):
+                        fallback = await GenericNotesExtractor(gateway).extract(
+                            app,
+                            policy,
+                        )
                         warnings.add("notes_samsung_export_fallback")
                         warnings.update(fallback.warnings)
                         extraction = fallback

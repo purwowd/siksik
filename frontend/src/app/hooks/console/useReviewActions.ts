@@ -22,6 +22,7 @@ type Params = {
   setDashFindings: React.Dispatch<React.SetStateAction<Paginated<Finding> | null>>;
   setFindingsPage: React.Dispatch<React.SetStateAction<number>>;
   refreshReviewSummary: (sessionId: string) => Promise<void>;
+  isSessionCurrent: (sessionId: string) => boolean;
   refreshSessionList: (opts?: { soft?: boolean }) => Promise<SessionSummary[] | undefined>;
   refreshGlobalPending: () => Promise<void>;
   pushToast: ToastPush;
@@ -34,44 +35,49 @@ export function useReviewActions(p: Params) {
 
   const review = useCallback(
     async (id: string, review_status: "confirmed" | "rejected") => {
-      if (reviewBusyId || bulkBusy) return;
+      const sessionId = p.session?.id;
+      if (reviewBusyId || bulkBusy || !sessionId) return;
       setReviewBusyId(id);
       try {
         await api.reviewFinding(id, review_status);
-        const patch = (prev: Paginated<Finding> | null) =>
-          prev
-            ? {
-                ...prev,
-                items: prev.items.map((f) => (f.id === id ? { ...f, review_status } : f)),
-              }
-            : prev;
-        if (p.reviewFilter === "pending") {
-          p.setFindingsData((prev) =>
+        const refreshed = await api.session(sessionId);
+        if (p.isSessionCurrent(sessionId)) {
+          const patch = (prev: Paginated<Finding> | null) =>
             prev
               ? {
                   ...prev,
-                  items: prev.items.filter((f) => f.id !== id),
-                  total: Math.max(0, prev.total - 1),
+                  items: prev.items.map((f) =>
+                    f.id === id ? { ...f, review_status } : f,
+                  ),
                 }
-              : prev,
+              : prev;
+          if (p.reviewFilter === "pending") {
+            p.setFindingsData((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    items: prev.items.filter((f) => f.id !== id),
+                    total: Math.max(0, prev.total - 1),
+                  }
+                : prev,
+            );
+          } else {
+            p.setFindingsData(patch);
+          }
+          p.setReportFindings(patch);
+          p.setDashFindings(patch);
+          p.setSession((current) =>
+            current?.id === sessionId ? refreshed : current,
           );
-        } else {
-          p.setFindingsData(patch);
+          void p.refreshReviewSummary(sessionId);
         }
-        p.setReportFindings(patch);
-        p.setDashFindings(patch);
-        if (p.session?.id) {
-          const refreshed = await api.session(p.session.id);
-          p.setSession(refreshed);
-          void p.refreshReviewSummary(p.session.id);
-          void p.refreshSessionList({ soft: true });
-          void p.refreshGlobalPending();
-          p.pushToast(
-            review_status === "confirmed" ? "Temuan dikonfirmasi" : "Temuan ditolak",
-            review_status === "confirmed" ? "warn" : "ok",
-            { ttlMs: 2200, dedupe: true },
-          );
-        }
+        void p.refreshSessionList({ soft: true });
+        void p.refreshGlobalPending();
+        p.pushToast(
+          review_status === "confirmed" ? "Temuan dikonfirmasi" : "Temuan ditolak",
+          review_status === "confirmed" ? "warn" : "ok",
+          { ttlMs: 2200, dedupe: true },
+        );
       } catch (e) {
         p.setError(e instanceof Error ? e.message : "Gagal menyimpan verifikasi");
       } finally {
@@ -83,7 +89,8 @@ export function useReviewActions(p: Params) {
 
   const bulkReview = useCallback(
     async (review_status: "confirmed" | "rejected") => {
-      if (!p.session?.id || !p.reviewSummary?.pending) return;
+      const sessionId = p.session?.id;
+      if (!sessionId || !p.reviewSummary?.pending) return;
       const total = p.reviewSummary.pending;
       const verb = review_status === "confirmed" ? "konfirmasi" : "tolak";
       const capNote =
@@ -95,11 +102,16 @@ export function useReviewActions(p: Params) {
       }
       setBulkBusy(true);
       try {
-        const result = await api.bulkReviewFindings(p.session.id, review_status);
-        const refreshed = await api.session(p.session.id);
-        p.setSession(refreshed);
-        p.setFindingsPage(1);
-        void p.refreshReviewSummary(p.session.id);
+        const result = await api.bulkReviewFindings(sessionId, review_status);
+        const refreshed = await api.session(sessionId);
+        const stillCurrent = p.isSessionCurrent(sessionId);
+        if (stillCurrent) {
+          p.setSession((current) =>
+            current?.id === sessionId ? refreshed : current,
+          );
+          p.setFindingsPage(1);
+          void p.refreshReviewSummary(sessionId);
+        }
         void p.refreshSessionList({ soft: true });
         void p.refreshGlobalPending();
         p.pushToast(
@@ -107,14 +119,14 @@ export function useReviewActions(p: Params) {
           review_status === "confirmed" ? "warn" : "ok",
           { ttlMs: 4000, dedupe: true },
         );
-        if (p.tab === "findings") {
+        if (stillCurrent && p.tab === "findings") {
           const data = await api.findings(
-            p.session.id,
+            sessionId,
             1,
             DEFAULT_PAGE_SIZE,
             p.reviewFilter === "all" ? undefined : { review_status: p.reviewFilter },
           );
-          p.setFindingsData(data);
+          if (p.isSessionCurrent(sessionId)) p.setFindingsData(data);
         }
       } catch (e) {
         p.setError(e instanceof Error ? e.message : "Gagal bulk review");

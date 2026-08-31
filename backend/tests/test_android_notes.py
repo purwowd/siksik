@@ -21,6 +21,10 @@ from app.acquisition.android_notes.extractors import (
     SamsungNotesExtractor,
     _parse_export,
 )
+from app.acquisition.android_notes.gateway import (
+    AdbNotesGateway,
+    parse_foreground_package,
+)
 from app.acquisition.android_notes.service import (
     AndroidNotesAcquisitionService,
     build_notes_policy,
@@ -28,6 +32,7 @@ from app.acquisition.android_notes.service import (
 from app.acquisition.android_notes.ui import parse_note_timestamp, parse_ui
 from app.acquisition.analysis_plan import build_analysis_plan
 from app.acquisition.contracts import AcquisitionResult, ProviderKind
+from app.acquisition.process import ProcessResult
 from app.core import config
 from app.core.db import db, utcnow
 from app.models.schemas import AcquisitionMode, DeviceType, Scenario
@@ -87,6 +92,12 @@ class FakeNotesGateway:
         self.state = "list"
         return app == self.app
 
+    def last_failure_reason(self):
+        return None
+
+    async def adopt_export_surface(self):
+        return True
+
     async def restore_agent(self):
         self.restored = True
 
@@ -145,6 +156,12 @@ class FakeSamsungGateway:
     async def launch(self, app):
         self.state = "list"
         return app == self.app
+
+    def last_failure_reason(self):
+        return None
+
+    async def adopt_export_surface(self):
+        return True
 
     async def restore_agent(self):
         return None
@@ -217,6 +234,49 @@ class FakeSamsungGateway:
         return True
 
 
+class FakeAdbNotesTransport:
+    def __init__(
+        self,
+        foreground_package: str | None,
+        *,
+        ui_package: str = "com.samsung.android.app.notes",
+    ) -> None:
+        self.foreground_package = foreground_package
+        self.ui_package = ui_package
+        self.inputs: list[tuple[str, ...]] = []
+        self.started: list[str] = []
+
+    async def start_activity(self, _serial, component, _extras, **_kwargs):
+        self.started.append(component)
+
+    async def run(self, _serial, args, **_kwargs):
+        command = tuple(args)
+        if command in {
+            ("shell", "cmd", "activity", "get-resumed-activity"),
+            ("shell", "dumpsys", "activity", "activities"),
+        }:
+            if self.foreground_package is None:
+                return ProcessResult(command, 0, "", "")
+            output = (
+                "mResumedActivity: ActivityRecord{abc u0 "
+                f"{self.foreground_package}/.MainActivity t7}}"
+            )
+            return ProcessResult(command, 0, output, "")
+        if command[:3] == ("shell", "uiautomator", "dump"):
+            return ProcessResult(command, 0, "UI hierarchy dumped", "")
+        if command[:2] == ("exec-out", "cat"):
+            output = (
+                '<hierarchy><node package="'
+                f"{self.ui_package}"
+                '" class="android.widget.FrameLayout" '
+                'bounds="[0,0][1080,1920]" /></hierarchy>'
+            )
+            return ProcessResult(command, 0, output, "")
+        if command[:2] == ("shell", "input"):
+            self.inputs.append(command)
+        return ProcessResult(command, 0, "", "")
+
+
 def _policy() -> NotesPolicy:
     return NotesPolicy(
         mode=AcquisitionMode.QUICK,
@@ -229,6 +289,24 @@ def _policy() -> NotesPolicy:
         max_export_file_bytes=1024 * 1024,
         max_export_bytes=4 * 1024 * 1024,
         max_ui_bytes=1024 * 1024,
+    )
+
+
+def _samsung_app() -> NoteApp:
+    return NoteApp(
+        "com.samsung.android.app.notes",
+        "Samsung Notes",
+        "com.samsung.android.app.notes/.memolist.MemoListActivity",
+        NotesFlow.SAMSUNG_EXPORT,
+    )
+
+
+def _generic_app() -> NoteApp:
+    return NoteApp(
+        "com.google.android.keep",
+        "Google Keep",
+        "com.google.android.keep/.activities.BrowseActivity",
+        NotesFlow.UI_WALK,
     )
 
 
@@ -258,6 +336,109 @@ def test_notes_policy_separates_quick_and_full_windows_and_budgets() -> None:
 
 
 @pytest.mark.unit
+def test_notes_foreground_parser_reads_resumed_activity_output() -> None:
+    assert (
+        parse_foreground_package(
+            "mResumedActivity: ActivityRecord{abc u0 "
+            "com.twitter.android/.StartActivity t7}"
+        )
+        == "com.twitter.android"
+    )
+    assert (
+        parse_foreground_package(
+            "noise com.untrusted.example/.Noise\n"
+            "topResumedActivity=ActivityRecord{abc u0 "
+            "com.samsung.android.app.notes/.memolist.MemoListActivity t8}"
+        )
+        == "com.samsung.android.app.notes"
+    )
+    assert parse_foreground_package("Activity task state unavailable") is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "app",
+    (_samsung_app(), _generic_app()),
+    ids=("samsung_export", "non_samsung_ui_walk"),
+)
+async def test_notes_gateway_rejects_launch_while_x_remains_foreground(
+    app: NoteApp,
+) -> None:
+    transport = FakeAdbNotesTransport("com.twitter.android")
+    gateway = AdbNotesGateway(
+        "serial-fixture",
+        transport,  # type: ignore[arg-type]
+        foreground_attempts=1,
+        foreground_poll_s=0,
+    )
+
+    assert await gateway.launch(app) is False
+    assert gateway.last_failure_reason() == "notes_foreground_mismatch"
+    assert await gateway.tap(100, 200) is False
+    assert transport.inputs == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_notes_gateway_stops_input_after_foreground_changes() -> None:
+    transport = FakeAdbNotesTransport("com.samsung.android.app.notes")
+    gateway = AdbNotesGateway(
+        "serial-fixture",
+        transport,  # type: ignore[arg-type]
+        foreground_attempts=1,
+        foreground_poll_s=0,
+    )
+    assert await gateway.launch(_samsung_app()) is True
+
+    transport.foreground_package = "com.twitter.android"
+
+    assert await gateway.swipe((500, 1400), (500, 500), 450) is False
+    assert gateway.last_failure_reason() == "notes_foreground_mismatch"
+    assert transport.inputs == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_notes_gateway_rejects_ui_dump_from_another_package() -> None:
+    transport = FakeAdbNotesTransport(
+        "com.samsung.android.app.notes",
+        ui_package="com.twitter.android",
+    )
+    gateway = AdbNotesGateway(
+        "serial-fixture",
+        transport,  # type: ignore[arg-type]
+        foreground_attempts=1,
+        foreground_poll_s=0,
+    )
+    assert await gateway.launch(_samsung_app()) is True
+
+    assert await gateway.dump_ui(1024 * 1024) == ""
+    assert gateway.last_failure_reason() == "notes_ui_surface_mismatch"
+    assert transport.inputs == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_notes_gateway_allows_only_adopted_system_export_surface() -> None:
+    transport = FakeAdbNotesTransport("com.samsung.android.app.notes")
+    gateway = AdbNotesGateway(
+        "serial-fixture",
+        transport,  # type: ignore[arg-type]
+        foreground_attempts=1,
+        foreground_poll_s=0,
+    )
+    assert await gateway.adopt_export_surface() is False
+    assert gateway.last_failure_reason() == "notes_export_surface_unrecognized"
+    assert await gateway.launch(_samsung_app()) is True
+    transport.foreground_package = "com.android.documentsui"
+
+    assert await gateway.adopt_export_surface() is True
+    assert await gateway.tap(100, 200) is True
+    assert transport.inputs == [("shell", "input", "tap", "100", "200")]
+
+
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_generic_notes_walk_filters_old_cards_and_reads_deep_content() -> None:
     gateway = FakeNotesGateway()
@@ -270,6 +451,51 @@ async def test_generic_notes_walk_filters_old_cards_and_reads_deep_content() -> 
     assert "agenda pertama" in result.records[0].body
     assert "agenda lanjutan" in result.records[0].body
     assert result.records[0].source_modified_at == "2026-08-20T10:30:00Z"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_generic_notes_walk_stops_after_foreground_loss() -> None:
+    class ForegroundLossGateway(FakeNotesGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failure: str | None = None
+            self.inputs: list[str] = []
+
+        async def launch(self, app):
+            self.failure = None
+            return await super().launch(app)
+
+        def last_failure_reason(self):
+            return self.failure
+
+        async def dump_ui(self, max_bytes):
+            if self.state == "list":
+                return await super().dump_ui(max_bytes)
+            self.failure = "notes_foreground_mismatch"
+            return ""
+
+        async def tap(self, x, y):
+            self.inputs.append("tap")
+            return await super().tap(x, y)
+
+        async def swipe(self, start, end, duration_ms):
+            self.inputs.append("swipe")
+            return await super().swipe(start, end, duration_ms)
+
+        async def back(self):
+            self.inputs.append("back")
+            return await super().back()
+
+    gateway = ForegroundLossGateway()
+
+    result = await GenericNotesExtractor(gateway).extract(gateway.app, _policy())
+
+    assert result.flow == NotesFlow.UI_WALK
+    assert result.state == NotesState.PARTIAL
+    assert result.records == ()
+    assert result.warnings == ("notes_foreground_mismatch",)
+    assert gateway.inputs == ["tap"]
 
 
 @pytest.mark.unit
@@ -291,6 +517,56 @@ async def test_samsung_notes_flow_exports_selected_notes_as_sdocx() -> None:
         "tap:format",
         "tap:picker",
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_notes_service_does_not_fallback_after_foreground_mismatch(
+    tmp_path: Path,
+) -> None:
+    class ForegroundMismatchGateway(FakeSamsungGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.launch_calls = 0
+            self.restored = False
+
+        async def launch(self, _app):
+            self.launch_calls += 1
+            return False
+
+        def last_failure_reason(self):
+            return "notes_foreground_mismatch"
+
+        async def restore_agent(self):
+            self.restored = True
+
+    gateway = ForegroundMismatchGateway()
+    service = AndroidNotesAcquisitionService(lambda _serial: gateway)
+    progress_updates: list[dict[str, object]] = []
+
+    async def on_progress(*_args, **kwargs):
+        progress_updates.append(kwargs)
+
+    result = await service.acquire(
+        session_id="notes-foreground-mismatch",
+        serial="serial-fixture",
+        staging=tmp_path,
+        mode=AcquisitionMode.QUICK,
+        simulated=False,
+        on_progress=on_progress,
+        request_id="request-fixture",
+        reference=datetime(2026, 8, 28, tzinfo=timezone.utc),
+    )
+
+    assert result.state == NotesState.UNAVAILABLE
+    assert result.item_count == 0
+    assert result.warnings == ("notes_foreground_mismatch",)
+    assert gateway.launch_calls == 1
+    assert gateway.actions == []
+    assert gateway.restored is True
+    assert progress_updates[0]["crawl_state"] is None
+    assert progress_updates[0]["crawl_source"] is None
+    assert progress_updates[0]["crawl_target"] is None
 
 
 @pytest.mark.unit

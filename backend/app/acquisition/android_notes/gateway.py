@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from app.acquisition.adb import AsyncAdbTransport, validate_component_name
@@ -11,12 +12,36 @@ from app.acquisition.android_notes.contracts import (
     NotesFlow,
     RemoteExport,
 )
+from app.acquisition.android_notes.ui import parse_ui
 from app.acquisition.errors import AcquisitionError
 from app.core.config import settings
 
-SCREEN_SIZE_RE = re.compile(r"(?:Physical|Override) size:\s*(\d+)x(\d+)", re.IGNORECASE)
-REMOTE_EXPORT_RE = re.compile(r"^/sdcard/[A-Za-z0-9_ ./()\-]{1,900}\.(?:sdocx|txt)$", re.IGNORECASE)
+SCREEN_SIZE_RE = re.compile(
+    r"(?:Physical|Override) size:\s*(\d+)x(\d+)",
+    re.IGNORECASE,
+)
+REMOTE_EXPORT_RE = re.compile(
+    r"^/sdcard/[A-Za-z0-9_ ./()\-]{1,900}\.(?:sdocx|txt)$",
+    re.IGNORECASE,
+)
 COMPONENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.]+/[A-Za-z0-9_.$]+$")
+FOREGROUND_COMPONENT_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])([A-Za-z][A-Za-z0-9_.]{1,254})/[A-Za-z0-9_.$]+"
+)
+FOREGROUND_LINE_MARKERS = (
+    "topResumedActivity",
+    "mResumedActivity",
+    "ResumedActivity",
+    "mCurrentFocus",
+    "mFocusedApp",
+)
+EXPORT_SURFACE_PACKAGES = frozenset(
+    {
+        "com.android.documentsui",
+        "com.google.android.documentsui",
+        "com.sec.android.app.myfiles",
+    }
+)
 KNOWN_APPS = (
     ("com.samsung.android.app.notes", "Samsung Notes", NotesFlow.SAMSUNG_EXPORT),
     ("com.google.android.keep", "Google Keep", NotesFlow.UI_WALK),
@@ -43,10 +68,21 @@ class AdbNotesGateway:
         transport: AsyncAdbTransport,
         *,
         agent_component: str | None = None,
+        foreground_attempts: int = 20,
+        foreground_poll_s: float = 0.4,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
+        if foreground_attempts < 1 or not 0 <= foreground_poll_s <= 5.0:
+            raise ValueError("Invalid Notes foreground verification policy")
         self._serial = serial
         self._transport = transport
         self._agent_component = agent_component or settings.android_agent_component
+        self._foreground_attempts = foreground_attempts
+        self._foreground_poll_s = foreground_poll_s
+        self._sleep = sleep
+        self._active_package: str | None = None
+        self._export_surface_package: str | None = None
+        self._last_failure: str | None = None
         digest = hashlib.sha256(f"notes-ui:{serial}".encode("utf-8")).hexdigest()[:16]
         self._dump_path = f"/data/local/tmp/siksik_notes_{digest}.xml"
 
@@ -70,7 +106,9 @@ class AdbNotesGateway:
         for line in result.stdout.splitlines():
             package = line.removeprefix("package:").strip()
             lowered = package.casefold()
-            if package in known_packages or not any(token in lowered for token in ("note", "memo", "notepad")):
+            if package in known_packages or not any(
+                token in lowered for token in ("note", "memo", "notepad")
+            ):
                 continue
             component = await self._resolve_component(package)
             if component is None:
@@ -84,7 +122,16 @@ class AdbNotesGateway:
     async def _resolve_component(self, package: str) -> str | None:
         result = await self._transport.run(
             self._serial,
-            ["shell", "cmd", "package", "resolve-activity", "--brief", "--user", "0", package],
+            [
+                "shell",
+                "cmd",
+                "package",
+                "resolve-activity",
+                "--brief",
+                "--user",
+                "0",
+                package,
+            ],
             operation="android_notes_activity_resolve",
             check=False,
         )
@@ -99,6 +146,9 @@ class AdbNotesGateway:
         return None
 
     async def launch(self, app: NoteApp) -> bool:
+        self._active_package = None
+        self._export_surface_package = None
+        self._last_failure = None
         try:
             await self._transport.start_activity(
                 self._serial,
@@ -107,11 +157,49 @@ class AdbNotesGateway:
                 timeout=20.0,
             )
         except AcquisitionError:
+            self._last_failure = "notes_launch_failed"
             return False
-        await self.settle(1.2)
-        return True
+        for attempt in range(self._foreground_attempts):
+            observed = await self._foreground_package()
+            if observed == app.package_name:
+                self._active_package = app.package_name
+                self._last_failure = None
+                return True
+            if attempt + 1 < self._foreground_attempts:
+                await self._sleep(self._foreground_poll_s)
+        self._last_failure = (
+            "notes_foreground_unavailable"
+            if observed is None
+            else "notes_foreground_mismatch"
+        )
+        return False
+
+    def last_failure_reason(self) -> str | None:
+        return self._last_failure
+
+    async def adopt_export_surface(self) -> bool:
+        if self._active_package is None:
+            self._last_failure = "notes_export_surface_unrecognized"
+            return False
+        observed = await self._foreground_package()
+        if observed == self._active_package:
+            self._export_surface_package = None
+            self._last_failure = None
+            return True
+        if observed in EXPORT_SURFACE_PACKAGES:
+            self._export_surface_package = observed
+            self._last_failure = None
+            return True
+        self._last_failure = (
+            "notes_foreground_unavailable"
+            if observed is None
+            else "notes_export_surface_unrecognized"
+        )
+        return False
 
     async def restore_agent(self) -> None:
+        self._active_package = None
+        self._export_surface_package = None
         try:
             await self._transport.start_activity(
                 self._serial,
@@ -123,6 +211,9 @@ class AdbNotesGateway:
             return
 
     async def dump_ui(self, max_bytes: int) -> str:
+        before = await self._allowed_foreground_package()
+        if before is None:
+            return ""
         try:
             dumped = await self._transport.run(
                 self._serial,
@@ -132,6 +223,7 @@ class AdbNotesGateway:
                 check=False,
             )
             if dumped.returncode != 0:
+                self._last_failure = "notes_ui_dump_failed"
                 return ""
             output = await self._transport.run(
                 self._serial,
@@ -141,10 +233,21 @@ class AdbNotesGateway:
                 check=False,
             )
             if output.returncode != 0 or output.output_truncated:
+                self._last_failure = "notes_ui_read_failed"
                 return ""
             encoded = output.stdout.encode("utf-8", errors="replace")
             if len(encoded) > max_bytes:
+                self._last_failure = "notes_ui_dump_oversized"
                 return ""
+            after = await self._allowed_foreground_package()
+            if after is None or after != before:
+                self._last_failure = "notes_foreground_changed"
+                return ""
+            snapshot = parse_ui(output.stdout)
+            if not snapshot.nodes or after not in snapshot.package_names():
+                self._last_failure = "notes_ui_surface_mismatch"
+                return ""
+            self._last_failure = None
             return output.stdout
         finally:
             await self._transport.run(
@@ -176,7 +279,14 @@ class AdbNotesGateway:
     async def long_press(self, x: int, y: int, duration_ms: int = 900) -> bool:
         duration = min(max(duration_ms, 300), 3_000)
         return await self._input(
-            ["swipe", str(max(0, x)), str(max(0, y)), str(max(0, x)), str(max(0, y)), str(duration)]
+            [
+                "swipe",
+                str(max(0, x)),
+                str(max(0, y)),
+                str(max(0, x)),
+                str(max(0, y)),
+                str(duration),
+            ]
         )
 
     async def swipe(
@@ -201,6 +311,8 @@ class AdbNotesGateway:
         return await self._input(["keyevent", "4"])
 
     async def _input(self, args: list[str]) -> bool:
+        if await self._allowed_foreground_package() is None:
+            return False
         result = await self._transport.run(
             self._serial,
             ["shell", "input", *args],
@@ -209,11 +321,65 @@ class AdbNotesGateway:
             check=False,
         )
         output = f"{result.stdout}\n{result.stderr}".casefold()
-        denied = any(token in output for token in ("securityexception", "inject_events", "permission denied"))
-        return result.returncode == 0 and not denied
+        denied = any(
+            token in output
+            for token in ("securityexception", "inject_events", "permission denied")
+        )
+        if result.returncode != 0 or denied:
+            self._last_failure = "notes_ui_input_denied"
+            return False
+        after = await self._allowed_foreground_package()
+        if after is None:
+            self._last_failure = "notes_foreground_changed"
+            return False
+        self._last_failure = None
+        return True
 
     async def settle(self, seconds: float) -> None:
-        await asyncio.sleep(min(max(seconds, 0.0), 3.0))
+        await self._sleep(min(max(seconds, 0.0), 3.0))
+
+    async def _allowed_foreground_package(self) -> str | None:
+        observed = await self._foreground_package()
+        allowed = {
+            package
+            for package in (self._active_package, self._export_surface_package)
+            if package is not None
+        }
+        if observed in allowed:
+            return observed
+        self._last_failure = (
+            "notes_foreground_unavailable"
+            if observed is None
+            else "notes_foreground_mismatch"
+        )
+        return None
+
+    async def _foreground_package(self) -> str | None:
+        probes = (
+            (
+                ["shell", "cmd", "activity", "get-resumed-activity"],
+                "android_notes_foreground_probe",
+            ),
+            (
+                ["shell", "dumpsys", "activity", "activities"],
+                "android_notes_foreground_fallback",
+            ),
+        )
+        for args, operation in probes:
+            try:
+                result = await self._transport.run(
+                    self._serial,
+                    args,
+                    operation=operation,
+                    timeout=10.0,
+                    check=False,
+                )
+            except AcquisitionError:
+                continue
+            package = parse_foreground_package(f"{result.stdout}\n{result.stderr}")
+            if package is not None:
+                return package
+        return None
 
     async def list_exports(self) -> tuple[RemoteExport, ...]:
         paths: set[str] = set()
@@ -221,7 +387,17 @@ class AdbNotesGateway:
             for suffix in ("*.sdocx", "*.txt"):
                 result = await self._transport.run(
                     self._serial,
-                    ["shell", "find", root, "-maxdepth", "4", "-type", "f", "-iname", suffix],
+                    [
+                        "shell",
+                        "find",
+                        root,
+                        "-maxdepth",
+                        "4",
+                        "-type",
+                        "f",
+                        "-iname",
+                        suffix,
+                    ],
                     operation="android_notes_export_list",
                     timeout=20.0,
                     check=False,
@@ -276,3 +452,21 @@ class AdbNotesGateway:
             check=False,
         )
         return result.returncode == 0 and destination.is_file()
+
+
+def parse_foreground_package(value: str) -> str | None:
+    lines = value.splitlines()
+    prioritized = [
+        line
+        for marker in FOREGROUND_LINE_MARKERS
+        for line in lines
+        if marker in line
+    ]
+    candidates = prioritized or (
+        [line for line in lines if line.strip()] if len(lines) <= 4 else []
+    )
+    for line in candidates:
+        match = FOREGROUND_COMPONENT_RE.search(line)
+        if match is not None:
+            return match.group(1)
+    return None

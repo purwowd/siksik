@@ -65,7 +65,8 @@ export const api = {
     req<RiskTimeline>(`/sessions/${sessionId}/risk-timeline?years_back=${yearsBack}`),
   sessions: (page = 1, pageSize = 10) =>
     req<Paginated<SessionSummary>>(`/sessions?page=${page}&page_size=${pageSize}`),
-  session: (id: string) => req<SessionSummary>(`/sessions/${id}`),
+  session: (id: string, signal?: AbortSignal) =>
+    req<SessionSummary>(`/sessions/${id}`, signal ? { signal } : undefined),
   startSession: (body: {
     device_id?: string;
     device_type: DeviceType;

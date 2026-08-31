@@ -5,6 +5,7 @@ import {
   DEFAULT_GALLERY_ALBUM,
   parseTabSearch,
   pathFromTab,
+  resolveWorkspaceRouteSessionId,
   tabFromPath,
   type ModuleFilterParam,
   type ReviewFilterParam,
@@ -18,6 +19,7 @@ type Params = {
   allowedTabs: { id: Tab; label: string }[];
   landingTab: Tab;
   sessionId: string | null | undefined;
+  activeSessionId: string | null | undefined;
   reviewFilter: ReviewFilterParam;
   moduleFilter: ModuleFilterParam | null;
   galleryAlbum: string;
@@ -42,14 +44,25 @@ export function useConsoleNavigation(p: Params) {
     ) => {
       p.navigate(
         buildTabUrl(next, {
-          sesi: opts?.sesi ?? p.sessionId ?? null,
+          sesi: resolveWorkspaceRouteSessionId(
+            opts?.sesi ?? null,
+            p.sessionId,
+            p.activeSessionId,
+          ),
           filter: opts?.filter ?? (next === "findings" ? p.reviewFilter : null),
           album: opts?.album ?? (next === "gallery" ? p.galleryAlbum : null),
           modul: opts?.modul ?? (next === "findings" ? p.moduleFilter : null),
         }),
       );
     },
-    [p.navigate, p.sessionId, p.reviewFilter, p.galleryAlbum, p.moduleFilter],
+    [
+      p.navigate,
+      p.sessionId,
+      p.activeSessionId,
+      p.reviewFilter,
+      p.galleryAlbum,
+      p.moduleFilter,
+    ],
   );
 
   useEffect(() => {
@@ -76,8 +89,13 @@ export function useConsoleNavigation(p: Params) {
   useEffect(() => {
     if (!p.auth || !tab) return;
     if (tab !== "findings" && tab !== "gallery" && tab !== "report" && tab !== "dashboard") return;
+    const { sesi } = parseTabSearch(p.location.search);
     const url = buildTabUrl(tab, {
-      sesi: p.sessionId ?? null,
+      sesi: resolveWorkspaceRouteSessionId(
+        sesi,
+        p.sessionId,
+        p.activeSessionId,
+      ),
       filter: tab === "findings" ? p.reviewFilter : null,
       album: tab === "gallery" ? p.galleryAlbum : null,
       modul: tab === "findings" ? p.moduleFilter : null,
@@ -88,6 +106,7 @@ export function useConsoleNavigation(p: Params) {
     p.auth,
     tab,
     p.sessionId,
+    p.activeSessionId,
     p.reviewFilter,
     p.galleryAlbum,
     p.moduleFilter,

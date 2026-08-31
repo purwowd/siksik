@@ -62,7 +62,12 @@ class GenericNotesExtractor:
 
     async def extract(self, app: NoteApp, policy: NotesPolicy) -> NotesExtractionResult:
         if not await self._gateway.launch(app):
-            return NotesExtractionResult((), NotesFlow.UI_WALK, NotesState.UNAVAILABLE, ("notes_launch_failed",))
+            return NotesExtractionResult(
+                (),
+                NotesFlow.UI_WALK,
+                NotesState.UNAVAILABLE,
+                (_gateway_warning(self._gateway, "notes_launch_failed"),),
+            )
         width, height = await self._gateway.screen_size()
         seen_cards: set[str] = set()
         records: list[NoteRecord] = []
@@ -71,8 +76,16 @@ class GenericNotesExtractor:
         stagnant = 0
         scrolls = 0
         observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        while len(records) < policy.max_notes and scrolls <= policy.max_list_scrolls and stagnant < 2:
+        while (
+            len(records) < policy.max_notes
+            and scrolls <= policy.max_list_scrolls
+            and stagnant < 2
+        ):
             snapshot = await self._snapshot(policy)
+            snapshot_failure = _snapshot_failure(self._gateway, snapshot)
+            if snapshot_failure is not None:
+                warnings.add(snapshot_failure)
+                break
             cards = note_cards(snapshot)
             pending = []
             for card in cards:
@@ -88,7 +101,9 @@ class GenericNotesExtractor:
                     (width // 2, int(height * 0.28)),
                     450,
                 ):
-                    warnings.add("notes_ui_input_denied")
+                    warnings.add(
+                        _gateway_warning(self._gateway, "notes_ui_input_denied")
+                    )
                     break
                 scrolls += 1
                 await self._gateway.settle(0.7)
@@ -101,15 +116,23 @@ class GenericNotesExtractor:
                 skipped += 1
                 continue
             if not await self._gateway.tap(*card.bounds.center):
-                warnings.add("notes_ui_input_denied")
+                warnings.add(
+                    _gateway_warning(self._gateway, "notes_ui_input_denied")
+                )
                 break
             await self._gateway.settle(0.6)
             editor = await self._snapshot(policy)
+            snapshot_failure = _snapshot_failure(self._gateway, editor)
+            if snapshot_failure is not None:
+                warnings.add(snapshot_failure)
+                break
             if not looks_like_editor(editor):
                 skipped += 1
                 warnings.add("notes_editor_unrecognized")
                 if not await self._return_to_list(policy):
-                    warnings.add("notes_list_restore_failed")
+                    warnings.add(
+                        _gateway_warning(self._gateway, "notes_list_restore_failed")
+                    )
                     break
                 continue
             record = await self._read_editor(
@@ -122,20 +145,37 @@ class GenericNotesExtractor:
             )
             if record is None:
                 skipped += 1
-            elif record.source_modified_at is not None and _parse_iso(record.source_modified_at) < policy.not_before:
+            elif (
+                record.source_modified_at is not None
+                and _parse_iso(record.source_modified_at) < policy.not_before
+            ):
                 skipped += 1
             elif record.normalized_text:
                 records.append(record)
             else:
                 skipped += 1
             if not await self._return_to_list(policy):
-                warnings.add("notes_list_restore_failed")
+                warnings.add(
+                    _gateway_warning(self._gateway, "notes_list_restore_failed")
+                )
                 break
         if len(records) >= policy.max_notes or scrolls >= policy.max_list_scrolls:
             warnings.add("notes_limit_reached")
         unique = tuple({record.stable_id: record for record in records}.values())
-        state = NotesState.COMPLETE if unique and not warnings else NotesState.PARTIAL if unique or warnings else NotesState.UNAVAILABLE
-        return NotesExtractionResult(unique, NotesFlow.UI_WALK, state, tuple(sorted(warnings)), skipped)
+        state = (
+            NotesState.COMPLETE
+            if unique and not warnings
+            else NotesState.PARTIAL
+            if unique or warnings
+            else NotesState.UNAVAILABLE
+        )
+        return NotesExtractionResult(
+            unique,
+            NotesFlow.UI_WALK,
+            state,
+            tuple(sorted(warnings)),
+            skipped,
+        )
 
     async def _snapshot(self, policy: NotesPolicy) -> UiSnapshot:
         return parse_ui(await self._gateway.dump_ui(policy.max_ui_bytes))
@@ -218,60 +258,118 @@ class SamsungNotesExtractor:
 
     async def extract(self, app: NoteApp, policy: NotesPolicy) -> NotesExtractionResult:
         if not await self._gateway.launch(app):
-            return NotesExtractionResult((), NotesFlow.SAMSUNG_EXPORT, NotesState.UNAVAILABLE, ("notes_launch_failed",))
+            return _samsung_unavailable(
+                _gateway_warning(self._gateway, "notes_launch_failed")
+            )
         warnings: set[str] = set()
         baseline = {item.path: item for item in await self._gateway.list_exports()}
         snapshot = await self._snapshot(policy)
-        drawer = find_action(snapshot, ("navigation drawer", "open navigation drawer", "menu"))
+        snapshot_failure = _snapshot_failure(self._gateway, snapshot)
+        if snapshot_failure is not None:
+            return _samsung_unavailable(snapshot_failure)
+        drawer = find_action(
+            snapshot,
+            ("navigation drawer", "open navigation drawer", "menu"),
+        )
         if drawer is not None:
             if not await self._gateway.tap(*drawer.bounds.center):
-                return NotesExtractionResult((), NotesFlow.SAMSUNG_EXPORT, NotesState.UNAVAILABLE, ("notes_ui_input_denied",))
+                return _samsung_unavailable(
+                    _gateway_warning(self._gateway, "notes_ui_input_denied")
+                )
             await self._gateway.settle(0.5)
             snapshot = await self._snapshot(policy)
+            snapshot_failure = _snapshot_failure(self._gateway, snapshot)
+            if snapshot_failure is not None:
+                return _samsung_unavailable(snapshot_failure)
             all_notes = find_action(snapshot, ("all notes", "semua catatan"))
             if all_notes is not None:
-                await self._gateway.tap(*all_notes.bounds.center)
+                if not await self._gateway.tap(*all_notes.bounds.center):
+                    return _samsung_unavailable(
+                        _gateway_warning(self._gateway, "notes_ui_input_denied")
+                    )
                 await self._gateway.settle(0.6)
                 snapshot = await self._snapshot(policy)
+                snapshot_failure = _snapshot_failure(self._gateway, snapshot)
+                if snapshot_failure is not None:
+                    return _samsung_unavailable(snapshot_failure)
         cards = note_cards(snapshot)
         if not cards:
-            return NotesExtractionResult((), NotesFlow.SAMSUNG_EXPORT, NotesState.UNAVAILABLE, ("notes_list_unrecognized",))
+            return _samsung_unavailable("notes_list_unrecognized")
         if not await self._gateway.long_press(*cards[0].bounds.center):
-            return NotesExtractionResult((), NotesFlow.SAMSUNG_EXPORT, NotesState.UNAVAILABLE, ("notes_ui_input_denied",))
+            return _samsung_unavailable(
+                _gateway_warning(self._gateway, "notes_ui_input_denied")
+            )
         await self._gateway.settle(0.5)
         selection = await self._snapshot(policy)
+        snapshot_failure = _snapshot_failure(self._gateway, selection)
+        if snapshot_failure is not None:
+            return _samsung_unavailable(snapshot_failure)
         select_all = find_action(selection, ("select all", "pilih semua"))
         if select_all is None:
-            return NotesExtractionResult((), NotesFlow.SAMSUNG_EXPORT, NotesState.UNAVAILABLE, ("notes_select_all_unavailable",))
+            return _samsung_unavailable("notes_select_all_unavailable")
         if not await self._gateway.tap(*select_all.bounds.center):
-            return NotesExtractionResult((), NotesFlow.SAMSUNG_EXPORT, NotesState.UNAVAILABLE, ("notes_ui_input_denied",))
+            return _samsung_unavailable(
+                _gateway_warning(self._gateway, "notes_ui_input_denied")
+            )
         await self._gateway.settle(0.4)
         selected_snapshot = await self._snapshot(policy)
+        snapshot_failure = _snapshot_failure(self._gateway, selected_snapshot)
+        if snapshot_failure is not None:
+            return _samsung_unavailable(snapshot_failure)
         count = selected_count(selected_snapshot)
         if count is not None and count > policy.max_notes:
             warnings.add("notes_selection_exceeds_mode_limit")
         more = find_action(selected_snapshot, ("more options", "more", "lainnya"))
-        if more is None or not await self._gateway.tap(*more.bounds.center):
-            return NotesExtractionResult((), NotesFlow.SAMSUNG_EXPORT, NotesState.UNAVAILABLE, ("notes_export_menu_unavailable",))
+        if more is None:
+            return _samsung_unavailable("notes_export_menu_unavailable")
+        if not await self._gateway.tap(*more.bounds.center):
+            return _samsung_unavailable(
+                _gateway_warning(self._gateway, "notes_ui_input_denied")
+            )
         await self._gateway.settle(0.4)
         menu = await self._snapshot(policy)
+        snapshot_failure = _snapshot_failure(self._gateway, menu)
+        if snapshot_failure is not None:
+            return _samsung_unavailable(snapshot_failure)
         save_as = find_action(menu, ("save as file", "simpan sebagai file", "save as"))
-        if save_as is None or not await self._gateway.tap(*save_as.bounds.center):
-            return NotesExtractionResult((), NotesFlow.SAMSUNG_EXPORT, NotesState.UNAVAILABLE, ("notes_export_action_unavailable",))
+        if save_as is None:
+            return _samsung_unavailable("notes_export_action_unavailable")
+        if not await self._gateway.tap(*save_as.bounds.center):
+            return _samsung_unavailable(
+                _gateway_warning(self._gateway, "notes_ui_input_denied")
+            )
         await self._gateway.settle(0.5)
         format_snapshot = await self._snapshot(policy)
-        export_format = find_action(format_snapshot, ("samsung notes file", "samsung notes", "sdocx"))
+        snapshot_failure = _snapshot_failure(self._gateway, format_snapshot)
+        if snapshot_failure is not None:
+            return _samsung_unavailable(snapshot_failure)
+        export_format = find_action(
+            format_snapshot,
+            ("samsung notes file", "samsung notes", "sdocx"),
+        )
         if export_format is None:
             export_format = find_action(format_snapshot, ("text file", "text", "txt"))
             warnings.add("notes_sdocx_unavailable")
         if export_format is not None:
-            await self._gateway.tap(*export_format.bounds.center)
+            if not await self._gateway.tap(*export_format.bounds.center):
+                return _samsung_unavailable(
+                    _gateway_warning(self._gateway, "notes_ui_input_denied")
+                )
             await self._gateway.settle(0.8)
+        if not await self._gateway.adopt_export_surface():
+            return _samsung_unavailable(
+                _gateway_warning(self._gateway, "notes_export_surface_unrecognized")
+            )
         picker = await self._snapshot(policy)
+        snapshot_failure = _snapshot_failure(self._gateway, picker)
+        if snapshot_failure is not None:
+            return _samsung_unavailable(snapshot_failure)
         done = find_action(picker, ("done", "save", "simpan", "selesai"))
         if done is not None:
             if not await self._gateway.tap(*done.bounds.center):
-                warnings.add("notes_ui_input_denied")
+                warnings.add(
+                    _gateway_warning(self._gateway, "notes_ui_input_denied")
+                )
             await self._gateway.settle(1.2)
         changed: tuple[RemoteExport, ...] = ()
         for _ in range(6):
@@ -288,7 +386,12 @@ class SamsungNotesExtractor:
             await self._gateway.settle(0.8)
         if not changed:
             warnings.add("notes_export_not_found")
-            return NotesExtractionResult((), NotesFlow.SAMSUNG_EXPORT, NotesState.UNAVAILABLE, tuple(sorted(warnings)))
+            return NotesExtractionResult(
+                (),
+                NotesFlow.SAMSUNG_EXPORT,
+                NotesState.UNAVAILABLE,
+                tuple(sorted(warnings)),
+            )
         budget = NotesRunBudget(policy)
         records: list[NoteRecord] = []
         skipped = 0
@@ -303,7 +406,11 @@ class SamsungNotesExtractor:
                     continue
                 suffix = Path(remote.path).suffix.casefold()
                 local = root / f"export-{index:04d}{suffix}"
-                if not await self._gateway.pull_export(remote, local, min(policy.timeout_s, 120.0)):
+                if not await self._gateway.pull_export(
+                    remote,
+                    local,
+                    min(policy.timeout_s, 120.0),
+                ):
                     warnings.add("notes_export_pull_failed")
                     skipped += 1
                     continue
@@ -320,7 +427,10 @@ class SamsungNotesExtractor:
                     continue
                 parsed = _parse_export(local, app, policy)
                 for record in parsed:
-                    if record.source_modified_at is not None and _parse_iso(record.source_modified_at) < policy.not_before:
+                    if (
+                        record.source_modified_at is not None
+                        and _parse_iso(record.source_modified_at) < policy.not_before
+                    ):
                         skipped += 1
                         continue
                     if record.normalized_text:
@@ -331,11 +441,45 @@ class SamsungNotesExtractor:
         unique = tuple({record.stable_id: record for record in records}.values())
         if any(record.source_modified_at is None for record in unique):
             warnings.add("notes_timestamp_unknown")
-        state = NotesState.COMPLETE if unique and not warnings else NotesState.PARTIAL if unique or warnings else NotesState.UNAVAILABLE
-        return NotesExtractionResult(unique, NotesFlow.SAMSUNG_EXPORT, state, tuple(sorted(warnings)), skipped)
+        state = (
+            NotesState.COMPLETE
+            if unique and not warnings
+            else NotesState.PARTIAL
+            if unique or warnings
+            else NotesState.UNAVAILABLE
+        )
+        return NotesExtractionResult(
+            unique,
+            NotesFlow.SAMSUNG_EXPORT,
+            state,
+            tuple(sorted(warnings)),
+            skipped,
+        )
 
     async def _snapshot(self, policy: NotesPolicy) -> UiSnapshot:
         return parse_ui(await self._gateway.dump_ui(policy.max_ui_bytes))
+
+
+def _gateway_warning(gateway: NotesGateway, fallback: str) -> str:
+    return gateway.last_failure_reason() or fallback
+
+
+def _snapshot_failure(
+    gateway: NotesGateway,
+    snapshot: UiSnapshot,
+) -> str | None:
+    if snapshot.nodes:
+        return None
+    return gateway.last_failure_reason()
+
+
+def _samsung_unavailable(warning: str) -> NotesExtractionResult:
+    return NotesExtractionResult(
+        (),
+        NotesFlow.SAMSUNG_EXPORT,
+        NotesState.UNAVAILABLE,
+        (warning,),
+    )
 
 
 def _parse_export(path: Path, app: NoteApp, policy: NotesPolicy) -> tuple[NoteRecord, ...]:

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { SessionSummary } from "@/shared/api/client";
+import { findActiveSession } from "@/app/hooks/console/constants";
 import { ACTIVE } from "@/shared/constants";
 import { humanLabel } from "@/features/dashboard/lib/dashboardLabels";
 import { StatusPill } from "@/shared/ui/StatusPill";
@@ -83,7 +84,7 @@ export function SessionPicker({
   }, [sessions, query, statusFilter, sort, compact]);
 
   const selected = sessions.find((x) => x.id === value);
-  const runningSession = sessions.find((session) => ACTIVE.has(session.status));
+  const runningSession = findActiveSession(sessions);
   const activeOutsideFilter = Boolean(
     value && selected && !filtered.some((s) => s.id === value),
   );

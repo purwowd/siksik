@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { pickBootstrapSession } from "@/app/hooks/console/constants";
-import { buildTabUrl, pathFromTab, tabFromPath } from "@/app/routes";
+import {
+  canSelectSession,
+  pickBootstrapSession,
+} from "@/app/hooks/console/constants";
+import {
+  buildTabUrl,
+  pathFromTab,
+  resolveWorkspaceRouteSessionId,
+  tabFromPath,
+} from "@/app/routes";
 import type { SessionSummary } from "@/shared/api/client";
 import { FEATURE_PAGE_META } from "@/shared/lib/featurePages";
 
@@ -49,5 +57,22 @@ describe("session bootstrap", () => {
       { id: "running", status: "acquiring", label: "Akuisisi aktif" },
     ] as SessionSummary[];
     expect(pickBootstrapSession(sessions, "completed")?.id).toBe("running");
+    expect(canSelectSession(sessions, "completed")).toBe(false);
+    expect(canSelectSession(sessions, "running")).toBe(true);
+  });
+
+  it("keeps an explicit terminal-session URL ahead of stale selected state", () => {
+    expect(
+      resolveWorkspaceRouteSessionId("requested", "previous", null),
+    ).toBe("requested");
+    expect(
+      resolveWorkspaceRouteSessionId(null, "previous", null),
+    ).toBe("previous");
+  });
+
+  it("keeps an active acquisition locked ahead of any requested URL", () => {
+    expect(
+      resolveWorkspaceRouteSessionId("completed", "completed", "running"),
+    ).toBe("running");
   });
 });

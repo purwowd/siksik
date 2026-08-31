@@ -1,10 +1,44 @@
 # SIKSIK Flow Implementation Changelog
 
-- Work period: 2026-07-16 to 2026-08-28
+- Work period: 2026-07-16 to 2026-08-30
 - Status: Unreleased local changes
 - Git baseline: `78e39c6` (+ local batch below)
 - Android agent: `0.7.0`, API `1.0`
 - Primary project: `/home/me/siksik` (WSL lab); Mac mirror `/Users/macbook/Documents/Product1/siksik`
+
+## 2026-08-30: Stable completed-session workspace selection
+
+- Completed-session selection is now URL-first: an explicit exact `?sesi=`
+  remains authoritative while its detail loads, preventing stale React state
+  from rewriting the route and producing rapid back-and-forth session changes.
+- Session-detail requests use cancellation and latest-request epochs. Review
+  summaries, review mutations, participant saves, and authorization refreshes
+  apply results only when their originating session is still selected.
+- The active-acquisition policy is unchanged and covered at every entry point:
+  an ACTIVE session overrides the requested route, the picker remains disabled,
+  and session-opening handlers reject any different session until acquisition
+  reaches a terminal state.
+- Added route-policy and SessionPicker regression tests; all 20 frontend tests
+  and the production TypeScript/Vite build pass.
+
+## 2026-08-30: Notes foreground ownership and social-to-Notes handoff
+
+- Android Notes now verifies the exact resumed package after launch and before
+  and after every UI injection. UI dumps must also contain nodes owned by the
+  verified foreground package; a package change fails closed with stable Notes
+  warning codes instead of allowing taps or swipes into the previous social app.
+- Samsung export can explicitly adopt only the bounded system document surfaces
+  used by AOSP/Google DocumentsUI or Samsung My Files. Unrecognized export
+  surfaces stop the Notes flow without UI input, and a foreground launch failure
+  no longer triggers the generic Samsung fallback.
+- Social instrumentation is force-stopped after every instrumented target,
+  including successful runs, before SIKSIK Agent is restored. Notes progress
+  clears stale social target/scope state at handoff so the active phase no
+  longer remains labeled as X/Facebook while Notes acquisition runs.
+- Added regression coverage for both Samsung export and non-Samsung UI-walk:
+  X retaining foreground, foreground changes between Notes actions,
+  cross-package UI dumps, trusted export-surface adoption, Samsung fallback
+  suppression, and successful instrumentation cleanup.
 
 ## 2026-08-28: Android Notes acquisition and source-aware analysis modules
 
