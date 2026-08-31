@@ -1,0 +1,51 @@
+# Konfigurasi detector — production-ready
+
+llama:
+  server_bin: "./llama.cpp/build/bin/llama-server"
+  model_hf: "ggml-org/SmolVLM-500M-Instruct-GGUF"
+  host: "127.0.0.1"
+  port: 8080
+  ctx_size: 4096
+  # 99 = offload semua layer (CUDA RTX / Metal). SmolVLM-500M muat di 6 GB.
+  n_gpu_layers: 99
+  threads: 4
+  # false = connect ke sidecar (recommended production)
+  spawn_server: false
+
+detector:
+  # fast | balanced | full
+  mode: "full"
+
+  prescreen_enabled: true
+  prescreen_threshold: 0.10
+
+  nudenet_enabled: true
+  nudenet_model_path: null
+  nudenet_threshold: 0.30
+  nudenet_inference_resolution: 320
+
+  llm_always_on_flagged: true
+  llm_skip_if_prescreen_safe: true
+
+  video_sample_interval_sec: 2.0
+  video_max_frames: 30
+  max_image_size: 512
+  aggregation: "max_severity"
+
+  # Satu center-crop untuk orientasi (mode FULL)
+  orientation_crop_ratio: 0.50
+
+  action:
+    block_explicit: 0.65
+    review_suggestive: 0.55
+    review_explicit: 0.40
+
+  cache:
+    enabled: true
+    max_size: 2048
+    ttl_sec: 3600
+
+  timeout:
+    fast_sec: 5.0
+    balanced_sec: 30.0
+    full_sec: 60.0

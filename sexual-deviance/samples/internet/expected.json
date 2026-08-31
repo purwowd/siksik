@@ -1,0 +1,211 @@
+{
+  "01_safe_landscape.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false
+  },
+  "02_safe_office.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false
+  },
+  "03_safe_food.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false
+  },
+  "04_safe_cat.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false
+  },
+  "05_safe_city.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false
+  },
+  "06_suggestive_bikini.jpg": {
+    "severity": "suggestive",
+    "nudity": "partial",
+    "orientation": "none",
+    "flagged": true
+  },
+  "07_suggestive_bikini2.jpg": {
+    "severity": "suggestive",
+    "nudity": "partial",
+    "orientation": "none",
+    "flagged": true
+  },
+  "08_suggestive_kiss_hetero.jpg": {
+    "severity": "suggestive",
+    "nudity": "partial",
+    "orientation": "heterosexual",
+    "flagged": true
+  },
+  "09_suggestive_kiss_street.jpg": {
+    "severity": "suggestive",
+    "nudity": "none",
+    "orientation": "heterosexual",
+    "flagged": true
+  },
+  "10_suggestive_gay_kiss.jpg": {
+    "severity": "suggestive",
+    "nudity": "none",
+    "orientation": "gay",
+    "flagged": true
+  },
+  "11_suggestive_gay_pride.jpg": {
+    "severity": "suggestive",
+    "nudity": "none",
+    "orientation": "gay",
+    "flagged": true
+  },
+  "12_suggestive_lesbian_kiss.jpg": {
+    "severity": "suggestive",
+    "nudity": "none",
+    "orientation": "lesbian",
+    "flagged": true
+  },
+  "13_suggestive_lesbian_pride.jpg": {
+    "severity": "suggestive",
+    "nudity": "none",
+    "orientation": "lesbian",
+    "flagged": true
+  },
+  "14_nudity_art_venus.jpg": {
+    "severity": "suggestive",
+    "nudity": "partial",
+    "orientation": "none",
+    "flagged": true
+  },
+  "15_nudity_art_david.jpg": {
+    "severity": "suggestive",
+    "nudity": "partial",
+    "orientation": "none",
+    "flagged": true
+  },
+  "16_suggestive_swimwear.jpg": {
+    "severity": "suggestive",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": true
+  },
+  "17_safe_family.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false
+  },
+  "18_suggestive_hug.jpg": {
+    "severity": "suggestive",
+    "nudity": "partial",
+    "orientation": "heterosexual",
+    "flagged": true
+  },
+  "19_safe_sports.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false
+  },
+  "20_suggestive_shirtless.jpg": {
+    "severity": "suggestive",
+    "nudity": "partial",
+    "orientation": "none",
+    "flagged": true
+  },
+  "21_safe_wedding.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false
+  },
+  "22_safe_rainbow_sky.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "lgbt_present": false
+  },
+  "23_lgbt_flag_only.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "lgbt_present": true,
+    "lgbt_flag_any": [
+      "rainbow"
+    ]
+  },
+  "24_trans_flag.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "lgbt_present": true,
+    "lgbt_flag_any": [
+      "trans",
+      "rainbow"
+    ]
+  },
+  "25_bisexual_flag.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "lgbt_present": true,
+    "lgbt_flag_any": [
+      "bisexual",
+      "rainbow"
+    ]
+  },
+  "26_pride_rainbow_shirt.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "lgbt_present": true,
+    "lgbt_flag_any": [
+      "rainbow",
+      "pride_merch",
+      "rainbow_clothing"
+    ]
+  },
+  "27_hetero_at_pride.jpg": {
+    "severity": "suggestive",
+    "nudity": "none",
+    "orientation": "heterosexual",
+    "flagged": true,
+    "lgbt_present": false
+  },
+  "28_suggestive_nude_beach.jpg": {
+    "severity": "suggestive",
+    "nudity": "partial",
+    "orientation": "none",
+    "flagged": true,
+    "lgbt_present": true,
+    "lgbt_flag_any": [
+      "rainbow"
+    ]
+  },
+  "29_safe_medical.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "lgbt_present": false
+  },
+  "30_sample_video.webm": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "lgbt_present": false,
+    "media_type": "video"
+  }
+}

@@ -1,0 +1,47 @@
+# Dev (Mac M4): jalankan sidecar dulu — ./scripts/start_sidecar.sh
+# Prod (RTX): gunakan profile gpu — docker compose --profile gpu up
+
+services:
+  llama-server:
+    image: ghcr.io/ggerganov/llama.cpp:server-cuda
+    profiles: ["gpu"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./models:/models:ro
+    command:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8080"
+      - -m
+      - /models/SmolVLM-500M-Instruct-Q8_0.gguf
+      - --mmproj
+      - /models/SmolVLM-500M-Instruct-mmproj-f16.gguf
+      - -ngl
+      - "99"
+      - -c
+      - "4096"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Mac / CPU fallback — build llama.cpp lokal, expose port 8080
+  # Tidak di-docker; pakai scripts/start_sidecar.sh
+
+  sd-detector:
+    build: .
+    depends_on:
+      - llama-server
+    profiles: ["gpu"]
+    environment:
+      SD_LLAMA_HOST: llama-server
+      SD_LLAMA_PORT: "8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./samples:/app/samples:ro
+    command: ["sd-detector", "--external-server", "--mode", "balanced", "samples/internet/01_safe_landscape.jpg"]

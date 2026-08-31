@@ -1,0 +1,10 @@
+# RTX GPU production — copy ke config.yaml atau set SD_CONFIG
+
+llama:
+  host: "llama-server"  # docker service name
+  port: 8080
+  n_gpu_layers: 99
+  spawn_server: false
+
+detector:
+  mode: "balanced"  # production throughput; full untuk moderation ketat
