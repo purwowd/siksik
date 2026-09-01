@@ -18,6 +18,7 @@ CONTENT_FUSION_REVISION = "public-figure-context-only-v2"
 
 LGBT_CONTENT = "lgbt_content"
 POLITICAL_MEME = "political_meme"
+MEME = "meme"
 POLITICAL_CAMPAIGN = "political_campaign"
 DEMONSTRATION = "demonstration"
 INCITEMENT = "incitement"
@@ -28,6 +29,7 @@ POLITICAL_INSULT = "political_insult"
 CONTENT_CATEGORY_LABELS: dict[str, str] = {
     LGBT_CONTENT: "LGBT text/flag",
     POLITICAL_MEME: "Meme politik",
+    MEME: "Meme",
     POLITICAL_CAMPAIGN: "Kampanye politik",
     DEMONSTRATION: "Demonstrasi",
     INCITEMENT: "Incitement / ajakan provokatif",
@@ -84,6 +86,8 @@ _CATEGORY_ALIASES = {
     "transgender_flag": LGBT_CONTENT,
     "meme_politik": POLITICAL_MEME,
     "political_meme": POLITICAL_MEME,
+    "internet_meme": MEME,
+    "caption_meme": MEME,
     "campaign": POLITICAL_CAMPAIGN,
     "kampanye": POLITICAL_CAMPAIGN,
     "political_campaign": POLITICAL_CAMPAIGN,
@@ -367,6 +371,7 @@ def findings_from_text(
                     LGBT_CONTENT: 0.86,
                     POLITICAL_INSULT: 0.84,
                     POLITICAL_MEME: 0.82,
+                    MEME: 0.80,
                 }[category],
                 "layer_origin": layer,
                 "evidence": f"[{backend}] {_matched_excerpt(text, match)}"[:320],

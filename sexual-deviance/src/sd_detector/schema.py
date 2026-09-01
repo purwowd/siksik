@@ -61,11 +61,39 @@ class LgbtContext(BaseModel):
         return [str(x).lower().strip() for x in v if str(x).strip()]
 
 
+class IndonesianMemeContext(BaseModel):
+    """Meme politik/sindiran Indonesia: figur publik + teks overlay."""
+
+    present: bool = False
+    is_meme: bool = False
+    has_text_overlay: bool = False
+    text_language: str = "unknown"
+    overlay_text: list[str] = Field(default_factory=list)
+    public_figures: list[str] = Field(default_factory=list)
+    satire_type: list[str] = Field(default_factory=list)
+    topics: list[str] = Field(default_factory=list)
+    signals: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+
+    @field_validator(
+        "overlay_text", "public_figures", "satire_type", "topics", "signals",
+        mode="before",
+    )
+    @classmethod
+    def normalize_meme_list(cls, v: object) -> list[str]:
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v.strip()] if v.strip() else []
+        return [str(x).strip() for x in v if str(x).strip()]
+
+
 class FrameAnalysis(BaseModel):
     severity: Severity = Severity.SAFE
     nudity: NudityLevel = NudityLevel.NONE
     orientation: Orientation = Orientation.NONE
     lgbt: LgbtContext = Field(default_factory=LgbtContext)
+    indonesian_meme: IndonesianMemeContext = Field(default_factory=IndonesianMemeContext)
     acts: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0, default=0.0)
     reason: str = ""
@@ -90,6 +118,7 @@ class MediaVerdict(BaseModel):
     nudity: NudityLevel
     orientation: Orientation
     lgbt: LgbtContext = Field(default_factory=LgbtContext)
+    indonesian_meme: IndonesianMemeContext = Field(default_factory=IndonesianMemeContext)
     acts: list[str]
     confidence: float
     action: Action = Action.ALLOW

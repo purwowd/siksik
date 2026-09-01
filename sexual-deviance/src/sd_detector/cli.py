@@ -36,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-prescreen", action="store_true")
     parser.add_argument("--no-nudenet", action="store_true")
     parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument("--no-meme", action="store_true", help="Nonaktifkan modul meme Indonesia")
     parser.add_argument("--json", action="store_true", help="Output JSON saja")
     parser.add_argument("--include-frames", action="store_true")
     parser.add_argument("--metrics", action="store_true", help="Tampilkan metrics setelah run")
@@ -55,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
         detector.config.detector.nudenet_enabled = False
     if args.no_cache:
         detector.config.detector.cache.enabled = False
+    if args.no_meme:
+        detector.config.meme.enabled = False
 
     results = []
     with detector:
@@ -83,6 +86,19 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"  scene       : {', '.join(lgbt.scene)}")
                     if lgbt.orientation_hint != "none":
                         print(f"  lgbt_hint   : {lgbt.orientation_hint}")
+                meme = v.indonesian_meme
+                if meme.present:
+                    print(f"  meme        : present")
+                    if meme.public_figures:
+                        print(f"  figures     : {', '.join(meme.public_figures)}")
+                    if meme.overlay_text:
+                        print(f"  overlay     : {' | '.join(meme.overlay_text[:2])}")
+                    if meme.satire_type:
+                        print(f"  satire      : {', '.join(meme.satire_type)}")
+                    if meme.topics:
+                        print(f"  topics      : {', '.join(meme.topics)}")
+                    if meme.text_language != "unknown":
+                        print(f"  meme_lang   : {meme.text_language}")
                 print(f"  confidence  : {v.confidence:.2f}")
                 if v.acts:
                     print(f"  acts        : {', '.join(v.acts)}")

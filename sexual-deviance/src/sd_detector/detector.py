@@ -14,6 +14,7 @@ from .aggregator import aggregate_frames
 from .cache import ResultCache
 from .classifier import FrameClassifier
 from .config import AppConfig, load_config
+from .indonesian_meme import analyze_indonesian_meme
 from .lgbt import analyze_lgbt
 from .llama_backend import ExternalServer, LlamaServer
 from .media import extract_video_frames, is_video, load_image, load_image_bytes, resize_image
@@ -21,7 +22,7 @@ from .metrics import Metrics
 from .modes import DetectionMode
 from .nudenet_tier import NudeNetResult, NudeNetScanner
 from .prescreen import is_likely_safe, pil_to_bgr, prescreen_score
-from .schema import Action, FrameAnalysis, LgbtContext, MediaVerdict, NudityLevel, Orientation, Severity
+from .schema import Action, FrameAnalysis, IndonesianMemeContext, LgbtContext, MediaVerdict, NudityLevel, Orientation, Severity
 
 
 @dataclass
@@ -43,11 +44,13 @@ class DetectionResult:
 def _nudenet_frame(nudenet: NudeNetResult, prescreen_score_val: float, bgr=None) -> FrameAnalysis:
     acts = ["nudity"] if nudenet.flagged else []
     lgbt = analyze_lgbt(bgr, []) if bgr is not None else LgbtContext()
+    meme = analyze_indonesian_meme(bgr, []) if bgr is not None else IndonesianMemeContext()
     return FrameAnalysis(
         severity=nudenet.severity,
         nudity=nudenet.nudity,
         orientation=Orientation.NONE,
         lgbt=lgbt,
+        indonesian_meme=meme,
         acts=acts,
         confidence=nudenet.max_score if nudenet.flagged else 0.92,
         reason=nudenet.reason or "NudeNet: clean",
@@ -110,10 +113,23 @@ class ContentDetector:
     def _get_classifier(self) -> FrameClassifier:
         if self._classifier is None:
             det = self.config.detector
+            meme = self.config.meme
+            from .meme_ocr import OcrConfig
+
             self._classifier = FrameClassifier(
                 self._get_server(),
                 mode=det.mode,
                 crop_ratio=det.orientation_crop_ratio,
+                meme_config=meme,
+                ocr_config=OcrConfig(
+                    enabled=meme.ocr_enabled,
+                    lazy=meme.ocr_lazy,
+                    lang=meme.ocr_lang,
+                    vlm_band_fallback=meme.ocr_vlm_band_fallback,
+                    full_res=meme.ocr_full_res,
+                    max_size=meme.ocr_max_size,
+                    workers=meme.ocr_workers,
+                ),
             )
         return self._classifier
 
@@ -171,7 +187,7 @@ class ContentDetector:
             return NudeNetResult(reason="NudeNet disabled")
         return self._get_nudenet().scan_bgr(bgr)
 
-    def _analyze_frame(self, img: Image.Image, nudenet_bgr=None) -> FrameAnalysis:
+    def _analyze_frame(self, img: Image.Image, nudenet_bgr=None, ocr_bgr=None) -> FrameAnalysis:
         det = self.config.detector
         bgr = pil_to_bgr(img)
         ps_score = prescreen_score(bgr)
@@ -183,6 +199,7 @@ class ContentDetector:
                 nudity=NudityLevel.NONE,
                 orientation=Orientation.NONE,
                 lgbt=analyze_lgbt(nn_bgr, []),
+                indonesian_meme=analyze_indonesian_meme(nn_bgr, []),
                 acts=[],
                 confidence=0.92,
                 reason="Prescreen: landscape/object",
@@ -195,7 +212,7 @@ class ContentDetector:
         if det.mode == DetectionMode.FAST:
             return _nudenet_frame(nudenet, ps_score, bgr)
 
-        result = self._get_classifier().classify(img, nudenet)
+        result = self._get_classifier().classify(img, nudenet, ocr_bgr=ocr_bgr)
         result.prescreen_score = ps_score
         return result
 
@@ -226,9 +243,10 @@ class ContentDetector:
         img: Image.Image,
         source: str,
         nudenet_bgr=None,
+        ocr_bgr=None,
     ) -> DetectionResult:
         start = time.perf_counter()
-        frame = self._analyze_frame(img, nudenet_bgr=nudenet_bgr)
+        frame = self._analyze_frame(img, nudenet_bgr=nudenet_bgr, ocr_bgr=ocr_bgr)
         latency_ms = (time.perf_counter() - start) * 1000.0
         verdict = self._aggregate(source, "image", [frame], 1, latency_ms, cache_hit=False)
         return DetectionResult(verdict=verdict)
@@ -245,6 +263,7 @@ class ContentDetector:
             if cached is not None:
                 self.metrics.record_cache_hit()
                 verdict = MediaVerdict.model_validate(cached)
+                verdict.path = source
                 verdict.cache_hit = True
                 return DetectionResult(verdict=verdict)
             self.metrics.record_cache_miss()
@@ -271,9 +290,10 @@ class ContentDetector:
         full_img = Image.open(io.BytesIO(data)).convert("RGB")
         img = resize_image(full_img, det.max_image_size)
         nudenet_bgr = pil_to_bgr(full_img)
+        ocr_bgr = nudenet_bgr if self.config.meme.ocr_full_res else None
 
         def run() -> DetectionResult:
-            return self._analyze_image_internal(img, source, nudenet_bgr=nudenet_bgr)
+            return self._analyze_image_internal(img, source, nudenet_bgr=nudenet_bgr, ocr_bgr=ocr_bgr)
 
         return self._analyze_with_cache(data, source, run)
 
@@ -284,9 +304,10 @@ class ContentDetector:
         full_img = Image.open(io.BytesIO(data)).convert("RGB")
         img = resize_image(full_img, det.max_image_size)
         nudenet_bgr = pil_to_bgr(full_img)
+        ocr_bgr = nudenet_bgr if self.config.meme.ocr_full_res else None
 
         def run() -> DetectionResult:
-            return self._analyze_image_internal(img, str(path), nudenet_bgr=nudenet_bgr)
+            return self._analyze_image_internal(img, str(path), nudenet_bgr=nudenet_bgr, ocr_bgr=ocr_bgr)
 
         return self._analyze_with_cache(data, str(path), run)
 

@@ -66,9 +66,22 @@ class DetectorConfig:
 
 
 @dataclass
+class MemeConfig:
+    enabled: bool = True
+    ocr_enabled: bool = True
+    ocr_lazy: bool = True
+    ocr_lang: str = "ind+eng"
+    ocr_vlm_band_fallback: bool = False
+    ocr_full_res: bool = True
+    ocr_max_size: int = 1280
+    ocr_workers: int = 2
+
+
+@dataclass
 class AppConfig:
     llama: LlamaConfig
     detector: DetectorConfig
+    meme: MemeConfig
 
 
 def _parse_mode(raw: str) -> DetectionMode:
@@ -84,6 +97,7 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
 
     llama_raw = raw.get("llama", {})
     det_raw = raw.get("detector", {})
+    meme_raw = raw.get("meme", {})
     action_raw = det_raw.get("action", {})
     cache_raw = det_raw.get("cache", {})
     timeout_raw = det_raw.get("timeout", {})
@@ -131,5 +145,15 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
                 balanced_sec=float(timeout_raw.get("balanced_sec", 30.0)),
                 full_sec=float(timeout_raw.get("full_sec", 60.0)),
             ),
+        ),
+        meme=MemeConfig(
+            enabled=bool(meme_raw.get("enabled", True)),
+            ocr_enabled=bool(meme_raw.get("ocr_enabled", True)),
+            ocr_lazy=bool(meme_raw.get("ocr_lazy", True)),
+            ocr_lang=str(meme_raw.get("ocr_lang", "ind+eng")),
+            ocr_vlm_band_fallback=bool(meme_raw.get("ocr_vlm_band_fallback", False)),
+            ocr_full_res=bool(meme_raw.get("ocr_full_res", True)),
+            ocr_max_size=int(meme_raw.get("ocr_max_size", 1280)),
+            ocr_workers=int(meme_raw.get("ocr_workers", 2)),
         ),
     )

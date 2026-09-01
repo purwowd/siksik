@@ -2,10 +2,29 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Optional
 
 from PIL import Image
 
-from .lgbt import analyze_lgbt, resolve_orientation_with_lgbt
+from .indonesian_meme import (
+    analyze_indonesian_meme,
+    detect_meme_layout,
+    enrich_layout_from_text,
+    meme_needs_band_transcribe,
+    meme_needs_extra_vision,
+    meme_needs_ocr,
+    merge_meme_contexts,
+    merge_ocr_overlay,
+    finalize_meme_context,
+    parse_meme_json_response,
+    _layout_needs_ocr_rerun,
+    _layout_worth_ocr,
+)
+from .config import MemeConfig
+from .meme_bands import build_band_strip, parse_transcribe_lines
+from .meme_ocr import OcrConfig, _ocr_line_useful, extract_meme_ocr, ocr_available, ocr_lines_actionable, prepare_ocr_bgr
+from .lgbt import _has_intimacy, analyze_lgbt, resolve_orientation_with_lgbt
 from .llama_backend import ExternalServer, LlamaServer
 from .modes import DetectionMode
 from .nudenet_tier import NudeNetResult
@@ -17,7 +36,6 @@ from .rules import (
     infer_orientation,
     merge_results,
 )
-from .lgbt import _has_intimacy
 from .schema import FrameAnalysis, LgbtContext, Orientation, Severity
 
 ART_KEYWORDS = ("statue", "sculpture", "painting", "botticelli", "michelangelo", "venus", "museum", "classical art")
@@ -67,10 +85,28 @@ class FrameClassifier:
         server: LlamaServer | ExternalServer,
         mode: DetectionMode = DetectionMode.BALANCED,
         crop_ratio: float = 0.50,
+        meme_config: MemeConfig | None = None,
+        ocr_config: OcrConfig | None = None,
     ) -> None:
         self.server = server
         self.mode = mode
         self.crop_ratio = crop_ratio
+        self.meme_config = meme_config or MemeConfig()
+        self.ocr_config = ocr_config or OcrConfig(
+            enabled=self.meme_config.ocr_enabled,
+            lazy=self.meme_config.ocr_lazy,
+            lang=self.meme_config.ocr_lang,
+            vlm_band_fallback=self.meme_config.ocr_vlm_band_fallback,
+            full_res=self.meme_config.ocr_full_res,
+            max_size=self.meme_config.ocr_max_size,
+            workers=self.meme_config.ocr_workers,
+        )
+        self._ocr_pool = ThreadPoolExecutor(max_workers=1)
+
+    def _ocr_bgr(self, bgr, ocr_bgr=None):
+        if self.ocr_config.full_res and ocr_bgr is not None:
+            return prepare_ocr_bgr(ocr_bgr, self.ocr_config.max_size)
+        return bgr
 
     def _vote_orientation(self, texts: list[str], severity: Severity) -> Orientation:
         for text in texts:
@@ -175,11 +211,113 @@ class FrameClassifier:
         )
         return merged
 
-    def classify(self, img: Image.Image, nudenet: NudeNetResult) -> FrameAnalysis:
-        description = self.server.describe_image(img)
-        rules_result = infer_from_description(description, nudenet)
+    def _start_ocr_future(
+        self,
+        bgr_vlm,
+        layout: list[str],
+        ocr_full=None,
+    ) -> Optional[Future[list[str]]]:
+        if not self.meme_config.enabled or not ocr_available(self.ocr_config):
+            return None
+        if not _layout_worth_ocr(layout):
+            return None
+        return self._ocr_pool.submit(
+            extract_meme_ocr,
+            bgr_vlm,
+            self.ocr_config,
+            layout,
+            ocr_full,
+        )
+
+    def _apply_indonesian_meme(
+        self,
+        merged: FrameAnalysis,
+        img: Image.Image,
+        description: str,
+        extra_texts: list[str],
+        *,
+        layout: Optional[list[str]] = None,
+        ocr_future: Optional[Future[list[str]]] = None,
+        ocr_bgr=None,
+        reason: str = "",
+    ) -> FrameAnalysis:
+        bgr = pil_to_bgr(img)
+        ocr_src = self._ocr_bgr(bgr, ocr_bgr)
+        texts = [description, *extra_texts]
+        if reason and reason not in texts:
+            texts.append(reason)
+
+        if not self.meme_config.enabled:
+            merged.indonesian_meme = analyze_indonesian_meme(bgr, texts)
+            return merged
+
+        if layout is None:
+            layout = detect_meme_layout(bgr)
+        initial_layout = list(layout)
+        layout = enrich_layout_from_text(initial_layout, texts)
+        ctx = analyze_indonesian_meme(bgr, texts)
+        visual_figures = list(ctx.public_figures)
+
+        run_ocr = (
+            ocr_available(self.ocr_config)
+            and (not self.ocr_config.lazy or meme_needs_ocr(ctx, bgr, layout, texts))
+        )
+        if run_ocr:
+            ocr_lines: list[str] = []
+            needs_rerun = _layout_needs_ocr_rerun(initial_layout, layout)
+            if ocr_future is not None and not needs_rerun:
+                try:
+                    ocr_lines = ocr_future.result()
+                except Exception:
+                    ocr_lines = []
+            if not ocr_lines:
+                ocr_lines = extract_meme_ocr(bgr, self.ocr_config, layout, ocr_src)
+            elif needs_rerun and "speech_bubble" in layout:
+                extra = extract_meme_ocr(bgr, self.ocr_config, ["speech_bubble"], ocr_src)
+                ocr_lines = list(dict.fromkeys([*ocr_lines, *extra]))
+            merge_ocr = ocr_lines and (
+                ocr_lines_actionable(ocr_lines)
+                or (ctx.present and any(_ocr_line_useful(ln, min_conf=35) for ln in ocr_lines))
+            )
+            if merge_ocr:
+                texts.extend(ocr_lines)
+                ctx = merge_ocr_overlay(ctx, ocr_lines, layout)
+
+        use_vlm_band = (
+            not self.ocr_config.enabled or self.ocr_config.vlm_band_fallback
+        )
+        if use_vlm_band and meme_needs_band_transcribe(ctx, bgr):
+            strip = build_band_strip(bgr)
+            if strip is not None:
+                band_raw = self.server.meme_transcribe_strip(strip)
+                band_lines = parse_transcribe_lines(band_raw)
+                if band_lines:
+                    texts.extend(band_lines)
+                    ctx = analyze_indonesian_meme(bgr, texts)
+
+        if meme_needs_extra_vision(ctx, bgr, layout, texts):
+            json_ctx = parse_meme_json_response(self.server.meme_analyze_json(img))
+            if json_ctx.present:
+                ctx = merge_meme_contexts([ctx, json_ctx])
+
+        ctx = finalize_meme_context(
+            ctx,
+            layout=layout,
+            description=f"{description} {reason}".strip(),
+            visual_figures=visual_figures,
+        )
+        merged.indonesian_meme = ctx
+        return merged
+
+    def classify(self, img: Image.Image, nudenet: NudeNetResult, ocr_bgr=None) -> FrameAnalysis:
+        bgr = pil_to_bgr(img)
+        ocr_src = self._ocr_bgr(bgr, ocr_bgr)
+        layout = detect_meme_layout(bgr) if self.meme_config.enabled else []
+        ocr_future = self._start_ocr_future(bgr, layout, ocr_src if ocr_bgr is not None else None)
+
         hint = ", ".join(nudenet.labels[:4]) if nudenet.flagged else ""
-        llm_result = self.server.classify_from_description(description, nudenet_hint=hint, img=img)
+        description, llm_result = self.server.describe_and_classify(img, nudenet_hint=hint)
+        rules_result = infer_from_description(description, nudenet)
         merged = merge_results(llm_result, rules_result, nudenet, description)
 
         extra_texts: list[str] = []
@@ -194,4 +332,9 @@ class FrameClassifier:
         else:
             merged.orientation = Orientation.NONE
 
-        return self._apply_lgbt(merged, img, description, extra_texts)
+        merged = self._apply_lgbt(merged, img, description, extra_texts)
+        return self._apply_indonesian_meme(
+            merged, img, description, extra_texts,
+            layout=layout, ocr_future=ocr_future, ocr_bgr=ocr_bgr,
+            reason=merged.reason or "",
+        )

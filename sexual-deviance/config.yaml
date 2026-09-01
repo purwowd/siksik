@@ -49,3 +49,13 @@ detector:
     fast_sec: 5.0
     balanced_sec: 30.0
     full_sec: 60.0
+
+meme:
+  enabled: true
+  ocr_enabled: true
+  ocr_lazy: true
+  ocr_lang: "ind+eng"
+  ocr_vlm_band_fallback: false
+  ocr_full_res: true
+  ocr_max_size: 1280
+  ocr_workers: 2

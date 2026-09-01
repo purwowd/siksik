@@ -21,7 +21,11 @@ _FFMPEG_TIMEOUT_S = 20
 def is_video_path(path: Path, mime: str | None = None) -> bool:
     if (mime or "").casefold().startswith("video/"):
         return True
-    return path.suffix.casefold() in _VIDEO_SUFFIXES
+    if path.suffix.casefold() in _VIDEO_SUFFIXES:
+        return True
+    from app.services.vision import is_animated_image
+
+    return is_animated_image(path)
 
 
 def _cache_dir() -> Path:

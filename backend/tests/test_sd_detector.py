@@ -24,6 +24,20 @@ def _lgbt(**kwargs: object) -> SimpleNamespace:
     return SimpleNamespace(**defaults)
 
 
+def _meme(**kwargs: object) -> SimpleNamespace:
+    defaults = {
+        "present": False,
+        "is_meme": False,
+        "public_figures": [],
+        "satire_type": [],
+        "topics": [],
+        "overlay_text": [],
+        "confidence": 0.0,
+    }
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
+
+
 def _verdict(**kwargs: object) -> SimpleNamespace:
     defaults = {
         "action": "allow",
@@ -34,6 +48,7 @@ def _verdict(**kwargs: object) -> SimpleNamespace:
         "confidence": 0.8,
         "reason": "",
         "lgbt": _lgbt(),
+        "indonesian_meme": _meme(),
     }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -224,6 +239,53 @@ def test_successful_sd_skips_nudenet(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.unit
+def test_sd_allow_meme_still_runs_nudenet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    staging = tmp_path / "staging"
+    target = staging / "recovered_trash" / "trash" / "clip.webp"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"fake")
+    monkeypatch.setattr(config.settings, "sd_detector_enabled", True)
+    monkeypatch.setattr(config.settings, "staging_dir", staging)
+    meme_flag = {
+        "category": "meme",
+        "label": "Meme: watermark",
+        "confidence": 0.85,
+        "layer_origin": "L3",
+        "evidence": "Berkas: recovered_trash/trash/clip.webp.",
+        "keep_label": True,
+    }
+    nudenet_flag = {
+        "category": "ketelanjangan",
+        "label": "Ketelanjangan terdeteksi pada gambar: genital perempuan terlihat",
+        "confidence": 0.91,
+        "layer_origin": "L3",
+        "evidence": "NudeNet | FEMALE_GENITALIA_EXPOSED=0.910",
+    }
+    monkeypatch.setattr(
+        sd_detector,
+        "analyze_image_result",
+        lambda _path: sd_detector.SdAnalysisResult((meme_flag,), True, used=True),
+    )
+    monkeypatch.setattr(
+        nudity,
+        "analyze_image_result",
+        lambda _path: nudity.NudityAnalysisResult((nudenet_flag,), True),
+    )
+    monkeypatch.setattr("app.services.vision.analyze_lightweight_image_file", lambda *_a, **_k: [])
+    monkeypatch.setattr("app.services.analysis._skip_heavy_ocr_for_gallery", lambda *_a, **_k: True)
+    monkeypatch.setattr("app.services.vision.is_animated_image", lambda _path: False)
+
+    outcome = analysis.analyze_content_result(target, "image/webp", "recovered_trash", "", [])
+
+    labels = {item["label"] for item in outcome.findings}
+    categories = [item["category"] for item in outcome.findings]
+    assert "meme" in categories
+    assert "ketelanjangan" in categories
+    assert "Meme: watermark" in labels
+    assert nudenet_flag["label"] in labels
+
+
+@pytest.mark.unit
 def test_merge_keeps_sd_lgbt_label():
     merged = merge_content_findings(
         [
@@ -260,7 +322,7 @@ def test_engine_fingerprint_tracks_sd_flag(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(config.settings, "sd_llama_port", 8080)
     on = engine_fingerprint()
     assert "sd=0" in off
-    assert "sd=1:balanced:127.0.0.1:8080:lgbt-explicit-v3" in on
+    assert "sd=1:balanced:127.0.0.1:8080:meme-visual-v3" in on
     assert off != on
 
 
@@ -311,3 +373,188 @@ def test_allow_lgbt_rainbow_clothing_only_is_not_a_finding():
         )
         == []
     )
+
+
+@pytest.mark.unit
+def test_portrait_without_is_meme_is_not_a_finding():
+    assert (
+        sd_detector.findings_from_verdict(
+            _verdict(
+                indonesian_meme=_meme(present=True, is_meme=False, public_figures=["jokowi"]),
+            ),
+            relative_path="gallery/portrait.jpg",
+            layer="L3",
+        )
+        == []
+    )
+
+
+@pytest.mark.unit
+def test_humor_meme_maps_generic_category():
+    findings = sd_detector.findings_from_verdict(
+        _verdict(
+            indonesian_meme=_meme(
+                is_meme=True,
+                satire_type=["humor"],
+                overlay_text=["kucing vs senin"],
+                confidence=0.84,
+            ),
+        ),
+        relative_path="gallery/cat.jpg",
+        layer="L3",
+    )
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["category"] == "meme"
+    assert finding["label"] == "Meme: kucing vs senin"
+    assert finding["keep_label"] is True
+    assert "Berkas: gallery/cat.jpg" in finding["evidence"]
+    assert "Jenis: humor" in finding["evidence"]
+    assert "Teks: kucing vs senin" in finding["evidence"]
+    assert "content://" not in finding["evidence"]
+
+
+@pytest.mark.unit
+def test_english_screen_reason_is_localized_for_operator():
+    findings = sd_detector.findings_from_verdict(
+        _verdict(
+            indonesian_meme=_meme(
+                is_meme=True,
+                satire_type=["political_satire"],
+                confidence=0.8,
+            ),
+            reason="Screen showing meme permentah.",
+        ),
+        relative_path="gallery/squidward.jpg",
+        layer="L3",
+    )
+    finding = findings[0]
+    assert finding["category"] == "political_meme"
+    assert finding["label"] == "Meme politik: Tampilan layar berisi meme permentah."
+    assert "Alasan: Tampilan layar berisi meme permentah." in finding["evidence"]
+    assert "Screen showing" not in finding["label"]
+    assert "Screen showing" not in finding["evidence"]
+
+
+@pytest.mark.unit
+def test_meme_label_uses_stripped_reason_when_overlay_missing():
+    findings = sd_detector.findings_from_verdict(
+        _verdict(
+            indonesian_meme=_meme(is_meme=True, satire_type=["humor"], confidence=0.7),
+            reason="Rules: safe — a cat staring at a calendar",
+        ),
+        relative_path="gallery/cat.jpg",
+        layer="L3",
+    )
+    assert findings[0]["label"] == "Meme: Seekor kucing menatap kalender."
+    assert "Alasan: Seekor kucing menatap kalender." in findings[0]["evidence"]
+
+
+@pytest.mark.unit
+def test_political_meme_maps_existing_category():
+    findings = sd_detector.findings_from_verdict(
+        _verdict(
+            indonesian_meme=_meme(
+                is_meme=True,
+                public_figures=["prabowo"],
+                satire_type=["political_satire"],
+                topics=["palm_oil"],
+                overlay_text=["hidup sawit"],
+                confidence=0.91,
+            ),
+            reason="Rules: KOK HARGA NAK NAK TERUS?",
+        ),
+        relative_path="gallery/sawit.jpg",
+        layer="L3",
+    )
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["category"] == "political_meme"
+    assert finding["label"] == "Meme politik: Prabowo, sawit — hidup sawit"
+    assert finding["keep_label"] is True
+    assert "Figur: Prabowo" in finding["evidence"]
+    assert "Jenis: satire politik" in finding["evidence"]
+    assert "Topik: sawit" in finding["evidence"]
+    assert "Teks: hidup sawit" in finding["evidence"]
+    assert "Alasan: KOK HARGA NAK NAK TERUS?" in finding["evidence"]
+
+
+@pytest.mark.unit
+def test_review_suppresses_generic_meme():
+    findings = sd_detector.findings_from_verdict(
+        _verdict(
+            action="review",
+            severity="suggestive",
+            indonesian_meme=_meme(is_meme=True, satire_type=["humor"]),
+        ),
+        relative_path="gallery/both.jpg",
+        layer="L3",
+    )
+    assert [item["category"] for item in findings] == ["ketelanjangan"]
+
+
+@pytest.mark.unit
+def test_block_keeps_political_meme_with_figures():
+    findings = sd_detector.findings_from_verdict(
+        _verdict(
+            action="block",
+            severity="explicit",
+            nudity="full",
+            indonesian_meme=_meme(
+                is_meme=True,
+                public_figures=["jokowi"],
+                topics=["economy"],
+                overlay_text=["kok harga naik terus2"],
+            ),
+            reason="Rules: KOK HARGA NAK NAK TERUS?",
+        ),
+        relative_path="gallery/both.jpg",
+        layer="L4",
+    )
+    assert [item["category"] for item in findings] == ["ketelanjangan", "political_meme"]
+    meme = findings[1]
+    assert meme["label"] == "Meme politik: Jokowi, ekonomi — kok harga naik terus2"
+    assert "Alasan:" in meme["evidence"]
+
+
+@pytest.mark.unit
+def test_block_suppresses_layout_only_political_satire():
+    findings = sd_detector.findings_from_verdict(
+        _verdict(
+            action="block",
+            severity="explicit",
+            nudity="full",
+            indonesian_meme=_meme(is_meme=True, satire_type=["political_satire"]),
+        ),
+        relative_path="recovered_trash/trash/clip.webp",
+        layer="L3",
+    )
+    assert [item["category"] for item in findings] == ["ketelanjangan"]
+
+
+@pytest.mark.unit
+def test_merge_keeps_sd_meme_label():
+    merged = merge_content_findings(
+        [
+            {
+                "category": "political_meme",
+                "label": "Meme politik: Prabowo, sawit — hidup sawit",
+                "confidence": 0.7,
+                "layer_origin": "L3",
+                "evidence": "Berkas: gallery/sawit.jpg. Figur: Prabowo.",
+                "keep_label": True,
+            },
+            {
+                "category": "political_meme",
+                "label": "Meme politik",
+                "confidence": 0.82,
+                "layer_origin": "L3",
+                "evidence": "[ocr] MEME hidup sawit",
+            },
+        ]
+    )
+    assert len(merged) == 1
+    assert merged[0]["label"] == "Meme politik: Prabowo, sawit — hidup sawit"
+    assert "keep_label" not in merged[0]
+    assert "Berkas: gallery/sawit.jpg" in merged[0]["evidence"]
+    assert "[ocr] MEME hidup sawit" in merged[0]["evidence"]

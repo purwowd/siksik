@@ -1,0 +1,325 @@
+# Aturan meme Indonesia — extend tanpa ubah kode Python.
+# figures: alias nama pejabat / tokoh publik
+# phrase_figures: boost figur dari teks overlay (VLM/OCR)
+# ocr_aliases: koreksi noise OCR → teks canonical
+# format_patterns / satire_patterns / topic_patterns: deteksi format, satire, topik
+
+figures:
+  jokowi: [jokowi, joko widodo, widodo, presiden joko, pak jokowi, mulyono, jokowidodo]
+  prabowo: [prabowo, prabowo subianto, subianto, presiden prabowo, pak prabowo]
+  gibran: [gibran, gibran rakabuming, wakil presiden gibran, wapres gibran]
+  anies: [anies, anies baswedan, pak anies]
+  ganjar: [ganjar, ganjar pranowo, pak ganjar]
+  bahlil: [bahlil, bahlil lahadalia, menteri bahlil]
+  megawati: [megawati, mega, bu mega, pdi perjuangan]
+  sandiaga: [sandiaga, sandiaga uno, sandi uno]
+  mahfud: [mahfud, mahfud md, mahfud m d]
+  luhut: [luhut, luhut binsar, luhut pansait]
+  erick_thohir: [erick thohir, erick tohir, mentri bumn]
+  sri_mulyani: [sri mulyani, bu sri, menkeu sri]
+  purbaya: [purbaya, purbaya yudhi]
+  rocky_gerung: [rocky gerung, rocky]
+  ridwan_kamil: [ridwan kamil, emil, kang emil]
+  basuki: [ahok, basuki tjahaja, basuki, gubernur ahok]
+  puan: [puan, puan maharani, mbak puan]
+  airlangga: [airlangga, airlangga hartarto]
+  muhaimin: [muhaimin, muhaimin iskandar, cak imin]
+  kaesang: [kaesang, kaesang pangarep]
+  bobby: [bobby, bobby nasution]
+  surya_paloh: [surya paloh, paloh]
+  hasto: [hasto, hasto kristiyanto]
+  zulkifli: [zulkifli, zulkifli hasan, zulhas]
+  wiranto: [wiranto]
+  ahy: [ahy, agung harimurti, agung harimurti yudhoyono]
+  sby: [sby, susilo bambang, yudhoyono]
+
+phrase_figures:
+  # --- Prabowo viral ---
+  hidup sawit: prabowo
+  hidup jokowi: prabowo
+  jangan dikasitau: prabowo
+  jangan di kasi tau: prabowo
+  dikasitau: prabowo
+  ap peduli gwe: prabowo
+  ap pedduli gwe: prabowo
+  peduli gwe: prabowo
+  gemoy: prabowo
+  presiden gemoy: prabowo
+  joget gemoy: prabowo
+  tabrak tabrak: prabowo
+  ndasmu: prabowo
+  ndasmu bro: prabowo
+  omon omon: prabowo
+  omon-omon: prabowo
+  omon: prabowo
+  ok gas: prabowo
+  gas pol: prabowo
+  gaskeun: prabowo
+  gas kan: prabowo
+  santuy bro: prabowo
+  santuy: prabowo
+  santy bro: prabowo
+  ikhlas bro: prabowo
+  ppn naik: prabowo
+  ppn naik lagi: prabowo
+  pajak naik: prabowo
+  pph naik: prabowo
+  palm tree: prabowo
+  palm tree costume: prabowo
+  pineapple: prabowo
+  kelapa sawit: prabowo
+  makan bergizi: prabowo
+  mbg: prabowo
+  program mbg: prabowo
+  kabinet gemuk: prabowo
+  kabinet gemoy: prabowo
+  negara butuh wang: prabowo
+  butuh wang: prabowo
+
+  # --- Jokowi viral ---
+  kok harga: jokowi
+  harga naik: jokowi
+  naik terus: jokowi
+  nak nak: jokowi
+  kok harga naik: jokowi
+  rakyat anjing: jokowi
+  rakyat anung: jokowi
+  rakyat anjung: jokowi
+  ngocok: jokowi
+  ngecok: jokowi
+  noock: jokowi
+  noock xxx: jokowi
+  gubernur dki: jokowi
+  gubernur jakarta: jokowi
+  gubernur dki jakarta: jokowi
+  tanda tangan uu: jokowi
+  tangan uu: jokowi
+  uu tersebut: jokowi
+  saya tidak tanda: jokowi
+  saya tidak tanda tangan: jokowi
+  termul: jokowi
+  ternak mulyono: jokowi
+  buzzer jokowi: jokowi
+  ijazah palsu: jokowi
+  namanya juga mau: jokowi
+  mau jadi presiden lagi: jokowi
+
+  # --- Gibran ---
+  wapres termuda: gibran
+  wapres termuda sepanjang: gibran
+  suhu bilang: gibran
+  suhu kata: gibran
+  waktu nyerah jadi gubernur: gibran
+
+  # --- Anies ---
+  jakarta model dunia: anies
+  model dunia: anies
+  waktu nyerah jabi: anies
+  nyerah jadi gubernur: anies
+
+  # --- Ganjar ---
+  survei masih oke: ganjar
+  masih oke kok: ganjar
+  survey nyantanya: ganjar
+  nyantanya masih oke: ganjar
+  survei: ganjar
+
+  # --- Bahlil ---
+  meme doang: bahlil
+  dipidana: bahlil
+  kena pidana: bahlil
+  kenapa dipidana: bahlil
+  bahlil dipidana: bahlil
+
+  # --- Mahfud / Luhut / lainnya ---
+  debat capres: prabowo
+  pilpres 2024: prabowo
+  capres cawapres: prabowo
+  ingar sung tulodo: prabowo
+  ingarso sung tulodo: prabowo
+
+  # --- Deepfake / AI kiss memes ---
+  ciuman jokowi prabowo: jokowi
+  jokowi cium prabowo: jokowi
+  ai jokowi: jokowi
+  ai prabowo: prabowo
+  deepfake jokowi: jokowi
+  deepfake prabowo: prabowo
+
+  # --- Mahfud ---
+  gak ada bukti: mahfud
+  tidak ada bukti: mahfud
+
+  # --- Luhut ---
+  investasi asing: luhut
+  omnibus law: luhut
+
+  # --- Sri Mulyani ---
+  apbn: sri_mulyani
+  defisit apbn: sri_mulyani
+
+  # --- Purbaya ---
+  pajak rich: purbaya
+  wajib pajak: purbaya
+
+  # --- Rocky Gerung ---
+  elit global: rocky_gerung
+  rezim jokowi: rocky_gerung
+
+  # --- Ahok/Basuki ---
+  gubernur ahok: basuki
+  ahok dipenjara: basuki
+
+  # --- Kaesang/Bobby (keluarga Jokowi) ---
+  kaesang joget: kaesang
+  bobby afiliasi: bobby
+
+  # --- Megawati / Puan / Emil ---
+  bu mega bilang: megawati
+  pdi perjuangan: megawati
+  mbak puan bilang: puan
+  ketua dpr: puan
+  kang emil: ridwan_kamil
+  jawa barat juara: ridwan_kamil
+
+  # --- Mahfud / Luhut / Sri / Erick ---
+  gak ada bukti: mahfud
+  tidak ada bukti: mahfud
+  defisit apbn: sri_mulyani
+  menteri bumn: erick_thohir
+  garuda indonesia: erick_thohir
+
+  # --- Slang umum (boost figur dari konteks teks) ---
+  buzzer: jokowi
+  kadrun: prabowo
+  cebong: jokowi
+  kampret: prabowo
+  termul: jokowi
+  ternak mulyono: jokowi
+  gemas: prabowo
+  gumush: prabowo
+  ok gas kan: prabowo
+  gas polll: prabowo
+  wkwkwk: prabowo
+  wkwwk: prabowo
+  canda receh: prabowo
+  receh banget: prabowo
+
+topic_patterns:
+  palm_oil: [palm oil, oil palm, sawit, kelapa sawit, hidup sawit, kelapa, cpo]
+  corruption: [korupsi, corruption, kpk, suap, gratifikasi, korup, mark up, fee proyek]
+  election: [pemilu, pilpres, pilgub, pilkada, election, calon presiden, capres, cawapres, debat capres]
+  economy: [ekonomi, inflasi, harga naik, kok harga, subsisi, subsidi, pajak, ppn, pph, anggaran, resesi, phk]
+  government: [pemerintah, menteri, dpr, parlemen, kabinet, istana, state budget, apbn]
+  social_issue: [demo, demonstrasi, unjuk rasa, protest, buruh, mahasiswa demo]
+  education: [sekolah, pendidikan, guru, kampus, mahasiswa, ijazah, kuliah]
+  food_program: [makan bergizi, mbg, program mbg, gizi gratis, makan siang gratis]
+  jakarta: [jakarta, dki, gubernur jakarta, ibu kota, jakarta model dunia]
+  social_media: [viral, trending, fyp, tiktok, twitter, medsos, media sosial, share]
+  military: [tni, polri, militer, tentara, kopassus, laskar]
+  religion: [islam, kristen, hindu, buddha, katolik, sholat, gereja, umat]
+  health: [covid, vaksin, rsud, bpjs, kesehatan, rumah sakit]
+  law: [uu cipta kerja, omnibus law, kuhp, kuhap, pidana, dipidana, pengadilan]
+  nepotism: [nepotisme, dynasti, keluarga presiden, wapres termuda, kaesang, bobby]
+
+format_patterns:
+  caption_meme: [meme, internet meme, caption meme, text overlay, overlay text, impact font, teks meme, meme caption]
+  caption_bars: [caption bars, top bottom text, teks atas bawah, top text band, bottom text band, caption bar]
+  speech_bubble: [speech bubble, balon bicara, bubble text, comic bubble, teks bubble]
+  edited_photo: [edited photo, photoshopped, doctored, manipulated, fake photo, editan, hasil edit]
+  ai_generated: [ai generated, ai-generated, deepfake, synthetic image, digitally altered, buatan ai, editan ai]
+  caricature: [caricature, political cartoon, satirical drawing, editorial cartoon, kartun politik, karikatur]
+  viral_format: [viral meme, trending meme, fyp, spread on social media, viral di medsos]
+
+satire_patterns:
+  political_satire: [political satire, political meme, satirical, sindiran, parody, meme politik, politainment]
+  sarcasm: [sarcastic, sarcasm, ironis, sarkas, sinis]
+  humor: [humor, humour, lucu, ngakak, receh, canda]
+  criticism: [criticism, kritik, nyindir, roasting, nyolkin, caci maki, protes]
+  deepfake: [deepfake, deep fake, ai kiss, synthetic face]
+  impoliteness: [ndasmu, kasar, impolite, serangan personal]
+  reconciliation: [reconciliation, rekonsiliasi, berdamai, hidup jokowi]
+  populist_branding: [gemoy, omon omon, gas pol, ok gas, branding politik]
+
+ocr_aliases:
+  # Prabowo phrases
+  tangandi shrugs: jangan dikasitau
+  tangandi ksau: jangan dikasitau
+  tangandi: jangan dikasitau
+  janganidikasihau: jangan dikasitau
+  jangan di kasi tau: jangan dikasitau
+  jangan dikasih tau: jangan dikasitau
+  ap pedduli gwe: ap peduli gwe
+  ap peduli gwe: ap peduli gwe
+  hidup sawlt: hidup sawit
+  hidup sawit: hidup sawit
+  santoy bro: santuy bro
+  santy bro: santuy bro
+  santy bro negara: santuy bro
+  negara butu wang: santuy bro negara butuh wang
+  omon omon: omon-omon
+  omon omon tak bisa: omon-omon tak bisa
+
+  # Jokowi phrases
+  usblhruk cal jakarta: gubernur dki jakarta
+  gubernur dki jakarta: gubernur dki jakarta
+  sehari noock: ngocok
+  noock xxx: ngocok
+  semariingocok: ngocok
+  noock: ngocok
+  rakyat anjung: rakyat anjing
+  rakyat anung: rakyat anjing
+  rakyat anjing: rakyat anjing
+  kok marga naik: kok harga naik
+  kok harga nak nak: kok harga naik terus
+  kok harga nak nak terus: kok harga naik terus
+  harga nak nak terus: harga naik terus
+  maik terus: naik terus
+  rar leryo: naik terus
+  saya tidak tanda tangan uu: saya tidak tanda tangan uu
+  saya tidak tanda tangan uy: saya tidak tanda tangan uu
+  uy itu: uu itu
+  uu itu: uu itu
+  seseual: sesuai
+  namanya juga mau jadi presiden: namanya juga mau jadi presiden lagi
+
+  # Gibran / Anies / Ganjar / Bahlil
+  on bilang: suhu bilang
+  suhu bilang: suhu bilang
+  waktu nyerah jabi: waktu nyerah jadi gubernur
+  wapres termuda sepanjang sejarah: wapres termuda sepanjang sejarah
+  jakarta model dunia: jakarta model dunia
+  survey nyantanya masih oke: survei masih oke kok
+  survey nyantanya: survei masih oke kok
+  masih oke kok: masih oke kok
+  meme doang: meme doang
+  kenapa dipidana: kenapa dipidana
+  ppn naik lagi 2025: ppn naik lagi 2025
+
+  # Generic OCR noise
+  bro sehari: bro sehari ngocok
+  cal jakarta: gubernur dki jakarta
+  kenapa dipdana: kenapa dipidana
+  dipdana: dipidana
+  wapres termuda se-asia: wapres termuda sepanjang sejarah
+  namanya juga mau jabi presiden lag: namanya juga mau jadi presiden lagi
+  namanya juga mau jabi: namanya juga mau jadi presiden lagi
+  suhu bilang: suhu bilang
+  netizen meme apa serius: netizen meme apa serius
+  cuap cuap teori: cuap-cuap teori
+  cuap cuap teori saja: cuap-cuap teori
+  president obama is shown: kenapa dipidana
+  obama is shown: kenapa dipidana
+  bro sehari ngocok: bro sehari ngocok
+  sehari ngocok: ngocok
+  ngocok xxx: ngocok
+  ap peduli gwe: ap peduli gwe
+  ap peduli gwe?: ap peduli gwe
+  hidup sawit: hidup sawit
+  jangan dikasitau: jangan dikasitau
+  santuy bro negara butuh wang: santuy bro negara butuh wang
+  santuy bro butuh uang: santuy bro negara butuh wang
+  pajak naik lagi: pajak naik lagi
+  saya tidak tanda: saya tidak tanda tangan uu
+  tangan uu tersebut: saya tidak tanda tangan uu
+  tangan uu tersebut.: saya tidak tanda tangan uu

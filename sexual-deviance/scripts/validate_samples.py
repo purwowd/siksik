@@ -50,6 +50,26 @@ def check_lgbt(got_lgbt: dict, exp: dict) -> bool:
     return True
 
 
+def check_meme(got_meme: dict, exp: dict) -> bool:
+    if "meme_present" not in exp:
+        return True
+    if got_meme.get("present") != exp["meme_present"]:
+        return False
+    if exp.get("meme_is_meme") is not None and got_meme.get("is_meme") != exp["meme_is_meme"]:
+        return False
+    figures_any = exp.get("meme_figure_any")
+    if figures_any:
+        got_figures = set(got_meme.get("public_figures", []))
+        if not got_figures.intersection(set(figures_any)):
+            return False
+    satire_any = exp.get("meme_satire_any")
+    if satire_any:
+        got_satire = set(got_meme.get("satire_type", []))
+        if not got_satire.intersection(set(satire_any)):
+            return False
+    return True
+
+
 def main() -> int:
     expected = load_expected()
     files = sorted(
@@ -95,6 +115,7 @@ def main() -> int:
             result = detector.analyze(path)
             v = result.verdict
             got_lgbt = v.lgbt.model_dump(mode="json")
+            got_meme = v.indonesian_meme.model_dump(mode="json")
             got = {
                 "severity": v.severity.value,
                 "nudity": v.nudity.value,
@@ -103,6 +124,9 @@ def main() -> int:
                 "flagged": v.flagged,
                 "lgbt_present": got_lgbt.get("present"),
                 "lgbt_flags": got_lgbt.get("flag_colors"),
+                "meme_present": got_meme.get("present"),
+                "meme_figures": got_meme.get("public_figures"),
+                "meme_overlay": got_meme.get("overlay_text"),
             }
 
             ok = (
@@ -111,6 +135,7 @@ def main() -> int:
                 and got["orientation"] == exp.get("orientation", "none")
                 and got["flagged"] == exp["flagged"]
                 and check_lgbt(got_lgbt, exp)
+                and check_meme(got_meme, exp)
             )
             if exp.get("media_type") == "video" and v.media_type != "video":
                 ok = False
@@ -123,7 +148,7 @@ def main() -> int:
 
             results.append({
                 "file": path.name, "status": status, "expected": exp,
-                "got": got, "lgbt": got_lgbt, "reason": v.reason,
+                "got": got, "lgbt": got_lgbt, "indonesian_meme": got_meme, "reason": v.reason,
             })
             sym = "✓" if ok else "✗"
             print(f"{sym} {path.name}")

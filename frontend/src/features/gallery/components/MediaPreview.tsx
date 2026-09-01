@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   fetchMediaBlobUrl,
   fetchMediaText,
@@ -97,6 +98,71 @@ function readableText(raw: string, json: boolean): string {
   }
 }
 
+function MediaLightbox({
+  title,
+  onClose,
+  children,
+  scrollable = false,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+  scrollable?: boolean;
+}) {
+  const closeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    closeRef.current?.focus();
+  }, []);
+  useEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    const previousHtml = html.style.overflow;
+    const previousBody = body.style.overflow;
+    html.style.overflow = "hidden";
+    body.style.overflow = "hidden";
+    html.classList.add("media-lightbox-open");
+    const blockScroll = (event: Event) => {
+      if (scrollable) return;
+      event.preventDefault();
+    };
+    document.addEventListener("wheel", blockScroll, { passive: false });
+    document.addEventListener("touchmove", blockScroll, { passive: false });
+    return () => {
+      html.style.overflow = previousHtml;
+      body.style.overflow = previousBody;
+      html.classList.remove("media-lightbox-open");
+      document.removeEventListener("wheel", blockScroll);
+      document.removeEventListener("touchmove", blockScroll);
+    };
+  }, [scrollable]);
+  return createPortal(
+    <div className="media-modal-backdrop" role="presentation" onClick={onClose}>
+      <section
+        className={`media-modal${scrollable ? " media-modal-scrollable" : ""}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Pratinjau ${title}`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="media-modal-header">
+          <strong title={title}>{title}</strong>
+          <button
+            ref={closeRef}
+            type="button"
+            className="media-modal-close"
+            onClick={onClose}
+            aria-label="Tutup"
+          >
+            ×
+          </button>
+        </header>
+        <div className="media-modal-body">{children}</div>
+      </section>
+    </div>,
+    document.body,
+  );
+}
+
 export function MediaPreview({
   sessionId,
   path,
@@ -174,6 +240,17 @@ export function MediaPreview({
 
   async function openPreview(): Promise<void> {
     if (!mediaPath) return;
+    if (isImg) {
+      setModalOpen(true);
+      if (contentUrl) return;
+      try {
+        const issued = await issueMediaTicket(sessionId, mediaPath);
+        setContentUrl(ticketedMediaUrl(sessionId, mediaPath, issued.ticket));
+      } catch {
+        // Thumbnail blob remains the enlarged source.
+      }
+      return;
+    }
     setLoading(true);
     setFailed(false);
     try {
@@ -212,14 +289,31 @@ export function MediaPreview({
       return <div className="media-preview muted-preview">{previewText || "Gambar"}</div>;
     }
     return (
-      <a className="media-preview" href={imageUrl} target="_blank" rel="noreferrer">
-        <img
-          src={imageUrl}
-          alt={`Pratinjau ${fileName}`}
-          loading="lazy"
-          onError={() => setFailed(true)}
-        />
-      </a>
+      <>
+        <button
+          type="button"
+          className="media-preview image-preview"
+          onClick={() => void openPreview()}
+          disabled={!mediaPath}
+          title={`Perbesar ${fileName}`}
+        >
+          <img
+            src={imageUrl}
+            alt={`Pratinjau ${fileName}`}
+            loading="lazy"
+            onError={() => setFailed(true)}
+          />
+        </button>
+        {modalOpen ? (
+          <MediaLightbox title={fileName} onClose={() => setModalOpen(false)}>
+            <img
+              className="media-modal-image"
+              src={contentUrl || imageUrl}
+              alt={fileName}
+            />
+          </MediaLightbox>
+        ) : null}
+      </>
     );
   }
 
@@ -251,25 +345,9 @@ export function MediaPreview({
         </button>
         {failed && !imageUrl ? <span className="media-preview-error">Preview gagal dimuat</span> : null}
         {modalOpen ? (
-          <div className="media-modal-backdrop" role="presentation" onClick={() => setModalOpen(false)}>
-            <section
-              className="media-modal"
-              role="dialog"
-              aria-modal="true"
-              aria-label={`Pratinjau ${fileName}`}
-              onClick={(event) => event.stopPropagation()}
-            >
-              <header className="media-modal-header">
-                <strong>{fileName}</strong>
-                <button type="button" onClick={() => setModalOpen(false)} aria-label="Tutup">
-                  Tutup
-                </button>
-              </header>
-              <div className="media-modal-body">
-                {contentUrl ? <video src={contentUrl} controls autoPlay preload="metadata" /> : null}
-              </div>
-            </section>
-          </div>
+          <MediaLightbox title={fileName} onClose={() => setModalOpen(false)}>
+            {contentUrl ? <video src={contentUrl} controls autoPlay preload="metadata" /> : null}
+          </MediaLightbox>
         ) : null}
       </>
     );
@@ -301,38 +379,22 @@ export function MediaPreview({
       </button>
       {failed ? <span className="media-preview-error">Preview gagal dimuat</span> : null}
       {modalOpen ? (
-        <div className="media-modal-backdrop" role="presentation" onClick={() => setModalOpen(false)}>
-          <section
-            className="media-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label={`Pratinjau ${fileName}`}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <header className="media-modal-header">
-              <strong>{fileName}</strong>
-              <button type="button" onClick={() => setModalOpen(false)} aria-label="Tutup">
-                Tutup
-              </button>
-            </header>
-            <div className="media-modal-body">
-              {isVid && contentUrl ? <video src={contentUrl} controls autoPlay preload="metadata" /> : null}
-              {isAudio && contentUrl ? <audio src={contentUrl} controls autoPlay preload="metadata" /> : null}
-              {(isHtml || isPdf) && contentUrl ? (
-                <iframe src={contentUrl} title={`Isi ${fileName}`} sandbox="" />
-              ) : null}
-              {contentText ? <pre className="media-text-preview">{contentText}</pre> : null}
-              {!isVid && !isAudio && !isHtml && !isPdf && contentUrl ? (
-                <div className="media-file-open">
-                  <p>{previewText || "Pratinjau langsung tidak tersedia untuk format ini."}</p>
-                  <a href={contentUrl} target="_blank" rel="noreferrer">
-                    Buka berkas
-                  </a>
-                </div>
-              ) : null}
+        <MediaLightbox title={fileName} onClose={() => setModalOpen(false)} scrollable>
+          {isVid && contentUrl ? <video src={contentUrl} controls autoPlay preload="metadata" /> : null}
+          {isAudio && contentUrl ? <audio src={contentUrl} controls autoPlay preload="metadata" /> : null}
+          {(isHtml || isPdf) && contentUrl ? (
+            <iframe src={contentUrl} title={`Isi ${fileName}`} sandbox="" />
+          ) : null}
+          {contentText ? <pre className="media-text-preview">{contentText}</pre> : null}
+          {!isVid && !isAudio && !isHtml && !isPdf && contentUrl ? (
+            <div className="media-file-open">
+              <p>{previewText || "Pratinjau langsung tidak tersedia untuk format ini."}</p>
+              <a href={contentUrl} target="_blank" rel="noreferrer">
+                Buka berkas
+              </a>
             </div>
-          </section>
-        </div>
+          ) : null}
+        </MediaLightbox>
       ) : null}
     </>
   );

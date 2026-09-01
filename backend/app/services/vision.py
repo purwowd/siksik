@@ -32,6 +32,7 @@ VISUAL_RISK_TAGS = (
     "gulingkan",
 )
 # Note: "anti" sengaja dihapus — terlalu pendek & substring FP (anti⊂ganti)
+_ANIMATED_IMAGE_EXT = frozenset({".webp", ".gif"})
 
 
 @dataclass(frozen=True)
@@ -358,6 +359,73 @@ def _dedupe_findings(findings: list[dict]) -> list[dict]:
     return out
 
 
+def is_animated_image(path: Path) -> bool:
+    """True for multi-frame WebP/GIF so recovered clips are analyzed as video (L4)."""
+    if path.suffix.lower() not in _ANIMATED_IMAGE_EXT:
+        return False
+    try:
+        from PIL import Image, UnidentifiedImageError
+    except ImportError:
+        return False
+    try:
+        with Image.open(path) as image:
+            frames = int(getattr(image, "n_frames", 1) or 1)
+            return bool(getattr(image, "is_animated", False)) and frames > 1
+    except (OSError, UnidentifiedImageError, ValueError):
+        return False
+
+
+def _animated_frame_indexes(frame_count: int, limit: int) -> list[int]:
+    if frame_count < 1 or limit < 1:
+        return []
+    requested = min(frame_count, limit)
+    if requested == 1:
+        return [(frame_count - 1) // 2]
+    last = frame_count - 1
+    return sorted({round(index * last / (requested - 1)) for index in range(requested)})
+
+
+def extract_animated_image_frames(path: Path, max_frames: int) -> list[Path]:
+    """Sample WebP/GIF frames via Pillow when ffmpeg cannot treat them as video."""
+    if max_frames < 1 or not is_animated_image(path):
+        return []
+    try:
+        from PIL import Image, UnidentifiedImageError
+    except ImportError:
+        return []
+    try:
+        image = Image.open(path)
+    except (OSError, UnidentifiedImageError):
+        return []
+    out_dir: Path | None = None
+    try:
+        total = int(getattr(image, "n_frames", 1) or 1)
+        indexes = _animated_frame_indexes(total, max_frames)
+        if not indexes:
+            return []
+        out_dir = Path(tempfile.mkdtemp(prefix="sadt_kf_"))
+        frames: list[Path] = []
+        for offset, index in enumerate(indexes, start=1):
+            try:
+                image.seek(index)
+            except EOFError:
+                continue
+            dest = out_dir / f"kf_{offset:02d}.jpg"
+            image.convert("RGB").save(dest, format="JPEG", quality=85)
+            if dest.is_file() and dest.stat().st_size > 32:
+                frames.append(dest)
+        if frames:
+            return frames
+        shutil.rmtree(out_dir, ignore_errors=True)
+        return []
+    except (OSError, ValueError):
+        if out_dir is not None:
+            shutil.rmtree(out_dir, ignore_errors=True)
+        return []
+    finally:
+        image.close()
+
+
 def video_duration_s(path: Path) -> float | None:
     """Durasi media via ffprobe (detik). None jika tidak bisa dibaca."""
     if not shutil.which("ffprobe"):
@@ -388,6 +456,9 @@ def video_duration_s(path: Path) -> float | None:
 
 def extract_video_keyframes(path: Path, max_frames: int = 3) -> list[Path]:
     """Extract representative frames via ffmpeg (spread across duration on long clips)."""
+    animated = extract_animated_image_frames(path, max_frames)
+    if animated:
+        return animated
     if not shutil.which("ffmpeg"):
         return []
     out_dir = Path(tempfile.mkdtemp(prefix="sadt_kf_"))
@@ -492,7 +563,7 @@ def analyze_video_file_result(path: Path) -> VideoAnalysisResult:
         if sd_outcome.used:
             findings.extend(sd_outcome.findings)
             cacheable = cacheable and sd_outcome.cacheable
-        else:
+        if (not sd_outcome.used) or (not nudity.has_nudity_finding(sd_outcome.findings)):
             nudity_outcome = (
                 nudity.analyze_video_frames_result(path, shared_frames)
                 if shared_frames

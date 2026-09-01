@@ -11,6 +11,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   politik: "Konten politik",
   lgbt_content: "LGBT text/flag",
   political_meme: "Meme politik",
+  meme: "Meme",
   political_campaign: "Kampanye politik",
   demonstration: "Demonstrasi",
   incitement: "Incitement / ajakan provokatif",

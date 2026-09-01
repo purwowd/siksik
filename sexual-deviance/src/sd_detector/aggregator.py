@@ -3,10 +3,12 @@ from __future__ import annotations
 from typing import Optional
 
 from .actions import ActionThresholds, resolve_action
+from .indonesian_meme import merge_meme_contexts
 from .lgbt import merge_lgbt_contexts
 from .schema import (
     Action,
     FrameAnalysis,
+    IndonesianMemeContext,
     LgbtContext,
     MediaVerdict,
     NudityLevel,
@@ -62,6 +64,7 @@ def aggregate_frames(
             nudity=NudityLevel.NONE,
             orientation=Orientation.NONE,
             lgbt=LgbtContext(),
+            indonesian_meme=IndonesianMemeContext(),
             acts=[],
             confidence=1.0,
             action=Action.ALLOW,
@@ -91,6 +94,7 @@ def aggregate_frames(
         acts.update(f.acts)
 
     lgbt = merge_lgbt_contexts(f.lgbt for f in frames)
+    indonesian_meme = merge_meme_contexts(f.indonesian_meme for f in frames)
 
     action = resolve_action(worst.severity, worst.confidence, action_thresholds)
     flagged = action != Action.ALLOW
@@ -105,6 +109,7 @@ def aggregate_frames(
         nudity=worst_nudity.nudity,
         orientation=orientation,
         lgbt=lgbt,
+        indonesian_meme=indonesian_meme,
         acts=sorted(acts),
         confidence=worst.confidence,
         action=action,

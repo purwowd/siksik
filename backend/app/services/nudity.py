@@ -67,6 +67,10 @@ class NudityAnalysisResult:
     warning: str | None = None
 
 
+def has_nudity_finding(findings: Sequence[Mapping[str, Any]]) -> bool:
+    return any(str(item.get("category") or "") == CATEGORY for item in findings)
+
+
 @dataclass
 class _DetectorState:
     attempted: bool = False

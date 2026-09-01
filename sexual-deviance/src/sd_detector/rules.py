@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from .indonesian_meme import infer_meme_from_text, merge_meme_contexts
 from .lgbt import infer_lgbt_from_text, merge_lgbt_contexts, resolve_orientation_with_lgbt
 from .nudenet_tier import EXPLICIT_LABELS, NON_MODERATION_LABELS, NudeNetResult
 from .schema import FrameAnalysis, LgbtContext, NudityLevel, Orientation, SEVERITY_RANK, Severity
@@ -135,6 +136,38 @@ def _is_pride_merch_only(description: str, nudenet: NudeNetResult) -> bool:
     )
 
 
+def _is_editorial_art(description: str) -> bool:
+    """Kartun/lukisan editorial politik — bukan konten suggestive."""
+    t = description.lower()
+    cartoon = any(k in t for k in (
+        "cartoon", "caricature", "editorial cartoon", "political cartoon",
+        "nutcracker", "turkey", "nut-jacked", "nut jacked", "sitting at a table",
+    ))
+    if not cartoon:
+        return False
+    unsafe = any(k in t for k in ("nude", "naked", "genital", "sexual", "porn", "breast", "topless"))
+    return not unsafe
+
+
+def _sanitize_acts(
+    acts: list[str],
+    severity: Severity,
+    nudenet: NudeNetResult,
+    description: str,
+) -> list[str]:
+    """Buang act nudity palsu dari NudeNet pada meme/foto aman."""
+    out = list(acts)
+    t = description.lower()
+    if severity == Severity.SAFE:
+        out = [a for a in out if a != "nudity"]
+    elif "nudity" in out:
+        has_real = any(k in t for k in ("nude", "naked", "topless", "genital", "porn"))
+        strong_nn = any(l in EXPLICIT_LABELS for l in nudenet.labels)
+        if not has_real and not strong_nn:
+            out = [a for a in out if a != "nudity"]
+    return sorted(set(out))
+
+
 def infer_acts(description: str) -> list[str]:
     t = description.lower()
     acts: list[str] = []
@@ -175,7 +208,9 @@ def infer_from_description(description: str, nudenet: NudeNetResult) -> FrameAna
         if not nudenet.flagged and not _nudenet_beach_suggestive(description, nudenet):
             return FrameAnalysis(
                 severity=Severity.SAFE, nudity=NudityLevel.NONE,
-                orientation=Orientation.NONE, lgbt=infer_lgbt_from_text(description),
+                orientation=Orientation.NONE,
+                lgbt=infer_lgbt_from_text(description),
+                indonesian_meme=infer_meme_from_text(description),
                 acts=[], confidence=0.88,
                 reason=f"Rules: safe — {description[:80]}",
             )
@@ -206,8 +241,9 @@ def infer_from_description(description: str, nudenet: NudeNetResult) -> FrameAna
     elif "couple" in t and any(k in t for k in ("danc", "kiss", "hug", "embrac")):
         severity = _higher_severity(severity, Severity.SUGGESTIVE)
     elif any(k in t for k in ("painting", "classical art", "botticelli", "birth of venus", "sculpture", "michelangelo", "statue")):
-        severity = _higher_severity(severity, Severity.SUGGESTIVE)
-        nudity = NudityLevel.PARTIAL
+        if not any(k in t for k in ("cartoon", "caricature", "political cartoon", "turkey", "nutcracker")):
+            severity = _higher_severity(severity, Severity.SUGGESTIVE)
+            nudity = NudityLevel.PARTIAL
 
     if _nudenet_beach_suggestive(description, nudenet):
         severity = _higher_severity(severity, Severity.SUGGESTIVE)
@@ -216,7 +252,8 @@ def infer_from_description(description: str, nudenet: NudeNetResult) -> FrameAna
 
     acts = infer_acts(description)
     if nudenet.flagged and "nudity" not in acts:
-        acts.append("nudity")
+        if severity != Severity.SAFE and any(l in EXPLICIT_LABELS for l in nudenet.labels):
+            acts.append("nudity")
 
     # Pride merch / bendera saja — bukan suggestive tanpa nudity/intimacy
     pride_only = _is_pride_merch_only(description, nudenet)
@@ -230,12 +267,13 @@ def infer_from_description(description: str, nudenet: NudeNetResult) -> FrameAna
         else Orientation.NONE
     )
     lgbt = infer_lgbt_from_text(description)
+    indonesian_meme = infer_meme_from_text(description)
     orientation = resolve_orientation_with_lgbt(orientation, lgbt, [description], severity)
     nudity = _cap_nudity(description, nudity, nudenet)
 
     return FrameAnalysis(
         severity=severity, nudity=nudity, orientation=orientation,
-        lgbt=lgbt, acts=acts, confidence=0.85,
+        lgbt=lgbt, indonesian_meme=indonesian_meme, acts=acts, confidence=0.85,
         reason=f"Rules: {description[:100]}",
     )
 
@@ -296,6 +334,10 @@ def merge_results(
             sev = Severity.SUGGESTIVE
             nudity = NudityLevel.PARTIAL
 
+    if _is_editorial_art(description) and sev != Severity.EXPLICIT:
+        sev = Severity.SAFE
+        nudity = NudityLevel.NONE
+
     orientation = llm.orientation
     if orientation == Orientation.NONE:
         orientation = rules.orientation
@@ -303,13 +345,14 @@ def merge_results(
         orientation = infer_orientation(description, sev)
 
     lgbt = merge_lgbt_contexts([llm.lgbt, rules.lgbt])
+    indonesian_meme = merge_meme_contexts([llm.indonesian_meme, rules.indonesian_meme])
     orientation = resolve_orientation_with_lgbt(orientation, lgbt, [description], sev)
 
-    acts = sorted(set(llm.acts + rules.acts))
+    acts = _sanitize_acts(sorted(set(llm.acts + rules.acts)), sev, nudenet, description)
     confidence = max(llm.confidence, rules.confidence)
     reason = rules.reason if SEVERITY_RANK[rules.severity] >= SEVERITY_RANK[llm.severity] else llm.reason
 
     return FrameAnalysis(
         severity=sev, nudity=nudity, orientation=orientation,
-        lgbt=lgbt, acts=acts, confidence=confidence, reason=reason,
+        lgbt=lgbt, indonesian_meme=indonesian_meme, acts=acts, confidence=confidence, reason=reason,
     )

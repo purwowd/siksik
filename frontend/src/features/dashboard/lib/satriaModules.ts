@@ -79,6 +79,11 @@ const GALLERY_CATEGORY_BUCKETS: { id: string; label: string; match: (c: string) 
     match: (c) => /politik|political|campaign|demonstration|anti.?pemerintah|presiden/i.test(c),
   },
   {
+    id: "meme",
+    label: "Meme",
+    match: (c) => /^meme$/i.test(c),
+  },
+  {
     id: "lgbt_content",
     label: "LGBT text/flag",
     match: (c) => /lgbt|pride|transgender.?flag/i.test(c),

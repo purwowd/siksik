@@ -472,10 +472,17 @@ def analyze_content_result(
     cacheable = True
     findings.extend(analyze_path_signals(str(path), keywords))
 
-    is_image = ext in IMG_EXT or mime.startswith("image/") or (
-        source == "gallery" and mime.startswith("image/")
+    is_video = (
+        ext in VID_EXT
+        or source == "video"
+        or mime.startswith("video/")
+        or vis.is_animated_image(path)
     )
-    is_video = ext in VID_EXT or source == "video" or mime.startswith("video/")
+    is_image = (not is_video) and (
+        ext in IMG_EXT
+        or mime.startswith("image/")
+        or (source == "gallery" and mime.startswith("image/"))
+    )
 
     # Direct-transfer binaries replace their canonical JSON companion during
     # indexing. Preserve that verified text as first-class evidence instead of
@@ -503,7 +510,7 @@ def analyze_content_result(
         if sd_outcome.used:
             findings.extend(sd_outcome.findings)
             cacheable = cacheable and sd_outcome.cacheable
-        else:
+        if (not sd_outcome.used) or (not nudity.has_nudity_finding(sd_outcome.findings)):
             outcome = nudity.analyze_image_result(path)
             findings.extend(outcome.findings)
             cacheable = cacheable and outcome.cacheable
@@ -746,7 +753,12 @@ async def _analyze_session_body(
             or source in {"sms", "contacts", "contact"}
         ):
             return (0, str(row["path"]))
-        if source == "video" or ext in VID_EXT or mime.startswith("video/"):
+        if (
+            source == "video"
+            or ext in VID_EXT
+            or mime.startswith("video/")
+            or vis.is_animated_image(staging / path)
+        ):
             return (3, str(row["path"]))
         if (
             source in {"gallery", "media_image", "visible_ui", "accessibility_visible_ui"}
@@ -767,7 +779,12 @@ async def _analyze_session_body(
             gallery_seen += 1
             if image_cap > 0 and gallery_seen > image_cap:
                 continue
-        if r["source"] == "video" or Path(r["path"]).suffix.lower() in VID_EXT:
+        staged = staging / r["path"]
+        if (
+            r["source"] == "video"
+            or Path(r["path"]).suffix.lower() in VID_EXT
+            or vis.is_animated_image(staged)
+        ):
             video_seen += 1
             video_cap = (
                 settings.video_cap_quick

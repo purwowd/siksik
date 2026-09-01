@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildAnalysisModules } from "@/features/dashboard/lib/satriaModules";
-import type { DashboardStats, SessionSummary } from "@/shared/api/client";
+import type { DashboardStats, Finding, SessionSummary } from "@/shared/api/client";
 
 function session(device_type: "android" | "ios"): SessionSummary {
   return {
@@ -94,5 +94,36 @@ describe("buildAnalysisModules", () => {
     expect(notes?.availabilityLabel).toBe("Data catatan dianalisis");
     expect(notes?.metrics.map((item) => item.value)).toEqual(["1", "1", "1", "0"]);
     expect(ios.some((item) => item.id === "notes")).toBe(false);
+  });
+
+  it("splits gallery political memes from generic memes", () => {
+    const finding = (
+      id: string,
+      category: string,
+      label: string,
+    ): Finding => ({
+      id,
+      session_id: "session-test",
+      file_id: id,
+      source: "gallery",
+      path: `gallery/${id}.jpg`,
+      category,
+      label,
+      confidence: 0.8,
+      layer_origin: "L3",
+      evidence: "Berkas: gallery/x.jpg",
+      review_status: "pending",
+      created_at: "2026-08-28T00:00:00Z",
+    });
+    const modules = buildAnalysisModules({
+      session: session("android"),
+      dash: dashboard,
+      findings: [
+        finding("pol", "political_meme", "Meme politik"),
+        finding("fun", "meme", "Meme"),
+      ],
+    });
+    const gallery = modules.find((item) => item.id === "gallery");
+    expect(gallery?.notes).toEqual(["Konten Politik: 1", "Meme: 1"]);
   });
 });

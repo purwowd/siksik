@@ -71,6 +71,15 @@ def test_image_political_text_can_emit_meme_and_insult(monkeypatch: pytest.Monke
 
 
 @pytest.mark.unit
+def test_meme_aliases_normalize_without_colliding_with_political_meme():
+    assert content_policy.normalize_content_category("meme") == "meme"
+    assert content_policy.normalize_content_category("internet_meme") == "meme"
+    assert content_policy.normalize_content_category("caption_meme") == "meme"
+    assert content_policy.normalize_content_category("political_meme") == "political_meme"
+    assert content_policy.normalize_content_category("meme_politik") == "political_meme"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "text",
     [

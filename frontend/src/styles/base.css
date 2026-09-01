@@ -1305,13 +1305,20 @@ body::after {
   display: block;
 }
 
-.media-preview.video {
+.media-preview.video,
+.media-preview.image-preview {
   width: 120px;
   height: 72px;
   padding: 0;
+  appearance: none;
   cursor: pointer;
   color: inherit;
   font: inherit;
+}
+
+.media-preview.image-preview {
+  width: 72px;
+  height: 72px;
 }
 
 .media-preview.video .skeleton-fill {
@@ -1383,15 +1390,24 @@ body::after {
   inset: 0;
   display: grid;
   place-items: center;
-  padding: 18px;
-  background: rgba(0, 0, 0, 0.78);
+  padding: 24px;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+html.media-lightbox-open,
+html.media-lightbox-open body {
+  overflow: hidden !important;
+  overscroll-behavior: none;
 }
 
 .media-modal {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  width: min(920px, 94vw);
-  height: min(760px, 88vh);
+  width: min(440px, 78vw);
+  max-height: min(58vh, 460px);
+  height: min(58vh, 460px);
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1400,22 +1416,57 @@ body::after {
 }
 
 .media-modal-header {
+  position: relative;
+  z-index: 2;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 16px;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px 8px 14px;
   border-bottom: 1px solid var(--line);
+  background: var(--panel);
 }
 
 .media-modal-header strong {
+  flex: 1 1 0;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 0.82rem;
+}
+
+.media-modal-close {
+  display: grid;
+  flex: 0 0 32px;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  font: 1.25rem/1 var(--font-body);
+}
+
+.media-modal-close:hover,
+.media-modal-close:focus-visible {
+  border-color: var(--signal);
+  color: var(--signal);
 }
 
 .media-modal-body {
+  position: relative;
+  min-width: 0;
   min-height: 0;
+  overflow: hidden;
+  background: #000;
+}
+
+.media-modal-scrollable .media-modal-body {
+  display: block;
   overflow: auto;
   background: rgba(0, 0, 0, 0.28);
 }
@@ -1426,6 +1477,25 @@ body::after {
   width: 100%;
   height: 100%;
   border: 0;
+}
+
+.media-modal-body img,
+.media-modal-image {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  border: 0;
+}
+
+.media-modal-scrollable .media-modal-body img,
+.media-modal-scrollable .media-modal-image {
+  position: static;
+  width: auto;
+  height: auto;
 }
 
 .media-modal-body audio {

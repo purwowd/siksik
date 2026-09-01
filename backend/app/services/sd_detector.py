@@ -9,6 +9,7 @@ the existing NudeNet path and must not cache a false-clean result.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,8 +22,13 @@ log = logging.getLogger(__name__)
 
 CATEGORY_NUDITY = "ketelanjangan"
 CATEGORY_LGBT = "lgbt_content"
+CATEGORY_POLITICAL_MEME = "political_meme"
+CATEGORY_MEME = "meme"
 EVIDENCE_MAX = 320
-MAPPING_REVISION = "lgbt-explicit-v3"
+MAPPING_REVISION = "meme-visual-v3"
+_LABEL_DETAIL_MAX = 80
+_REASON_PREFIXES = ("Rules:", "NudeNet:", "LLM:", "VLM:")
+_ANIMATED_STILL_EXT = frozenset({".webp", ".gif"})
 _WEAK_LGBT_CLOTHING = frozenset({"rainbow clothing", "rainbow outfit", "rainbow_clothing"})
 _DEVICE_MARKERS = (
     "content://",
@@ -56,6 +62,127 @@ _FLAG_ID = {
     "trans": "trans",
     "progress": "progress pride",
 }
+_FIGURE_ID = {
+    "jokowi": "Jokowi",
+    "prabowo": "Prabowo",
+    "gibran": "Gibran",
+    "megawati": "Megawati",
+    "anies": "Anies",
+    "ganjar": "Ganjar",
+    "sandiaga": "Sandiaga",
+    "mahfud": "Mahfud",
+    "luhut": "Luhut",
+    "erick_thohir": "Erick Thohir",
+    "sri_mulyani": "Sri Mulyani",
+    "purbaya": "Purbaya",
+    "bahlil": "Bahlil",
+    "rocky_gerung": "Rocky Gerung",
+    "ridwan_kamil": "Ridwan Kamil",
+    "basuki": "Ahok",
+}
+_SATIRE_ID = {
+    "political_satire": "satire politik",
+    "sarcasm": "sarkasme",
+    "criticism": "kritik",
+    "humor": "humor",
+    "deepfake": "deepfake",
+    "caption_meme": "caption",
+    "ai_generated": "buatan AI",
+    "caricature": "karikatur",
+    "edited_photo": "foto suntingan",
+}
+_TOPIC_ID = {
+    "palm_oil": "sawit",
+    "corruption": "korupsi",
+    "election": "pemilu",
+    "economy": "ekonomi",
+    "government": "pemerintah",
+    "social_issue": "isu sosial",
+}
+_POLITICAL_SATIRE = frozenset({"political_satire", "criticism", "deepfake"})
+_POLITICAL_TOPICS = frozenset(_TOPIC_ID)
+_OVERLAY_EVIDENCE_MAX = 120
+_ENGLISH_HINTS = frozenset(
+    {
+        "a",
+        "an",
+        "app",
+        "are",
+        "at",
+        "calendar",
+        "call",
+        "cat",
+        "different",
+        "displaying",
+        "group",
+        "holding",
+        "image",
+        "in",
+        "marching",
+        "meme",
+        "news",
+        "of",
+        "page",
+        "people",
+        "placard",
+        "posts",
+        "screen",
+        "showing",
+        "shows",
+        "social",
+        "staring",
+        "street",
+        "suggests",
+        "the",
+        "video",
+        "with",
+    }
+)
+_REASON_PHRASES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(pattern, re.IGNORECASE), replacement)
+    for pattern, replacement in (
+        (
+            r"\ba group of people are holding a placard and marching in the street\b",
+            "sekelompok orang membawa plakat dan berbaris di jalan",
+        ),
+        (
+            r"\bpage showing different people in a video call\b",
+            "halaman menampilkan beberapa orang dalam panggilan video",
+        ),
+        (
+            r"\bscreen showing posts in a social app\b",
+            "tampilan layar menampilkan unggahan di aplikasi sosial",
+        ),
+        (
+            r"\bscreen displaying the page of a news app\b",
+            "tampilan layar halaman aplikasi berita",
+        ),
+        (
+            r"\bscreen displaying the page of(?: a)? meme\b",
+            "tampilan layar halaman meme",
+        ),
+        (
+            r"\bscreen (?:shows|showing)(?: a| the)? page of a social(?: media)? app\b",
+            "tampilan layar halaman aplikasi sosial",
+        ),
+        (
+            r"\bscreen displaying the page of a social(?: media)? app\b",
+            "tampilan layar halaman aplikasi sosial",
+        ),
+        (r"\bscreen displaying the meme\b", "tampilan layar menampilkan meme"),
+        (r"\bscreen showing meme\b", "tampilan layar berisi meme"),
+        (r"\bscreen shows meme\b", "tampilan layar berisi meme"),
+        (r"\bin the image suggests that\b", "pada gambar tampak bahwa"),
+        (r"\ba cat staring at a calendar\b", "seekor kucing menatap kalender"),
+        (r"\bsocial media app\b", "aplikasi media sosial"),
+        (r"\bsocial app\b", "aplikasi sosial"),
+        (r"\bnews app\b", "aplikasi berita"),
+        (r"\bvideo call\b", "panggilan video"),
+        (r"\bscreen showing\b", "tampilan layar menampilkan"),
+        (r"\bscreen shows\b", "tampilan layar menampilkan"),
+        (r"\bscreen displaying(?: the)?\b", "tampilan layar menampilkan"),
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -129,6 +256,91 @@ def _sexual_label(*, action: str, severity: str, nudity: str) -> str:
     return base
 
 
+def _strip_reason_prefix(reason: str) -> str:
+    text = " ".join(reason.split())
+    for prefix in _REASON_PREFIXES:
+        if text.casefold().startswith(prefix.casefold()):
+            text = text[len(prefix) :].strip(" —-")
+            break
+    lowered = text.casefold()
+    for lead in ("safe —", "safe -", "safe:"):
+        if lowered.startswith(lead):
+            text = text[len(lead) :].strip(" —-")
+            break
+    return text
+
+
+def _looks_english(text: str) -> bool:
+    words = re.findall(r"[a-z]+", text.casefold())
+    if len(words) < 2:
+        return False
+    return sum(1 for word in words if word in _ENGLISH_HINTS) >= 2
+
+
+def _id_sentence(text: str) -> str:
+    value = " ".join(text.split()).strip()
+    if not value:
+        return ""
+    if value.isupper() and any(character.isalpha() for character in value):
+        return value
+    first = value[0].upper() + value[1:] if value[0].islower() else value
+    if first[-1] not in ".?!":
+        first += "."
+    return first
+
+
+def _localize_reason(reason: str) -> str:
+    """Operator-facing Indonesian sentence; keep overlay/OCR tokens intact."""
+    text = _strip_reason_prefix(reason)
+    if not text:
+        return ""
+    if not _looks_english(text):
+        return text
+    trailing = ""
+    if text[-1] in ".?!":
+        trailing = text[-1]
+        text = text[:-1]
+    localized = text
+    for pattern, replacement in _REASON_PHRASES:
+        localized = pattern.sub(replacement, localized)
+    localized = " ".join(localized.split())
+    if trailing and localized and localized[-1] not in ".?!":
+        localized += trailing
+    return _id_sentence(localized)
+
+
+def _clip_label_detail(text: str) -> str:
+    value = " ".join(text.split())
+    if len(value) <= _LABEL_DETAIL_MAX:
+        return value
+    return value[: _LABEL_DETAIL_MAX - 1].rstrip() + "…"
+
+
+def _meme_label(
+    *,
+    political: bool,
+    figures: list[str],
+    topics: list[str],
+    overlay: str,
+    reason: str,
+) -> str:
+    base = "Meme politik" if political else "Meme"
+    bits = [*figures[:2], *topics[:2]]
+    head = ", ".join(bits)
+    explain = _clip_label_detail(overlay or _localize_reason(reason))
+    if head and explain:
+        return f"{base}: {head} — {explain}"
+    if head:
+        return f"{base}: {head}"
+    if explain:
+        return f"{base}: {explain}"
+    return base
+
+
+def _substantive_political_meme(*, figures: list[str], topics: list[str]) -> bool:
+    return bool(figures or topics)
+
+
 def _translate_acts(acts: object) -> list[str]:
     if not acts:
         return []
@@ -169,19 +381,60 @@ def _lgbt_context(verdict: Any) -> Any:
     return getattr(verdict, "lgbt", None)
 
 
+def _meme_context(verdict: Any) -> Any:
+    return getattr(verdict, "indonesian_meme", None)
+
+
+def _overlay_snippet(values: object) -> str:
+    items = values if isinstance(values, (list, tuple)) else [values]
+    chunks: list[str] = []
+    for item in items:
+        text = " ".join(str(item or "").split())
+        if text:
+            chunks.append(text)
+    snippet = " / ".join(chunks)
+    if len(snippet) <= _OVERLAY_EVIDENCE_MAX:
+        return snippet
+    return snippet[: _OVERLAY_EVIDENCE_MAX - 1].rstrip() + "…"
+
+
+def _token_keys(values: object) -> list[str]:
+    if not values:
+        return []
+    items = values if isinstance(values, (list, tuple)) else [values]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        key = str(item or "").strip().casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def _is_political_meme(*, figures: list[str], satire: list[str], topics: list[str]) -> bool:
+    if figures:
+        return True
+    if any(item in _POLITICAL_SATIRE for item in satire):
+        return True
+    return any(item in _POLITICAL_TOPICS for item in topics)
+
+
 def findings_from_verdict(
     verdict: Any,
     *,
     relative_path: str,
     layer: str,
 ) -> list[dict[str, Any]]:
-    """Map a detector verdict to zero, one, or two pending-compatible findings."""
+    """Map a detector verdict to pending-compatible nudity, LGBT, and/or meme findings."""
     action = _enum_value(getattr(verdict, "action", "allow"))
     severity = _enum_value(getattr(verdict, "severity", "safe"))
     nudity = _enum_value(getattr(verdict, "nudity", "none"))
     orientation = _enum_value(getattr(verdict, "orientation", "none"))
     confidence = float(getattr(verdict, "confidence", 0.0) or 0.0)
     reason = " ".join(str(getattr(verdict, "reason", "") or "").split())
+    reason_id = _localize_reason(reason)
     acts = _translate_acts(getattr(verdict, "acts", ()))
     berkas = relative_path.strip() or "berkas"
     findings: list[dict[str, Any]] = []
@@ -193,8 +446,8 @@ def findings_from_verdict(
         )
         if acts:
             evidence_parts.append(f"Adegan: {', '.join(acts)}")
-        if reason:
-            evidence_parts.append(f"Alasan: {reason[:160]}")
+        if reason_id:
+            evidence_parts.append(f"Alasan: {reason_id[:160]}")
         findings.append(
             {
                 "category": CATEGORY_NUDITY,
@@ -237,6 +490,53 @@ def findings_from_verdict(
                 "keep_label": True,
             }
         )
+
+    meme = _meme_context(verdict)
+    is_meme = bool(getattr(meme, "is_meme", False)) if meme is not None else False
+    if is_meme:
+        figures = _translate_tokens(
+            getattr(meme, "public_figures", ()), _FIGURE_ID
+        )
+        satire = _translate_tokens(getattr(meme, "satire_type", ()), _SATIRE_ID)
+        topics = _translate_tokens(getattr(meme, "topics", ()), _TOPIC_ID)
+        overlay = _overlay_snippet(getattr(meme, "overlay_text", ()))
+        political = _is_political_meme(
+            figures=_token_keys(getattr(meme, "public_figures", ())),
+            satire=_token_keys(getattr(meme, "satire_type", ())),
+            topics=_token_keys(getattr(meme, "topics", ())),
+        )
+        keep_meme = action not in {"review", "block"} or _substantive_political_meme(
+            figures=figures, topics=topics
+        )
+        if keep_meme:
+            meme_conf = float(getattr(meme, "confidence", 0.0) or 0.0)
+            meme_parts = [f"Berkas: {berkas}"]
+            if figures:
+                meme_parts.append(f"Figur: {', '.join(figures)}")
+            if satire:
+                meme_parts.append(f"Jenis: {', '.join(satire)}")
+            if topics:
+                meme_parts.append(f"Topik: {', '.join(topics)}")
+            if overlay:
+                meme_parts.append(f"Teks: {overlay}")
+            if reason_id:
+                meme_parts.append(f"Alasan: {reason_id[:160]}")
+            findings.append(
+                {
+                    "category": CATEGORY_POLITICAL_MEME if political else CATEGORY_MEME,
+                    "label": _meme_label(
+                        political=political,
+                        figures=figures,
+                        topics=topics,
+                        overlay=overlay,
+                        reason=reason_id,
+                    ),
+                    "confidence": round(min(0.99, max(meme_conf, confidence, 0.55)), 3),
+                    "layer_origin": layer,
+                    "evidence": _fit_evidence(meme_parts),
+                    "keep_label": True,
+                }
+            )
     return findings
 
 
@@ -344,7 +644,18 @@ def _analyze(path: Path, *, is_video: bool) -> SdAnalysisResult:
     if not settings.sd_detector_enabled:
         return SdAnalysisResult((), True, used=False)
     try:
-        result = _run_locked(path, is_video)
+        try:
+            result = _run_locked(path, is_video)
+        except Exception as exc:
+            still = path.suffix.lower() in _ANIMATED_STILL_EXT
+            if not (is_video and still):
+                raise
+            log.warning(
+                "sd_video_still_fallback error=%s suffix=%s",
+                type(exc).__name__,
+                path.suffix.lower(),
+            )
+            result = _run_locked(path, False)
         verdict = getattr(result, "verdict", result)
         relative = staging_relative_path(path)
         layer = Layer.L4.value if is_video else Layer.L3.value

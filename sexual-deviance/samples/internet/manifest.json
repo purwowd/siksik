@@ -118,5 +118,203 @@
   {
     "file": "30_sample_video.webm",
     "cached": true
+  },
+  {
+    "file": "31_safe_jokowi_official.jpg",
+    "cached": true
+  },
+  {
+    "file": "32_safe_prabowo_official.jpg",
+    "cached": true
+  },
+  {
+    "file": "33_meme_jokowi_caption.jpg",
+    "cached": true
+  },
+  {
+    "file": "34_meme_prabowo_caption.jpg",
+    "cached": true
+  },
+  {
+    "file": "35_meme_political_cartoon.jpg",
+    "cached": true
+  },
+  {
+    "file": "36_meme_ganjar_caption.jpg",
+    "cached": true
+  },
+  {
+    "file": "37_safe_gibran_official.jpg",
+    "cached": true
+  },
+  {
+    "file": "38_meme_gibran_caption.jpg",
+    "cached": true
+  },
+  {
+    "file": "39_safe_anies_official.jpg",
+    "cached": true
+  },
+  {
+    "file": "40_meme_anies_caption.jpg",
+    "cached": true
+  },
+  {
+    "file": "41_meme_bahlil_caption.jpg",
+    "cached": true
+  },
+  {
+    "file": "42_meme_ppn_naik.jpg",
+    "cached": true
+  },
+  {
+    "file": "43_meme_prabowo_gemoy.jpg",
+    "cached": true
+  },
+  {
+    "file": "44_meme_prabowo_omon.jpg",
+    "cached": true
+  },
+  {
+    "file": "45_meme_prabowo_ok_gas.jpg",
+    "cached": true
+  },
+  {
+    "file": "46_meme_prabowo_hidup_sawit.jpg",
+    "cached": true
+  },
+  {
+    "file": "47_meme_prabowo_jangan_dikasitau.jpg",
+    "cached": true
+  },
+  {
+    "file": "48_meme_prabowo_ap_peduli.jpg",
+    "cached": true
+  },
+  {
+    "file": "49_meme_prabowo_mbg.jpg",
+    "cached": true
+  },
+  {
+    "file": "50_meme_prabowo_kabinet_gemuk.jpg",
+    "cached": true
+  },
+  {
+    "file": "51_meme_prabowo_ndasmu.jpg",
+    "cached": true
+  },
+  {
+    "file": "52_meme_prabowo_pajak.jpg",
+    "cached": true
+  },
+  {
+    "file": "53_meme_prabowo_gas_pol.jpg",
+    "cached": true
+  },
+  {
+    "file": "54_meme_jokowi_termul.jpg",
+    "cached": true
+  },
+  {
+    "file": "55_meme_jokowi_gubernur.jpg",
+    "cached": true
+  },
+  {
+    "file": "56_meme_jokowi_rakyat.jpg",
+    "cached": true
+  },
+  {
+    "file": "57_meme_jokowi_presiden_lagi.jpg",
+    "cached": true
+  },
+  {
+    "file": "58_meme_jokowi_uu.jpg",
+    "cached": true
+  },
+  {
+    "file": "59_meme_jokowi_harga.jpg",
+    "cached": true
+  },
+  {
+    "file": "60_meme_gibran_wapres.jpg",
+    "cached": true
+  },
+  {
+    "file": "61_meme_gibran_suhu.jpg",
+    "cached": true
+  },
+  {
+    "file": "62_meme_gibran_nyerah.jpg",
+    "synthesized_meme": true,
+    "spec": {
+      "base_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/22/Gibran_Rakabuming_2024_official_portrait.jpg/960px-Gibran_Rakabuming_2024_official_portrait.jpg",
+      "top_text": "WAPRES TERMUDA",
+      "bottom_text": "SUHU BILANG GAPAPA"
+    }
+  },
+  {
+    "file": "63_meme_anies_jakarta.jpg",
+    "cached": true
+  },
+  {
+    "file": "64_meme_anies_omon_target.jpg",
+    "synthesized_meme": true,
+    "spec": {
+      "base_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/8e/Anies_Baswedan_at_Fatmawati_MRT_Station.jpg/960px-Anies_Baswedan_at_Fatmawati_MRT_Station.jpg",
+      "top_text": "CUAP-CUAP TEORI",
+      "bottom_text": "MODEL DUNIA JAKARTA"
+    }
+  },
+  {
+    "file": "65_meme_ganjar_survei.jpg",
+    "cached": true
+  },
+  {
+    "file": "66_meme_ganjar_oke.jpg",
+    "cached": true
+  },
+  {
+    "file": "67_meme_bahlil_meme_doang.jpg",
+    "cached": true
+  },
+  {
+    "file": "68_meme_bahlil_pidana.jpg",
+    "cached": true
+  },
+  {
+    "file": "69_meme_megawati_mega.jpg",
+    "cached": true
+  },
+  {
+    "file": "70_meme_mahfud_bukti.jpg",
+    "cached": true
+  },
+  {
+    "file": "71_meme_luhut_investasi.jpg",
+    "cached": true
+  },
+  {
+    "file": "72_meme_sri_apbn.jpg",
+    "cached": true
+  },
+  {
+    "file": "73_meme_erick_bumn.jpg",
+    "cached": true
+  },
+  {
+    "file": "74_meme_puan_dpr.jpg",
+    "cached": true
+  },
+  {
+    "file": "75_meme_emil_jabar.jpg",
+    "cached": true
+  },
+  {
+    "file": "76_meme_prabowo_ikhlas.jpg",
+    "cached": true
+  },
+  {
+    "file": "77_meme_prabowo_ppn_2026.jpg",
+    "cached": true
   }
 ]

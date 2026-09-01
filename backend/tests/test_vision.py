@@ -160,3 +160,75 @@ def test_video_reuses_one_shared_keyframe_set(tmp_path: Path, monkeypatch):
 
     assert outcome.cacheable is True
     assert calls == {"extract": 1, "nudity": 1, "gpu": 1}
+
+
+def _write_animated_gif(path: Path) -> None:
+    from PIL import Image
+
+    frames = [
+        Image.new("RGB", (8, 8), (255, 0, 0)),
+        Image.new("RGB", (8, 8), (0, 255, 0)),
+        Image.new("RGB", (8, 8), (0, 0, 255)),
+    ]
+    frames[0].save(path, save_all=True, append_images=frames[1:], duration=80, loop=0)
+
+
+@pytest.mark.unit
+def test_animated_gif_is_video_and_static_webp_is_not(tmp_path: Path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    gif = tmp_path / "clip.gif"
+    _write_animated_gif(gif)
+    still = tmp_path / "still.webp"
+    Image.new("RGB", (8, 8), (12, 12, 12)).save(still, format="WEBP")
+
+    assert vis.is_animated_image(gif) is True
+    assert vis.is_animated_image(still) is False
+    frames = vis.extract_video_keyframes(gif, max_frames=2)
+    try:
+        assert len(frames) == 2
+        assert all(item.suffix == ".jpg" for item in frames)
+    finally:
+        for item in frames:
+            item.unlink(missing_ok=True)
+        if frames:
+            frames[0].parent.rmdir()
+
+
+@pytest.mark.unit
+def test_animated_gif_uses_video_analysis(tmp_path: Path, monkeypatch):
+    pytest.importorskip("PIL")
+    from app.services import analysis, sd_detector
+    from app.services.vision import VideoAnalysisResult
+
+    gif = tmp_path / "clip.gif"
+    _write_animated_gif(gif)
+    called = {"video": 0, "image": 0}
+
+    def fake_video(_path):
+        called["video"] += 1
+        return VideoAnalysisResult(
+            (
+                {
+                    "category": "ketelanjangan",
+                    "label": "Ketelanjangan terdeteksi pada video: test",
+                    "confidence": 0.9,
+                    "layer_origin": "L4",
+                    "evidence": "animated gif",
+                },
+            ),
+            True,
+        )
+
+    def fake_image(_path):
+        called["image"] += 1
+        return sd_detector.SdAnalysisResult((), True, used=False)
+
+    monkeypatch.setattr(vis, "analyze_video_file_result", fake_video)
+    monkeypatch.setattr(sd_detector, "analyze_image_result", fake_image)
+
+    outcome = analysis.analyze_content_result(gif, "image/gif", "recovered_trash", "", [])
+
+    assert called == {"video": 1, "image": 0}
+    assert outcome.findings[0]["layer_origin"] == "L4"

@@ -5,7 +5,37 @@ import re
 
 DESCRIBE_PROMPT = """Describe this image in 1-2 sentences for content moderation.
 Must include: number of people, apparent gender (man/woman) of each person, clothing (including rainbow/pride/LGBT shirts or flags), actions (kissing/hugging/dancing), any pride/LGBT rainbow flags or flag colors visible, setting, any nudity.
+Also note if this is an internet meme with text overlay/caption (top/bottom text), transcribe visible caption text, and name any recognizable Indonesian public figures by full name if possible (e.g. Joko Widodo/Jokowi, Prabowo Subianto, Gibran Rakabuming).
+Note if the image looks AI-generated, deepfake, or photoshopped political satire.
 Plain text only, no JSON."""
+
+DESCRIBE_CLASSIFY_PROMPT = """Analyze this image for content moderation.
+
+Part 1 — Plain text (1-2 sentences): number of people, gender, clothing, actions (kissing/hugging), LGBT/pride cues, setting, nudity. If internet meme: transcribe visible caption/overlay text and name Indonesian public figures (Jokowi, Prabowo, Gibran, …). Note AI/deepfake/photoshop satire.
+
+Part 2 — One JSON object on the last line only:
+{"severity":"safe|suggestive|explicit","nudity":"none|partial|full","orientation":"none|heterosexual|gay|lesbian|bisexual|other","acts":[],"confidence":0.0,"reason":""}
+`reason` must be one short sentence in Bahasa Indonesia, not English."""
+
+INDONESIAN_MEME_VISION_PROMPT = """Analyze this image for Indonesian political meme or satire. Reply plain text:
+1. MEME: yes/no — caption meme, AI/deepfake satire, edited photo joke, or regular news photo?
+2. FIGURES: list recognizable Indonesian officials by name (Jokowi, Prabowo, Gibran, Anies, Ganjar, Bahlil, …) or "none".
+3. TEXT: transcribe ALL visible overlay/caption/speech-bubble text exactly (Indonesian slang OK).
+4. TYPE: political_satire, sarcasm, deepfake, AI_generated, caricature, caption_meme, or none.
+If regular photo with no satire, say "no indonesian meme cues"."""
+
+MEME_BAND_TRANSCRIBE_PROMPT = (
+    "Transcribe every visible text character exactly (Indonesian slang OK). "
+    "Plain text only, one line per separate text block."
+)
+
+INDONESIAN_MEME_JSON_PROMPT = """Analyze this image for Indonesian political meme/satire. Reply JSON only, no markdown.
+Schema:
+{"is_meme":bool,"has_text_overlay":bool,"overlay_text":["exact visible text"],
+ "public_figures":["jokowi|prabowo|gibran|anies|ganjar|bahlil|..."],
+ "satire_type":["political_satire|sarcasm|deepfake|caricature|humor"],
+ "topics":["economy|election|government|..."], "text_language":"id|en|mixed|unknown"}
+If not a meme, set is_meme false and empty lists."""
 
 LGBT_VISION_PROMPT = """Look at LGBT/pride visual cues in this image only.
 Reply plain text, one short sentence listing what you see:
@@ -18,7 +48,8 @@ CLASSIFY_FROM_DESC_PROMPT = """Classify this image description for adult content
 Description: {description}
 {hint}
 Output ONLY JSON:
-{{"severity":"safe|suggestive|explicit","nudity":"none|partial|full","orientation":"none|heterosexual|gay|lesbian|bisexual|other","acts":[],"confidence":0.0,"reason":""}}"""
+{{"severity":"safe|suggestive|explicit","nudity":"none|partial|full","orientation":"none|heterosexual|gay|lesbian|bisexual|other","acts":[],"confidence":0.0,"reason":""}}
+`reason` must be one short sentence in Bahasa Indonesia, not English."""
 
 ORIENTATION_PROMPT = """From this description, identify gender pairing if romantic/intimate content present.
 Description: {description}
@@ -38,7 +69,8 @@ gay=two men, lesbian=two women, heterosexual=man+woman, none=no people or no int
 
 RETRY_PROMPT = """Convert to moderation JSON from description:
 {description}
-JSON: {{"severity":"...","nudity":"...","orientation":"...","acts":[],"confidence":0.0,"reason":""}}"""
+JSON: {{"severity":"...","nudity":"...","orientation":"...","acts":[],"confidence":0.0,"reason":""}}
+`reason` must be one short sentence in Bahasa Indonesia."""
 
 _ENUM_FIELDS = {
     "severity": {"safe", "suggestive", "explicit"},
@@ -215,3 +247,19 @@ def parse_classification(text: str) -> dict:
         return _normalize_data(extract_json(text))
     except (ValueError, json.JSONDecodeError):
         return _normalize_data(heuristic_parse(text))
+
+
+def parse_describe_classify(raw: str) -> tuple[str, dict]:
+    """Split combined VLM output into description + moderation JSON."""
+    text = raw.strip()
+    json_start = text.rfind("{")
+    if json_start >= 0 and "severity" in text[json_start:]:
+        description = text[:json_start].strip()
+        description = re.sub(r"^Part 1\s*[—\-:]\s*", "", description, flags=re.IGNORECASE)
+        description = re.sub(r"^Part 2.*", "", description, flags=re.IGNORECASE | re.DOTALL).strip()
+        try:
+            data = parse_classification(text[json_start:])
+            return description or text[:json_start].strip(), data
+        except (ValueError, json.JSONDecodeError):
+            pass
+    return text, heuristic_parse(text)

@@ -207,5 +207,663 @@
     "flagged": false,
     "lgbt_present": false,
     "media_type": "video"
+  },
+  "31_safe_jokowi_official.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": false
+  },
+  "32_safe_prabowo_official.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": false
+  },
+  "33_meme_jokowi_caption.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "jokowi"
+    ],
+    "meme_satire_any": [
+      "political_satire"
+    ]
+  },
+  "34_meme_prabowo_caption.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "sarcasm"
+    ]
+  },
+  "35_meme_political_cartoon.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_satire_any": [
+      "political_satire",
+      "caricature"
+    ]
+  },
+  "36_meme_ganjar_caption.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "ganjar"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "humor"
+    ]
+  },
+  "37_safe_gibran_official.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": false
+  },
+  "38_meme_gibran_caption.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "gibran"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "sarcasm"
+    ]
+  },
+  "39_safe_anies_official.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": false
+  },
+  "40_meme_anies_caption.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "anies"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "humor"
+    ]
+  },
+  "41_meme_bahlil_caption.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "bahlil"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "criticism"
+    ]
+  },
+  "42_meme_ppn_naik.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "sarcasm"
+    ]
+  },
+  "43_meme_prabowo_gemoy.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "populist_branding",
+      "humor"
+    ]
+  },
+  "44_meme_prabowo_omon.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "criticism"
+    ]
+  },
+  "45_meme_prabowo_ok_gas.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "populist_branding"
+    ]
+  },
+  "46_meme_prabowo_hidup_sawit.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire"
+    ]
+  },
+  "47_meme_prabowo_jangan_dikasitau.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "humor"
+    ]
+  },
+  "48_meme_prabowo_ap_peduli.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "sarcasm"
+    ]
+  },
+  "49_meme_prabowo_mbg.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire"
+    ]
+  },
+  "50_meme_prabowo_kabinet_gemuk.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "criticism"
+    ]
+  },
+  "51_meme_prabowo_ndasmu.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "impoliteness"
+    ]
+  },
+  "52_meme_prabowo_pajak.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "criticism"
+    ]
+  },
+  "53_meme_prabowo_gas_pol.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "populist_branding"
+    ]
+  },
+  "54_meme_jokowi_termul.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "jokowi"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "criticism"
+    ]
+  },
+  "55_meme_jokowi_gubernur.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "jokowi"
+    ],
+    "meme_satire_any": [
+      "political_satire"
+    ]
+  },
+  "56_meme_jokowi_rakyat.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "jokowi"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "impoliteness"
+    ]
+  },
+  "57_meme_jokowi_presiden_lagi.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "jokowi"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "sarcasm"
+    ]
+  },
+  "58_meme_jokowi_uu.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "jokowi"
+    ],
+    "meme_satire_any": [
+      "political_satire"
+    ]
+  },
+  "59_meme_jokowi_harga.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "jokowi"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "criticism"
+    ]
+  },
+  "60_meme_gibran_wapres.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "gibran"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "sarcasm"
+    ]
+  },
+  "61_meme_gibran_suhu.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "gibran"
+    ],
+    "meme_satire_any": [
+      "political_satire"
+    ]
+  },
+  "62_meme_gibran_nyerah.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "gibran"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "humor"
+    ]
+  },
+  "63_meme_anies_jakarta.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "anies"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "humor"
+    ]
+  },
+  "64_meme_anies_omon_target.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "anies"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "criticism"
+    ]
+  },
+  "65_meme_ganjar_survei.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "ganjar"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "humor"
+    ]
+  },
+  "66_meme_ganjar_oke.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "ganjar"
+    ],
+    "meme_satire_any": [
+      "political_satire"
+    ]
+  },
+  "67_meme_bahlil_meme_doang.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "bahlil"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "criticism"
+    ]
+  },
+  "68_meme_bahlil_pidana.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "bahlil"
+    ],
+    "meme_satire_any": [
+      "political_satire"
+    ]
+  },
+  "69_meme_megawati_mega.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "megawati"
+    ],
+    "meme_satire_any": [
+      "political_satire"
+    ]
+  },
+  "70_meme_mahfud_bukti.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "mahfud"
+    ],
+    "meme_satire_any": [
+      "political_satire"
+    ]
+  },
+  "71_meme_luhut_investasi.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "luhut"
+    ],
+    "meme_satire_any": [
+      "political_satire"
+    ]
+  },
+  "72_meme_sri_apbn.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "sri_mulyani"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "criticism"
+    ]
+  },
+  "73_meme_erick_bumn.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "erick_thohir"
+    ],
+    "meme_satire_any": [
+      "political_satire"
+    ]
+  },
+  "74_meme_puan_dpr.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "puan"
+    ],
+    "meme_satire_any": [
+      "political_satire"
+    ]
+  },
+  "75_meme_emil_jabar.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "ridwan_kamil"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "humor"
+    ]
+  },
+  "76_meme_prabowo_ikhlas.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "sarcasm"
+    ]
+  },
+  "77_meme_prabowo_ppn_2026.jpg": {
+    "severity": "safe",
+    "nudity": "none",
+    "orientation": "none",
+    "flagged": false,
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": [
+      "prabowo"
+    ],
+    "meme_satire_any": [
+      "political_satire",
+      "criticism"
+    ]
   }
 }
