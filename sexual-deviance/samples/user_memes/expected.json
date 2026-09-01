@@ -1,0 +1,50 @@
+{
+  "01_prabowo_hidup_sawit.png": {
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": ["prabowo"]
+  },
+  "02_prabowo_hidup_sawit2.png": {
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": ["prabowo"]
+  },
+  "03_prabowo_ai_sawit.png": {
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": ["prabowo"],
+    "meme_satire_any": ["political_satire", "deepfake"]
+  },
+  "04_prabowo_jangan_dikasitau.png": {
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": ["prabowo"]
+  },
+  "05_prabowo_ap_peduli_gwe.png": {
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": ["prabowo"]
+  },
+  "06_ai_jokowi_prabowo_kiss.png": {
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": ["jokowi", "prabowo"],
+    "meme_satire_any": ["deepfake", "political_satire"]
+  },
+  "07_jokowi_rakyat_anjing.png": {
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": ["jokowi"]
+  },
+  "08_jokowi_ngocok_meme.png": {
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": ["jokowi"]
+  },
+  "09_jokowi_uu_speech_bubble.png": {
+    "meme_present": true,
+    "meme_is_meme": true,
+    "meme_figure_any": ["jokowi"],
+    "meme_satire_any": ["political_satire"]
+  }
+}

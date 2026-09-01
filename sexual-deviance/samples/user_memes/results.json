@@ -1,0 +1,162 @@
+[
+  {
+    "file": "01_prabowo_hidup_sawit.png",
+    "meme_ok": true,
+    "fig_ok": true,
+    "figures": [
+      "prabowo"
+    ],
+    "satire": [],
+    "topics": [
+      "palm_oil"
+    ],
+    "overlay": [
+      "hidup sawit"
+    ],
+    "conf": 0.88,
+    "latency_ms": 883.05
+  },
+  {
+    "file": "02_prabowo_hidup_sawit2.png",
+    "meme_ok": true,
+    "fig_ok": true,
+    "figures": [
+      "prabowo"
+    ],
+    "satire": [],
+    "topics": [
+      "palm_oil"
+    ],
+    "overlay": [
+      "hidup sawit"
+    ],
+    "conf": 0.88,
+    "latency_ms": 883.05
+  },
+  {
+    "file": "03_prabowo_ai_sawit.png",
+    "meme_ok": true,
+    "fig_ok": true,
+    "figures": [
+      "prabowo"
+    ],
+    "satire": [
+      "political_satire"
+    ],
+    "topics": [
+      "palm_oil"
+    ],
+    "overlay": [
+      "ai sawit costume"
+    ],
+    "conf": 0.88,
+    "latency_ms": 1110.37
+  },
+  {
+    "file": "04_prabowo_jangan_dikasitau.png",
+    "meme_ok": true,
+    "fig_ok": true,
+    "figures": [
+      "prabowo"
+    ],
+    "satire": [
+      "political_satire"
+    ],
+    "topics": [],
+    "overlay": [
+      "jangan dikasitau"
+    ],
+    "conf": 0.88,
+    "latency_ms": 2112.51
+  },
+  {
+    "file": "05_prabowo_ap_peduli_gwe.png",
+    "meme_ok": true,
+    "fig_ok": true,
+    "figures": [
+      "prabowo"
+    ],
+    "satire": [
+      "political_satire"
+    ],
+    "topics": [],
+    "overlay": [
+      "ap peduli gwe"
+    ],
+    "conf": 0.93,
+    "latency_ms": 764.91
+  },
+  {
+    "file": "06_ai_jokowi_prabowo_kiss.png",
+    "meme_ok": true,
+    "fig_ok": true,
+    "figures": [
+      "jokowi",
+      "prabowo"
+    ],
+    "satire": [
+      "deepfake",
+      "political_satire"
+    ],
+    "topics": [],
+    "overlay": [
+      "deepfake jokowi prabowo kiss"
+    ],
+    "conf": 0.88,
+    "latency_ms": 815.94
+  },
+  {
+    "file": "07_jokowi_rakyat_anjing.png",
+    "meme_ok": true,
+    "fig_ok": true,
+    "figures": [
+      "jokowi"
+    ],
+    "satire": [
+      "political_satire"
+    ],
+    "topics": [],
+    "overlay": [
+      "rakyat anjing"
+    ],
+    "conf": 0.93,
+    "latency_ms": 718.93
+  },
+  {
+    "file": "08_jokowi_ngocok_meme.png",
+    "meme_ok": true,
+    "fig_ok": true,
+    "figures": [
+      "jokowi"
+    ],
+    "satire": [
+      "political_satire"
+    ],
+    "topics": [
+      "jakarta"
+    ],
+    "overlay": [
+      "gubernur dki jakarta",
+      "ngocok"
+    ],
+    "conf": 0.88,
+    "latency_ms": 2184.89
+  },
+  {
+    "file": "09_jokowi_uu_speech_bubble.png",
+    "meme_ok": true,
+    "fig_ok": true,
+    "figures": [
+      "jokowi"
+    ],
+    "satire": [
+      "political_satire"
+    ],
+    "topics": [],
+    "overlay": [
+      "saya tidak tanda tangan uu"
+    ],
+    "conf": 0.93,
+    "latency_ms": 1407.61
+  }
+]
