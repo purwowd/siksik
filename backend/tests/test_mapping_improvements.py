@@ -6,7 +6,11 @@ from app.acquisition.contact_identity import (
     cluster_contact_ids,
     contact_cluster_keys,
 )
-from app.acquisition.device_identity import hints_from_document, merge_device_identity_hints
+from app.acquisition.device_identity import (
+    device_owner_name,
+    hints_from_document,
+    merge_device_identity_hints,
+)
 from app.services.acquisition import is_agent_self_capture
 from app.services.gallery import is_gallery_media
 from app.services.reports import report_to_html
@@ -66,6 +70,29 @@ def test_cv_document_hints_name_phone_org() -> None:
     assert hint["organization"] == "PT Casuarina Harnessindo Pemalang"
     merged = merge_device_identity_hints([hint])
     assert merged["names"] == ["Nella Rachmawati"]
+    assert device_owner_name(merged, operator_name="Nella 02") == "Nella Rachmawati"
+
+
+def test_article_pdf_is_not_a_device_name() -> None:
+    hint = hints_from_document(
+        display_name="303-Article Text-2584-1-10-20240602.pdf",
+        normalized_text="PAK WOWo SUB AKIO\nJurnal sawit dan kebijakan publik.",
+    )
+    assert hint.get("names") in (None, [])
+    merged = merge_device_identity_hints(
+        [
+            {
+                "kind": "document",
+                "label": "303-Article Text-2584-1-10-20240602.pdf",
+                "names": ["PAK WOWo SUB AKIO"],
+                "emails": [],
+                "phones": [],
+                "organization": None,
+                "nik": None,
+            }
+        ]
+    )
+    assert device_owner_name(merged, operator_name="test-poc telor asin8") is None
 
 
 def test_agent_self_capture_is_hidden_from_gallery() -> None:
@@ -130,7 +157,50 @@ def test_report_html_shows_device_name_hint() -> None:
     )
     assert "Nama di perangkat" in html
     assert "Nella Rachmawati" in html
+    assert "CV NELLA RACHMAWATI (1).pdf" not in html
     assert "PT Casuarina Harnessindo (dari dokumen)" in html
     assert "900 unik · 1286 rekam" in html
     assert "116 masuk · 0 terkirim" in html
     assert "25 pratinjau cache" in html
+
+
+def test_report_html_omits_whatsapp_ui_attempt() -> None:
+    html = report_to_html(
+        {
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "session": {
+                "id": "sess-wa",
+                "label": "WA uji",
+                "device_id": "dev",
+                "device_type": "android",
+                "mode": "quick",
+                "acquisition_method": "android_agent_direct_manifest",
+                "recommendation": "LULUS",
+                "participant": {
+                    "full_name": "Uji WA",
+                    "registration_no": "ASN-2026-001",
+                    "nik": None,
+                    "organization": None,
+                },
+            },
+            "device_identity": {"names": [], "sources": []},
+            "metrics": {
+                "files": 1,
+                "bytes": 10,
+                "findings": 0,
+                "timing": {},
+                "progress": {
+                    "whatsapp_state": "not_signed_in",
+                    "whatsapp_messages": 0,
+                    "whatsapp_conversations": 0,
+                    "whatsapp_ui_attempt": 1,
+                    "whatsapp_ui_attempts": 4,
+                },
+            },
+            "breakdown": {"by_category": {}, "by_source": {}},
+            "findings": [],
+        }
+    )
+    assert "WhatsApp: 0 pesan · 0 percakapan · belum login nomor" in html
+    assert "UI 1/4" not in html
+    assert "UI 0/4" not in html

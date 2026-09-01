@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from app.acquisition.device_identity import (
+    device_owner_name,
     hints_from_document,
     merge_device_identity_hints,
 )
@@ -1953,8 +1954,6 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
             "<li>WhatsApp: "
             f"{_esc(progress.get('whatsapp_messages', 0))} pesan · "
             f"{_esc(progress.get('whatsapp_conversations', 0))} percakapan · "
-            f"UI {_esc(progress.get('whatsapp_ui_attempt', 0))}/"
-            f"{_esc(progress.get('whatsapp_ui_attempts', 4))} · "
             f"{_esc(whatsapp_state_labels.get(state, state))}</li>"
         )
 
@@ -1995,23 +1994,12 @@ def report_to_html(report: dict, *, print_mode: bool = False) -> str:
             else {}
         )
         operator_name = str(participant.get("full_name") or "").strip()
-        device_names = [
-            str(name)
-            for name in (device_identity.get("names") or [])
-            if str(name).strip()
-            and str(name).casefold() != operator_name.casefold()
-        ]
+        owner_name = device_owner_name(device_identity, operator_name=operator_name)
         device_name_row = ""
-        if device_names:
-            source_label = ""
-            sources = device_identity.get("sources") or []
-            if sources and isinstance(sources[0], dict):
-                source_label = str(sources[0].get("label") or "")
+        if owner_name:
             device_name_row = (
                 "<div><span>Nama di perangkat</span>"
-                f"<strong>{_esc(device_names[0])}"
-                f"{(' · ' + _esc(source_label)) if source_label else ''}"
-                "</strong></div>"
+                f"<strong>{_esc(owner_name)}</strong></div>"
             )
         if nik_val == "—" and device_identity.get("nik_candidates"):
             nik_val = (

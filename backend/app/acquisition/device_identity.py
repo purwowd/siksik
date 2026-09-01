@@ -10,6 +10,10 @@ from app.acquisition.contact_identity import canonical_email, canonical_phone
 _CV_FILENAME = re.compile(
     r"(?i)^(?:cv|curriculum\s*vitae|resume|riwayat\s*hidup)[\s._-]+(.+)$"
 )
+_IDENTITY_STEM = re.compile(
+    r"(?i)^(?:cv|curriculum\s*vitae|resume|riwayat\s*hidup|ktp|e-?ktp)"
+    r"(?:[\s._-].+)?$"
+)
 _COPY_SUFFIX = re.compile(r"\s*\(\d+\)\s*$")
 _FILE_EXT = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
@@ -20,6 +24,20 @@ _ORG = re.compile(
     r"(?i)\b(?:di|at|pada)\s+((?:PT|CV|UD|Yayasan)\.?(?-i:(?:\s+[A-Z][A-Za-z0-9.&']+){1,5}))"
 )
 _PERSON_NAME = re.compile(r"^[A-Za-z][A-Za-z .']{2,60}$")
+
+
+def is_identity_document_label(label: str | None) -> bool:
+    stem = _FILE_EXT.sub("", (label or "").strip())
+    stem = _COPY_SUFFIX.sub("", stem).strip(" ._")
+    return bool(stem and _IDENTITY_STEM.match(stem))
+
+
+def looks_like_filename(value: str | None) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return False
+    name = text.replace("\\", "/").rsplit("/", 1)[-1]
+    return bool(_FILE_EXT.search(name))
 
 
 def _clean_filename_name(raw: str) -> str | None:
@@ -52,6 +70,7 @@ def hints_from_document(
     normalized_text: str | None = None,
 ) -> dict[str, Any]:
     names: list[str] = []
+    identity_doc = is_identity_document_label(display_name)
     from_file = _clean_filename_name(display_name or "")
     if from_file:
         names.append(from_file)
@@ -61,10 +80,11 @@ def hints_from_document(
     orgs = []
     nik = None
     if text.strip():
-        first = text.strip().splitlines()[0] if text.strip() else ""
-        from_text = _person_from_text_line(first)
-        if from_text and from_text.casefold() not in {item.casefold() for item in names}:
-            names.append(from_text)
+        if identity_doc:
+            first = text.strip().splitlines()[0]
+            from_text = _person_from_text_line(first)
+            if from_text and from_text.casefold() not in {item.casefold() for item in names}:
+                names.append(from_text)
         labeled = _NIK_LABELED.search(text)
         if labeled:
             nik = labeled.group(1)
@@ -134,3 +154,31 @@ def merge_device_identity_hints(items: Iterable[Mapping[str, Any]]) -> dict[str,
         "nik_candidates": niks,
         "sources": sources,
     }
+
+
+def device_owner_name(
+    identity: Mapping[str, Any] | None,
+    *,
+    operator_name: str = "",
+) -> str | None:
+    """Person name found on the device — never a document filename."""
+    if not isinstance(identity, Mapping):
+        return None
+    operator_key = operator_name.strip().casefold()
+    sources = identity.get("sources") or []
+    source_by_name: dict[str, Mapping[str, Any]] = {}
+    for item in sources:
+        if isinstance(item, Mapping) and item.get("name"):
+            source_by_name[str(item["name"]).casefold()] = item
+    for name in identity.get("names") or []:
+        text = str(name).strip()
+        if not text or looks_like_filename(text):
+            continue
+        if operator_key and text.casefold() == operator_key:
+            continue
+        source = source_by_name.get(text.casefold()) or {}
+        label = str(source.get("label") or "")
+        if looks_like_filename(label) and not is_identity_document_label(label):
+            continue
+        return text
+    return None
