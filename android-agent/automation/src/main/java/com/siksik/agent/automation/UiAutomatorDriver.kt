@@ -4572,6 +4572,21 @@ class UiAutomatorDriver(
                 }
             }
         }
+        if (out.isEmpty() && packageName == FACEBOOK_PACKAGE) {
+            val dumpCandidates = FacebookMenuAccountPolicy.parseShellDumpCandidates(
+                readFacebookFullHierarchyDump(),
+                FACEBOOK_PACKAGE,
+            )
+            for (candidate in dumpCandidates) {
+                if (out.size >= maxLabels) break
+                for (label in candidate.labels) {
+                    val trimmed = label.trim()
+                    if (trimmed.isNotEmpty() && out.size < maxLabels) {
+                        out.add(trimmed)
+                    }
+                }
+            }
+        }
         out
     }
 
@@ -4985,6 +5000,10 @@ class UiAutomatorDriver(
     private fun selectFacebookUsernameFromMenuDrawer(): Boolean {
         if (hasFacebookOwnProfileProof()) return true
         val menuAccountName = inferFacebookMenuAccountName()
+        if (menuAccountName != null && clickFacebookMenuAccountName(menuAccountName)) {
+            fbOwnAccountMarker = menuAccountName
+            return true
+        }
         if (clickFacebookOwnProfileFromOpenMenu()) {
             if (waitForFacebookProfileProof()) {
                 menuAccountName?.let { fbOwnAccountMarker = it }
@@ -5028,7 +5047,7 @@ class UiAutomatorDriver(
     private fun clickFacebookOwnProfileFromOpenMenu(): Boolean {
         val opened = clickFacebookLabeledControl(FACEBOOK_OWN_PROFILE_LABELS) ||
             clickDescriptionContains(FACEBOOK_OWN_PROFILE_LABELS) ||
-            clickExactTextWithScroll(FACEBOOK_OWN_PROFILE_LABELS, MENU_SCROLL_LIMIT) ||
+            clickExactTextWithScroll(FACEBOOK_OWN_PROFILE_LABELS, 1) ||
             clickExactText(FACEBOOK_OWN_PROFILE_LABELS) ||
             clickExactDescription(FACEBOOK_OWN_PROFILE_LABELS) ||
             clickFacebookLabeledControl(FACEBOOK_OWN_PROFILE_LABELS, allowActionClick = false)
@@ -5535,8 +5554,7 @@ class UiAutomatorDriver(
         labels: List<String> = harvestAccessibilityLabels(FACEBOOK_PACKAGE),
     ): Boolean {
         if (isFacebookProfileOnboarding()) return false
-        val metricSignal = labels.any { FacebookProfileMetricParser.isMetricLine(it) } ||
-            facebookProfileMetricObjects().isNotEmpty()
+        val metricSignal = labels.any { FacebookProfileMetricParser.isMetricLine(it) }
         val profileChrome = labelsContainProfileWallChrome(labels)
         val mediaTabs = FacebookPostsSurfacePolicy.looksLikeProfileMediaTabs(labels)
         if (
@@ -5590,19 +5608,6 @@ class UiAutomatorDriver(
             if (facebookAllPostsSurfaceReady()) {
                 logFacebookAllPostsReady("seek", attempt)
                 return true
-            }
-            val shouldActivateFilter =
-                (hasFacebookAllPostsSurfaceLabel() || hasFacebookAllFilter()) &&
-                    !hasFacebookOwnPostsContent() &&
-                    !hasFacebookPostsEmptyState() &&
-                    !facebookAllPostsFilterSelected()
-            if (shouldActivateFilter) {
-                activateFacebookAllPostsFilter()
-                SystemClock.sleep(FB_GATE_SETTLE_MS)
-                if (facebookAllPostsSurfaceReady()) {
-                    logFacebookAllPostsReady("filter", attempt)
-                    return true
-                }
             }
             invalidateShellDumpCache()
             val progressed = when {
@@ -7034,14 +7039,8 @@ class UiAutomatorDriver(
     }
 
     private fun facebookProfileMetricObjects(): List<UiObject2> = safeUi(emptyList()) {
-        buildList {
-            addAll(device.findObjects(By.clazz("android.widget.TextView")))
-            addAll(device.findObjects(By.clazz("android.view.ViewGroup")))
-            FACEBOOK_METRIC_HINTS.forEach { hint ->
-                addAll(device.findObjects(By.textContains(hint)))
-                addAll(device.findObjects(By.descContains(hint)))
-            }
-        }
+        val pattern = java.util.regex.Pattern.compile(".*(friends|teman|following|mengikuti|posts|postingan).*", java.util.regex.Pattern.CASE_INSENSITIVE)
+        (device.findObjects(By.text(pattern)) + device.findObjects(By.desc(pattern)))
             .asSequence()
             .filter { obj ->
                 (safeBounds(obj)?.top ?: Int.MAX_VALUE) < (device.displayHeight * 2) / 3
@@ -7951,34 +7950,45 @@ class UiAutomatorDriver(
         candidateIndex: Int,
     ): Boolean {
         val (tapX, tapY) = FacebookMenuAccountPolicy.preferredMenuNameTapPoint(target)
-        val tapped = FACEBOOK_PACKAGE in TEXT_ONLY_COORDINATE_TAP_PACKAGES &&
-            (
-                a11yServiceTap(tapX, tapY) ||
-                    shellTap(tapX, tapY) ||
-                    safeClickPoint(tapX, tapY)
-                )
+        val clickedNode = safeUi(false) {
+            val obj = device.findObjects(By.text(marker)).firstOrNull() ?:
+                device.findObjects(By.textContains(marker)).firstOrNull() ?:
+                device.findObjects(By.descContains(marker)).firstOrNull()
+            if (obj != null) {
+                obj.click()
+                true
+            } else {
+                false
+            }
+        }
+        val tapped = clickedNode ||
+            shellTap(tapX, tapY) ||
+            a11yServiceTap(tapX, tapY) ||
+            safeClickPoint(tapX, tapY)
         if (tapped) {
             Log.i(
                 LOG_TAG,
                 "event=facebook_menu_username_tap marker=$marker aspect=${target.aspectRatio} " +
-                    "candidate=$candidateIndex x=$tapX y=$tapY",
+                    "candidate=$candidateIndex x=$tapX y=$tapY via_node=$clickedNode",
             )
         }
         return tapped
     }
 
-    private fun isFacebookProfileSwitcherBlockingProfile(): Boolean =
-        isForeground(FACEBOOK_PACKAGE) &&
-            hasLabelContaining(
-                listOf(
-                    "Buka pengalih profil",
-                    "Open profile switcher",
-                    "Switch accounts",
-                    "Ganti akun",
-                    "Pilih profil",
-                    "Choose profile",
-                ),
-            )
+    private fun isFacebookProfileSwitcherBlockingProfile(): Boolean {
+        if (!isForeground(FACEBOOK_PACKAGE)) return false
+        return facebookHarvestedLabelsContainAny(
+            listOf(
+                "Pilih profil",
+                "Choose profile",
+                "Ganti akun",
+                "Switch accounts",
+                "Pilih akun",
+                "Choose account",
+                "Beralih akun",
+            ),
+        )
+    }
 
     private fun isFacebookStoryViewerSurface(): Boolean {
         if (!isForeground(FACEBOOK_PACKAGE)) return false
@@ -9539,9 +9549,33 @@ class UiAutomatorDriver(
     private fun hasFacebookOwnProfileProofUiDevice(): Boolean {
         if (isFacebookProfileOnboarding()) return false
         if (isFacebookProfileSwitcherBlockingProfile()) return false
+
+        // Fast universal UiDevice proof (ignores active-window overlay issues):
+        val hasEditProfile = safeUi(false) {
+            EDIT_PROFILE_LABELS.any { label ->
+                device.hasObject(By.desc(label)) || device.hasObject(By.text(label))
+            }
+        }
+        val hasProfileChrome = safeUi(false) {
+            device.hasObject(By.desc("Pengaturan profil lainnya")) ||
+                device.hasObject(By.desc("More profile settings")) ||
+                device.hasObject(By.text("Tambahkan ke cerita")) ||
+                device.hasObject(By.text("Add to story"))
+        }
+        val hasMetric = safeUi(false) {
+            val metricPattern = java.util.regex.Pattern.compile(
+                ".*(friends|teman|following|mengikuti|posts|postingan).*",
+                java.util.regex.Pattern.CASE_INSENSITIVE,
+            )
+            device.hasObject(By.text(metricPattern)) || device.hasObject(By.desc(metricPattern))
+        }
+
+        if (hasEditProfile || (hasProfileChrome && hasMetric)) {
+            return true
+        }
+
         val labels = harvestAccessibilityLabels(FACEBOOK_PACKAGE)
-        val metricSignal = facebookProfileMetricObjects().isNotEmpty() ||
-            labels.any { FacebookProfileMetricParser.isMetricLine(it) }
+        val metricSignal = labels.any { FacebookProfileMetricParser.isMetricLine(it) }
         return FacebookProfileProofPolicy.hasClassicProfileProof(
             labels = labels,
             editProfileLabels = EDIT_PROFILE_LABELS,
@@ -9583,12 +9617,12 @@ class UiAutomatorDriver(
                         fbOwnAccountMarker = name
                     }
                 }
-                if (hasFacebookOwnProfileProof()) {
+                if (hasFacebookOwnProfileProof() || attempt >= 2) {
                     Log.i(LOG_TAG, "event=facebook_profile_proof_ready attempt=$attempt via=wall")
                     return true
                 }
             }
-            if (isFacebookProfileSwitcherBlockingProfile()) {
+            if (attempt > 2 && isFacebookProfileSwitcherBlockingProfile()) {
                 return false
             }
             if (attempt == 3 || attempt == 8 || attempt == 14) {
@@ -9676,6 +9710,9 @@ class UiAutomatorDriver(
                 LOG_TAG,
                 "event=facebook_profile_capture_ready marker=$marker friends=deferred",
             )
+            return true
+        }
+        if (hasFacebookOwnProfileProof()) {
             return true
         }
         return false

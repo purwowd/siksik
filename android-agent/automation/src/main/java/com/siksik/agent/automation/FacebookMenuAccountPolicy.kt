@@ -236,9 +236,11 @@ internal object FacebookMenuAccountPolicy {
     fun isMenuNameTapRejected(candidate: LabeledBounds): Boolean {
         if (candidate.className.contains("ImageView", ignoreCase = true)) return true
         if (candidate.aspectRatio < MIN_TEXT_ASPECT_RATIO) return true
+        if (candidate.top > 600) return true
         if (candidate.labels.any { isStoryOrShortcutChrome(it) }) return true
         if (candidate.labels.any { isMenuDrawerListItem(it) }) return true
         val joined = candidate.labels.joinToString(" ").lowercase(Locale.ROOT)
+        if (joined.contains("postingan") || joined.contains("shared") || joined.contains("dibagikan")) return true
         if (menuNameRejectPhrases.any { phrase -> joined.contains(phrase) }) return true
         if (
             candidate.labels.any { label ->
