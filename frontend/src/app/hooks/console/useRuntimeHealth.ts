@@ -13,8 +13,8 @@ export function useRuntimeHealth(_auth: AuthSession | null, setAuth: (a: AuthSes
   const [zipMaxMb, setZipMaxMb] = useState(512);
   const [zipEnabled, setZipEnabled] = useState(true);
 
-  const refreshDevices = useCallback(async () => {
-    const [h, d] = await Promise.all([api.health(), api.devices()]);
+  const refreshDevices = useCallback(async (opts?: { reattachUsb?: boolean }) => {
+    const [h, d] = await Promise.all([api.health(), api.devices(opts)]);
     setGpu(h.gpu_available);
     setToolchain(h.extras?.toolchain || {});
     setVision(h.extras?.vision || {});

@@ -110,6 +110,15 @@ _IN_FLIGHT_STATUSES = (
 )
 
 
+def _live_ios_request(req: StartSessionRequest) -> bool:
+    device_id = req.device_id or ""
+    return (
+        req.device_type == DeviceType.IOS
+        and not req.force_simulated
+        and not device_id.startswith("sim-")
+    )
+
+
 class SessionManager:
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task] = {}
@@ -528,6 +537,7 @@ class SessionManager:
         wall0 = time.perf_counter()
         plan = req.analysis_plan()
         uses_android_agent = False
+        ios_restore_usb = req.device_type == DeviceType.IOS
         live_analysis_ms = 0.0
         try:
 
@@ -541,8 +551,25 @@ class SessionManager:
                 await self._update(session_id, status=phase, percent=percent, message=message, **kw)
 
             t0 = time.perf_counter()
+            live_ios = _live_ios_request(req)
+            if live_ios:
+                await on_progress(
+                    SessionStatus.DETECTING,
+                    3,
+                    "Memastikan iPhone USB di WSL…",
+                )
+                await acq.ensure_iphone_on_wsl(force=True, reattach=True)
+                await on_progress(
+                    SessionStatus.DETECTING,
+                    3,
+                    "Memeriksa lockdownd iPhone…",
+                )
+                await acq.ensure_iphone_lockdown(udid=req.device_id)
             await on_progress(SessionStatus.DETECTING, 3, "Mendeteksi perangkat…")
-            devices = await acq.detect_devices(include_simulators=settings.lab_demo_mode)
+            devices = await acq.detect_devices(
+                include_simulators=settings.lab_demo_mode,
+                reattach_usb=live_ios,
+            )
             t_detect = (time.perf_counter() - t0) * 1000
             await self._update(session_id, timing_patch={"t_detect_ms": round(t_detect, 1)})
 
@@ -561,6 +588,7 @@ class SessionManager:
                 and device_type == DeviceType.ANDROID
                 and not simulated
             )
+            ios_restore_usb = device_type == DeviceType.IOS and not simulated
 
             staging, pulled, t_acq, method = await acq.acquire_dispatch(
                 session_id=session_id,
@@ -650,6 +678,8 @@ class SessionManager:
                 from app.acquisition.bootstrap import agent_bootstrap
 
                 await agent_bootstrap.teardown(session_id, current_request_id())
+            if ios_restore_usb:
+                await acq.ensure_iphone_on_wsl(force=True)
             self._active_device = None
             self._tasks.pop(session_id, None)
 

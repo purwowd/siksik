@@ -1,4 +1,4 @@
-import type { IosSetupStatus } from "@/features/operator/iosSetupReady";
+import { iosSetupStartLabel, type IosSetupStatus } from "@/features/operator/iosSetupReady";
 
 type Props = {
   status: IosSetupStatus | null;
@@ -22,18 +22,18 @@ function stepClass(done: boolean, current: boolean): string {
 
 export function IosSetupPanel(p: Props) {
   const state = p.status?.state;
-  const paired = !!p.status?.paired && state !== "usb_unpaired" && state !== "awaiting_usb_trust";
   const waitingCode = state === "awaiting_apple_id_code";
   const waitingTrust = state === "awaiting_developer_trust";
   const installing = state === "installing_wda";
   const failedInstall =
-    state === "failed" && /ipa|wda|install|altserver/i.test(p.status?.message || "");
-  const needsStart =
+    state === "failed" && /ipa|wda|install|altserver|windows/i.test(p.status?.message || "");
+  const missingWda =
     !state ||
-    state === "usb_unpaired" ||
     state === "needs_wda" ||
-    state === "developer_mode_off" ||
-    state === "failed";
+    state === "usb_unpaired" ||
+    state === "awaiting_usb_trust" ||
+    state === "developer_mode_off";
+  const needsStart = missingWda || state === "failed";
   const ready = state === "ready";
   const hint = p.status?.apple_id_hint;
 
@@ -42,42 +42,26 @@ export function IosSetupPanel(p: Props) {
       <p id="ios-setup-heading" className="field-group-title">
         Siapkan iPhone
       </p>
-      <ol className="ent-intake-steps ios-setup-steps" aria-label="Langkah siapkan iPhone">
-        <li className={stepClass(paired || ready, state === "usb_unpaired" || state === "awaiting_usb_trust")}>
-          <span>1</span> USB Trust
-        </li>
-        <li
-          className={stepClass(
-            state === "ready" ||
-              state === "needs_wda" ||
-              state === "installing_wda" ||
-              waitingCode ||
-              waitingTrust,
-            state === "developer_mode_off",
-          )}
-        >
-          <span>2</span> Developer Mode
-        </li>
-        {p.showWdaSteps && (
-          <>
-            <li className={stepClass(!!p.status?.wda_installed || ready, waitingCode || installing || failedInstall)}>
-              <span>3</span> Pasang WDA
-            </li>
-            <li className={stepClass(ready, waitingTrust)}>
-              <span>4</span> Trust profil
-            </li>
-          </>
-        )}
-      </ol>
-      <p className="ios-setup-copy">
-        {p.status?.message ||
-          "Colok USB, unlock iPhone, ketuk Trust This Computer, lalu pastikan Developer Mode ON."}
-      </p>
-      {state === "developer_mode_off" && (
-        <p className="field-note">
-          Settings → Privacy &amp; Security → Developer Mode → ON. Restart jika diminta, lalu siapkan lagi.
-        </p>
+      {p.showWdaSteps ? (
+        <ol className="ent-intake-steps ios-setup-steps" aria-label="Langkah siapkan iPhone">
+          <li
+            className={stepClass(
+              !!p.status?.wda_installed || ready,
+              missingWda || waitingCode || installing || failedInstall,
+            )}
+          >
+            <span>1</span> Pasang WDA
+          </li>
+          <li className={stepClass(ready, waitingTrust)}>
+            <span>2</span> Trust profil
+          </li>
+        </ol>
+      ) : (
+        <p className="field-note">Cakupan HP saja tidak memasang WebDriverAgent.</p>
       )}
+      <p className="ios-setup-copy">
+        {p.status?.message || "iPhone terbaca. Cek WebDriverAgent — ketuk Pasang WDA jika belum ada."}
+      </p>
       {p.showWdaSteps && waitingCode && (
         <div className="field">
           <label htmlFor="ios-wda-code">Kode 6 digit di layar iPhone</label>
@@ -109,9 +93,14 @@ export function IosSetupPanel(p: Props) {
         </p>
       )}
       <div className="actions field-actions">
-        {needsStart && (
-          <button className="btn btn-ghost" type="button" onClick={p.onStart} disabled={p.disabled || p.busy}>
-            {p.busy ? "Menyiapkan…" : "Siapkan iPhone"}
+        {p.showWdaSteps && needsStart && (
+          <button
+            className="btn btn-primary"
+            type="button"
+            onClick={p.onStart}
+            disabled={p.disabled || p.busy}
+          >
+            {p.busy ? "Memasang…" : iosSetupStartLabel(state)}
           </button>
         )}
         {waitingCode && (
@@ -129,16 +118,18 @@ export function IosSetupPanel(p: Props) {
             {p.busy ? "Memeriksa…" : "Sudah di-Trust, periksa lagi"}
           </button>
         )}
-        {(installing || waitingCode || state === "awaiting_usb_trust") && (
+        {(installing || waitingCode) && (
           <button className="btn btn-ghost" type="button" onClick={p.onCancel} disabled={p.disabled || p.busy}>
-            Batalkan siapkan
+            Batalkan
+          </button>
+        )}
+        {ready && (
+          <button className="btn btn-ghost" type="button" onClick={p.onStart} disabled={p.disabled || p.busy}>
+            {p.busy ? "Memasang…" : "Pasang ulang WDA"}
           </button>
         )}
       </div>
       {ready && <p className="field-note">iPhone siap. Tombol akuisisi dapat diklik.</p>}
-      {!p.showWdaSteps && paired && (
-        <p className="field-note">Cakupan HP saja tidak memasang WebDriverAgent.</p>
-      )}
     </div>
   );
 }

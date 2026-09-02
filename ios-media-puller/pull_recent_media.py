@@ -224,6 +224,8 @@ async def run(args: argparse.Namespace) -> int:
         logger.error("Jalankan: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt")
         return 2
 
+    from wsl_usbmux import lockdown_usbmux_kwargs
+
     if args.count < 0:
         logger.error("--count harus >= 0 (0 = semua)")
         return 2
@@ -248,7 +250,10 @@ async def run(args: argparse.Namespace) -> int:
 
     t0 = time.time()
     try:
-        lockdown = await create_using_usbmux(serial=os.environ.get("UDID") or None)
+        lockdown = await create_using_usbmux(
+            serial=os.environ.get("UDID") or None,
+            **lockdown_usbmux_kwargs(),
+        )
     except Exception as exc:
         logger.error("Tidak bisa konek ke device: %s", type(exc).__name__)
         logger.error("Pastikan: USB terhubung, Trust OK, device unlocked.")

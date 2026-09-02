@@ -71,10 +71,32 @@ if ! command -v idevice_id >/dev/null 2>&1; then
   exit 2
 fi
 
+# shellcheck source=ios_usb.sh
+source "$REPO_ROOT/ios_automator/scripts/ios_usb.sh"
+
+ios_usb_kill_stale
+
 UDID="${UDID:-$(idevice_id -l | head -1)}"
 if [[ -z "$UDID" ]]; then
   echo "Tidak ada device. Colok USB, unlock, Trust, lalu cek: idevice_id -l"
   exit 2
+fi
+
+if ios_usb_wsl_direct && [[ "${IOS_ALLOW_WSL_USBMUX_IPA:-0}" != "1" ]]; then
+  ios_usb_print_wsl_ipa_block
+  exit 5
+fi
+
+if ! ios_usb_lockdown_ok "$UDID"; then
+  if ios_usb_windows_mux; then
+    echo "[install] lockdownd belum siap lewat mux Windows — pair / Trust, jangan attach ke WSL." >&2
+  else
+    echo "[install] lockdownd macet — pulihkan USB sebelum AltServer." >&2
+    if ! ios_usb_recover "$UDID"; then
+      echo "[install] USB belum sehat. Jangan tulis IPA sampai ideviceinfo berhasil." >&2
+      exit 6
+    fi
+  fi
 fi
 
 # AltServer ldid crash kalau IPA masih berisi *.dSYM — strip otomatis
@@ -114,19 +136,47 @@ run_altserver_sign() {
   echo "════════════════════════════════════════════════════════════════"
   echo
 
+  local log rc
+  log="$(mktemp /tmp/altserver-wda.XXXXXX.log)"
+  rc=0
+  set +e
   if [[ "${IOS_ALTSERVER_STDIN_PIPE:-0}" == "1" ]]; then
-    "$AS" -u "$UDID" -a "$APPLE_ID" -p "$APPLE_ID_PASSWORD" "$work_ipa"
+    "$AS" -u "$UDID" -a "$APPLE_ID" -p "$APPLE_ID_PASSWORD" "$work_ipa" 2>&1 | tee "$log"
+    rc=${PIPESTATUS[0]}
   elif [[ -t 0 ]]; then
-    "$AS" -u "$UDID" -a "$APPLE_ID" -p "$APPLE_ID_PASSWORD" "$work_ipa"
+    "$AS" -u "$UDID" -a "$APPLE_ID" -p "$APPLE_ID_PASSWORD" "$work_ipa" 2>&1 | tee "$log"
+    rc=${PIPESTATUS[0]}
   elif [[ -r /dev/tty ]]; then
     # Pipeline/background: paksa stdin+stdout ke terminal asli
-    "$AS" -u "$UDID" -a "$APPLE_ID" -p "$APPLE_ID_PASSWORD" "$work_ipa" < /dev/tty > /dev/tty 2>&1
+    "$AS" -u "$UDID" -a "$APPLE_ID" -p "$APPLE_ID_PASSWORD" "$work_ipa" < /dev/tty > /dev/tty 2>&1 | tee "$log"
+    rc=${PIPESTATUS[0]}
   else
     echo "[install] ERROR: butuh SATRIA Siapkan iPhone (kode 6 digit) atau terminal interaktif." >&2
     echo "[install] Jalankan dari UI operator, atau:" >&2
     echo "  bash $REPO_ROOT/ios_automator/scripts/install_wda_altserver.sh" >&2
     exit 3
   fi
+  set -e
+
+  if grep -qiE 'Failed to write|Could not install|Incorrect verification|has been locked|Error: com\.rileytestut\.AltServer' "$log"; then
+    echo "[install] GAGAL memasang WDA (AltServer error). IPA tidak ada di iPhone." >&2
+    if grep -qiE 'Failed to write app data|error connecting to the device' "$log"; then
+      echo "[install] Gagal di salin USB, bukan Apple ID. lockdownd biasanya sudah macet." >&2
+      if ios_usb_mux_overflow; then
+        echo "[install] usbmuxd: paket 65536 — path WSL usbipd tidak bisa install IPA." >&2
+        ios_usb_print_wsl_ipa_block
+      fi
+      ios_usb_recover "$UDID" || true
+    fi
+    rm -f "$log"
+    exit 4
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    echo "[install] AltServer exit $rc" >&2
+    rm -f "$log"
+    exit "$rc"
+  fi
+  rm -f "$log"
 }
 
 echo
@@ -136,8 +186,32 @@ echo
 
 run_altserver_sign
 
+if command -v ideviceinstaller >/dev/null 2>&1; then
+  set +e
+  ios_usb_wda_status "$UDID"
+  wda_st=$?
+  set -e
+  if [[ "$wda_st" -eq 3 ]]; then
+    echo "[install] AltServer selesai, tapi lockdownd macet — bukan bukti WDA absen." >&2
+    ios_usb_recover "$UDID" || true
+    set +e
+    ios_usb_wda_status "$UDID"
+    wda_st=$?
+    set -e
+  fi
+  if [[ "$wda_st" -eq 3 ]]; then
+    echo "[install] USB masih macet. Pulihkan, lalu: ideviceinstaller -l" >&2
+    echo "  bash $REPO_ROOT/ios_automator/scripts/recover_ios_lockdown.sh" >&2
+    exit 6
+  fi
+  if [[ "$wda_st" -eq 1 ]]; then
+    echo "[install] GAGAL: AltServer selesai tanpa error teks, tapi WDA tidak ada di device." >&2
+    exit 4
+  fi
+fi
+
 echo
-echo "[install] Installation selesai."
+echo "[install] Installation selesai — WDA terdeteksi di iPhone."
 echo "[install] Di iPhone (wajib sekali jika belum):"
 echo "  Settings → General → VPN & Device Management → Trust Apple ID kamu"
 echo "  Developer Mode: di-enable otomatis oleh script (atau manual di Settings)"

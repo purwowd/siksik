@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -208,6 +209,27 @@ async def test_process_timeout_is_retryable() -> None:
         )
     assert captured.value.category == ErrorCategory.ADB_TIMEOUT
     assert captured.value.retryable is True
+
+
+@pytest.mark.unit
+async def test_process_abort_when_stops_hung_child(tmp_path: Path) -> None:
+    flag = tmp_path / "stop"
+
+    async def arm() -> None:
+        await asyncio.sleep(0.15)
+        flag.write_text("1", encoding="utf-8")
+
+    arm_task = asyncio.create_task(arm())
+    result = await run_process(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        timeout=5.0,
+        operation="abort_fixture",
+        abort_when=flag.is_file,
+        abort_poll_s=0.05,
+        abort_grace_s=0.05,
+    )
+    await arm_task
+    assert result.returncode != 0
 
 
 @pytest.mark.unit

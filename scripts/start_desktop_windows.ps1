@@ -127,38 +127,49 @@ function Test-WslApiReady {
   return $false
 }
 
+function Test-IsAdmin {
+  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $p = New-Object Security.Principal.WindowsPrincipal($id)
+  return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 function Test-PortproxyOnApiPort {
-  $show = & netsh.exe interface portproxy show v4tov4 2>$null | Out-String
+  $show = ((& netsh.exe interface portproxy show v4tov4 2>$null | Out-String) -replace "`0", "")
   return [bool]($show -match "(?m)^\s*0\.0\.0\.0\s+$ApiPort\b" -or $show -match "(?m)^\s*127\.0\.0\.1\s+$ApiPort\b")
 }
 
-function Clear-PortproxyBlackhole {
-  Write-Host "  UAC: hapus portproxy $ApiPort/5173 (menghalangi localhost WSL)"
-  $cmd = @(
-    "netsh interface portproxy delete v4tov4 listenport=$ApiPort listenaddress=0.0.0.0",
-    "netsh interface portproxy delete v4tov4 listenport=$ApiPort listenaddress=127.0.0.1",
-    "netsh interface portproxy delete v4tov4 listenport=5173 listenaddress=0.0.0.0",
-    "netsh interface portproxy delete v4tov4 listenport=5173 listenaddress=127.0.0.1"
-  ) -join "; "
-  $p = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList @(
-    "-NoProfile", "-Command", $cmd
-  )
-  return ($p.ExitCode -eq 0)
+function Clear-PortproxyBlackhole([string]$CleanerPath) {
+  if (-not (Test-PortproxyOnApiPort)) { return $true }
+  # Single string: Start-Process -Verb RunAs mishandles ArgumentList arrays with spaces.
+  $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$CleanerPath`""
+  try {
+    if (Test-IsAdmin) {
+      Write-Host "  hapus portproxy $ApiPort/5173 (admin)"
+      $p = Start-Process -FilePath "powershell.exe" -Wait -PassThru -ArgumentList $arg
+    } else {
+      Write-Host "  UAC: hapus portproxy $ApiPort/5173 (menghalangi localhost WSL). Izinkan sekali."
+      $p = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList $arg
+    }
+    if ($null -eq $p) { return -not (Test-PortproxyOnApiPort) }
+  } catch {
+    return -not (Test-PortproxyOnApiPort)
+  }
+  return -not (Test-PortproxyOnApiPort)
 }
 
 function Start-WslSatriaApi {
   Write-Step "Backend not ready - starting API in WSL (no WSL Vite)"
-  $script = @'
+  $script = @"
 set -e
-ROOT="$HOME/siksik"
-if [ ! -f "$ROOT/backend/app/main.py" ]; then ROOT="/home/me/siksik"; fi
-cd "$ROOT/backend"
+ROOT="`$HOME/siksik"
+if [ ! -f "`$ROOT/backend/app/main.py" ]; then ROOT="/home/me/siksik"; fi
+cd "`$ROOT/backend"
 if [ ! -f .venv/bin/activate ]; then echo NO_VENV; exit 2; fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
-nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 >/tmp/satria-api.log 2>&1 &
-echo STARTED:$!
-'@
+nohup uvicorn app.main:app --host 0.0.0.0 --port $ApiPort --workers 1 >/tmp/satria-api.log 2>&1 &
+echo STARTED:`$!
+"@
   foreach ($distro in (Get-WslDistroNames)) {
     try {
       Write-Host "  wsl -d $distro ..."
@@ -170,6 +181,43 @@ echo STARTED:$!
     } catch { continue }
   }
   return $false
+}
+
+function Stop-WslListenersOnApiPort {
+  $script = @"
+if command -v fuser >/dev/null 2>&1; then
+  fuser -k ${ApiPort}/tcp >/dev/null 2>&1 || true
+elif command -v lsof >/dev/null 2>&1; then
+  pids=`$(lsof -ti:${ApiPort} || true)
+  if [ -n "`$pids" ]; then kill -9 `$pids || true; fi
+fi
+"@
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    foreach ($distro in (Get-WslDistroNames)) {
+      & wsl.exe -d $distro -e bash -lc $script 2>$null | Out-Null
+    }
+  } catch { }
+  finally { $ErrorActionPreference = $prev }
+}
+
+function Wait-WslApiReady([int]$Seconds = 25) {
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  while ((Get-Date) -lt $deadline) {
+    if (Test-WslApiReady) { return $true }
+    Start-Sleep -Milliseconds 800
+  }
+  return $false
+}
+
+function Repair-WslLocalhostForwarding {
+  Write-Host "  restart API di WSL supaya Windows localhost forwarding menempel"
+  Stop-WslListenersOnApiPort
+  Start-Sleep -Seconds 4
+  if (Wait-WslApiReady -Seconds 25) { return $true }
+  [void](Start-WslSatriaApi)
+  return (Wait-WslApiReady -Seconds 25)
 }
 
 function Stop-PortListeners([int]$Port) {
@@ -197,6 +245,43 @@ function Ensure-CargoPath {
   }
   Write-Host ("  cargo  {0}" -f (& cargo -V))
   Write-Host ("  rustc  {0}" -f (& rustc -V))
+}
+
+function Get-SmartAppControlState {
+  try {
+    $item = Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy" `
+      -Name "VerifiedAndReputablePolicyState" -ErrorAction Stop
+    switch ([int]$item.VerifiedAndReputablePolicyState) {
+      0 { return "off" }
+      1 { return "on" }
+      2 { return "evaluation" }
+      default { return "unknown" }
+    }
+  } catch {
+    return "unknown"
+  }
+}
+
+function Initialize-SatriaCargoTarget {
+  # WDAC/AppLocker often blocks unsigned cargo output under C:\siksik\...\target.
+  # User LocalAppData is the usual allowed path for unsigned lab binaries.
+  $dir = Join-Path $env:LOCALAPPDATA "satria-cargo-target"
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  $env:CARGO_TARGET_DIR = $dir
+  Write-Host "  CARGO_TARGET_DIR  $dir"
+}
+
+function Write-AppControlHint {
+  Write-Host ""
+  Write-Host @"
+Windows memblokir satria-desktop.exe (os error 4551 / Application Control).
+Unsigned cargo debug build ditahan Smart App Control / WDAC.
+
+Matikan Smart App Control (lab), lalu buka SATRIA lagi:
+  Windows Security → App & browser control → Smart App Control → Off
+
+Jangan edit registry VerifiedAndReputablePolicyState (bisa mengunci OS).
+"@ -ForegroundColor Yellow
 }
 
 # CMD/npm/cargo need an NTFS tree. \\wsl$\ cannot be net-use'd (error 64).
@@ -340,38 +425,42 @@ Write-Host ("  npm   {0}" -f (& npm -v))
 
 Write-Step "Check Rust toolchain"
 Ensure-CargoPath
+Initialize-SatriaCargoTarget
+$sacState = Get-SmartAppControlState
+Write-Host "  Smart App Control  $sacState"
+if ($sacState -eq "on") {
+  Write-AppControlHint
+}
 
 Write-Step "Wait for backend $ReadyUrl"
 $wslReady = Test-WslApiReady
 if (-not (Test-ApiReady) -and $wslReady -and (Test-PortproxyOnApiPort)) {
   Write-Host "  API hidup di WSL, tapi Windows :$ApiPort kena portproxy (timeout)."
-  if (-not (Clear-PortproxyBlackhole)) {
+  $cleaner = Join-Path $RepoRoot "scripts\clear_wsl_portproxy.ps1"
+  if (-not (Test-Path -LiteralPath $cleaner)) {
+    Write-Fail "Missing $cleaner (rsync scripts/ from WSL failed)."
+    exit 1
+  }
+  if (-not (Clear-PortproxyBlackhole -CleanerPath $cleaner)) {
     Write-Fail @"
 Tolak UAC atau gagal hapus portproxy.
 
-Jalankan PowerShell Administrator:
+Jalankan PowerShell Administrator sekali:
+  powershell -NoProfile -ExecutionPolicy Bypass -File $cleaner
+
+Atau:
   netsh interface portproxy delete v4tov4 listenport=8000 listenaddress=0.0.0.0
   netsh interface portproxy delete v4tov4 listenport=5173 listenaddress=0.0.0.0
-
-Atau: scripts\expose_lan.ps1 (Run as administrator)
 "@
     exit 1
   }
-  Start-Sleep -Seconds 1
+  Write-Host "  portproxy $ApiPort/5173 dihapus (task logon SATRIA-ClearWslPortproxy terpasang)"
+  [void](Repair-WslLocalhostForwarding)
 }
 
-if (-not (Test-ApiReady) -and $wslReady) {
-  Write-Fail @"
-API sudah jalan di WSL, tapi Windows tidak menempel ke 127.0.0.1:$ApiPort
-(localhost forwarding belum bind — biasanya karena uvicorn start saat portproxy masih ada).
-
-Di terminal WSL: Ctrl+C, lalu jalankan ulang:
-  cd ~/siksik/backend && source .venv/bin/activate
-  uvicorn app.main:app --host 0.0.0.0 --port $ApiPort --workers 1
-
-Kemudian double-click SATRIA lagi. Jangan spawn uvicorn kedua.
-"@
-  exit 1
+if (-not (Test-ApiReady) -and (Test-WslApiReady)) {
+  Write-Host "  API WSL OK, Windows belum tembus 127.0.0.1:$ApiPort"
+  [void](Repair-WslLocalhostForwarding)
 }
 
 if (-not (Test-ApiReady) -and -not (Test-WslApiReady)) {
@@ -389,7 +478,8 @@ if (-not $apiOk) {
     $hint = @"
 
 API di WSL sudah OK; Windows tidak tembus 127.0.0.1:$ApiPort.
-Hapus portproxy (Administrator), jangan port-forward ke IP NAT WSL.
+Jangan portproxy ke IP NAT WSL. Izinkan UAC, atau:
+  powershell -NoProfile -ExecutionPolicy Bypass -File $RepoRoot\scripts\clear_wsl_portproxy.ps1
 "@
   }
   Write-Fail @"
@@ -452,6 +542,13 @@ try {
   Stop-PortListeners -Port ([int]$DesktopUiPort)
   Write-Host ""
   Write-Host "Tauri desktop stopped." -ForegroundColor DarkGray
+}
+
+if ($exitCode -ne 0) {
+  $sacNow = Get-SmartAppControlState
+  if ($sacNow -eq "on" -or $sacNow -eq "evaluation") {
+    Write-AppControlHint
+  }
 }
 
 exit $exitCode

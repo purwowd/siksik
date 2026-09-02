@@ -25,7 +25,7 @@ log_stack_event() {
 
 extract_wda_bundle() {
   local raw="$1"
-  grep -oE 'com\.facebook\.WebDriverAgentRunner[^[:space:]]+' <<<"$raw" | tail -1
+  grep -oE '([A-Za-z0-9-]+\.)+WebDriverAgentRunner(\.[A-Za-z0-9._-]+)*' <<<"$raw" | tail -1
 }
 
 puller_python() {
@@ -207,6 +207,14 @@ fi
 if [[ -z "$UDID" ]]; then
   echo "Device tidak terdeteksi. Colok USB, unlock, Trust: idevice_id -l" >&2
   exit 2
+fi
+
+if [[ "${IOS_FORCE_WDA_RESTART:-0}" != "1" ]] && wda_http_alive; then
+  echo "[stack] WDA HTTP sudah OK — skip pair/DDI (Automation Running)"
+  record_stack_udid
+  log_stack_event "WDA HTTP already ready on :${WDA_PORT}"
+  echo "[stack] ready"
+  exit 0
 fi
 
 reset_stale_stack

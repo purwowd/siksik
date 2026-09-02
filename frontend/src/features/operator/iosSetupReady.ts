@@ -41,6 +41,11 @@ export function iosAcquisitionReady(
   return false;
 }
 
+export function iosSetupStartLabel(state: IosSetupState | undefined): string {
+  if (state === "ready") return "Siapkan iPhone";
+  return "Pasang WDA";
+}
+
 export function iosSetupPanelVisible(
   deviceType: string | undefined,
   simulated: boolean | undefined,

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -143,10 +144,15 @@ async def run(args: argparse.Namespace) -> int:
         logger.error("pymobiledevice3 belum terpasang di venv ios-media-puller.")
         return 2
 
+    from wsl_usbmux import lockdown_usbmux_kwargs
+
     if args.count < 0:
         return 2
 
-    lockdown = await create_using_usbmux()
+    lockdown = await create_using_usbmux(
+        serial=os.environ.get("UDID") or None,
+        **lockdown_usbmux_kwargs(),
+    )
     found: list[DocFile] = []
     async with AfcService(lockdown) as afc:
         for root in ROOTS:

@@ -63,12 +63,11 @@ export function useIosSetup(p: Params) {
 
   useEffect(() => {
     if (!deviceId || p.activeSession) return;
-    if (status?.state === "ready") return;
     const timer = window.setInterval(() => {
       void refresh();
     }, 8000);
     return () => window.clearInterval(timer);
-  }, [deviceId, p.activeSession, refresh, status?.state]);
+  }, [deviceId, p.activeSession, refresh]);
 
   const run = useCallback(
     async (action: () => Promise<IosSetupStatus>) => {
@@ -121,5 +120,6 @@ export function useIosSetup(p: Params) {
     submitCode,
     ackTrust,
     cancel,
+    refresh,
   };
 }

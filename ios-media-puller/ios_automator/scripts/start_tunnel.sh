@@ -23,7 +23,7 @@ tunnel_works() {
   if [[ -n "$UDID" ]] && ! grep -q "$UDID" <<<"$body"; then
     return 1
   fi
-  ios apps --list \
+  timeout 5 ios apps --list \
     --tunnel-info-port="$TUNNEL_INFO_PORT" \
     ${UDID:+--udid "$UDID"} >/dev/null 2>&1
 }

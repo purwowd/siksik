@@ -31,7 +31,8 @@ export const api = {
     }>("/auth/me"),
   roles: () =>
     req<{ roles: { role: string; label: string; permissions: string[] }[] }>("/auth/roles"),
-  devices: () => req<DeviceInfo[]>("/devices"),
+  devices: (opts?: { reattachUsb?: boolean }) =>
+    req<DeviceInfo[]>(`/devices${opts?.reattachUsb ? "?reattach_usb=true" : ""}`),
   iosSetup: (deviceId: string) =>
     req<import("@/features/operator/iosSetupReady").IosSetupStatus>(
       `/ios/setup?device_id=${encodeURIComponent(deviceId)}`,

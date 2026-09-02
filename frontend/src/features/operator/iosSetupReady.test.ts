@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   iosAcquisitionReady,
   iosSetupPanelVisible,
+  iosSetupStartLabel,
   type IosSetupStatus,
 } from "@/features/operator/iosSetupReady";
 
@@ -38,5 +39,12 @@ describe("ios setup gating", () => {
     expect(iosAcquisitionReady("ios", false, "device", status("usb_unpaired"))).toBe(false);
     expect(iosAcquisitionReady("ios", false, "device", status("needs_wda"))).toBe(true);
     expect(iosAcquisitionReady("ios", false, "device", status("ready"))).toBe(true);
+  });
+
+  it("labels the start button Pasang WDA until the phone is ready", () => {
+    expect(iosSetupStartLabel("needs_wda")).toBe("Pasang WDA");
+    expect(iosSetupStartLabel("usb_unpaired")).toBe("Pasang WDA");
+    expect(iosSetupStartLabel(undefined)).toBe("Pasang WDA");
+    expect(iosSetupStartLabel("ready")).toBe("Siapkan iPhone");
   });
 });

@@ -44,7 +44,7 @@ type Props = {
   liveDevices: DeviceInfo[];
   selected: DeviceInfo | null;
   setSelected: (d: DeviceInfo | null) => void;
-  refreshDevices: () => Promise<void>;
+  refreshDevices: (opts?: { reattachUsb?: boolean }) => Promise<void>;
   mode: AcquisitionMode;
   setMode: (m: AcquisitionMode) => void;
   analysisScope: AnalysisScope;
@@ -217,7 +217,12 @@ export function OperatorPage(p: Props) {
                   <button
                     className="btn btn-ghost"
                     type="button"
-                    onClick={() => p.refreshDevices().catch(console.error)}
+                    onClick={() => {
+                      void p
+                        .refreshDevices({ reattachUsb: true })
+                        .then(() => p.iosSetup.refresh())
+                        .catch(console.error);
+                    }}
                   >
                     Pindai ulang USB
                   </button>
@@ -442,8 +447,8 @@ export function OperatorPage(p: Props) {
               !p.iosSetup.readyForAcquire && (
                 <p className="field-note">
                   {p.analysisScope === "device"
-                    ? "Selesaikan USB Trust iPhone sebelum akuisisi."
-                    : "Selesaikan Siapkan iPhone (WDA) sebelum akuisisi sosmed."}
+                    ? "Pilih iPhone USB yang sudah terdeteksi sebelum akuisisi."
+                    : "Pasang WDA lalu Trust profil sebelum akuisisi sosmed."}
                 </p>
               )}
           </div>
@@ -459,8 +464,8 @@ export function OperatorPage(p: Props) {
               <p className="standby-title">Pipeline siap</p>
               <p className="standby-copy">
                 Isi identitas peserta, pilih perangkat live atau unggah ZIP, lalu jalankan. Live
-                Android otomatis membangun dan memasang APK agent terbaru. iOS: siapkan iPhone
-                (USB Trust, Developer Mode, WebDriverAgent) sebelum akuisisi sosmed.
+                Android otomatis membangun dan memasang APK agent terbaru. iOS: pasang
+                WebDriverAgent lalu Trust profil sebelum akuisisi sosmed.
               </p>
               <PipelineTrack />
             </div>

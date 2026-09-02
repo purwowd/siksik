@@ -98,7 +98,17 @@ echo "UDID=$UDID"
   ./WebDriverAgentRunner.ipa
 ```
 
-Atau pakai helper di repo ini:
+Atau pakai helper di repo ini.
+
+**WSL (lab SATRIA):** jangan AltServer langsung di usbipd. Path yang berhasil:
+
+```bash
+bash ios_automator/scripts/install_wda_windows.sh
+```
+
+UAC Windows → Yes. Kode 6 digit diketik di jendela PowerShell. Setelah sukses USB kembali ke WSL.
+
+**Linux native USB:**
 
 ```bash
 export APPLE_ID='kamu@email.com'
@@ -155,6 +165,8 @@ Stack Appium (opsional, legacy): [`appium/README.md`](./appium/README.md)
 | Gejala | Fix |
 |--------|-----|
 | `idevice_id` kosong | Cable data, unlock, Trust; cek `usbmuxd` |
+| `Could not connect to lockdownd` / Mux `-8` | USB session wedged (sering setelah AltServer `Failed to write`). Unlock HP, lalu `bash ios_automator/scripts/recover_ios_lockdown.sh`. Bukan bukti WDA hilang. |
+| AltServer `Failed to write app data` di WSL | `usbmuxd` 1.1.1 drop paket 65536. Jangan `ideviceinstaller -i` / AltServer di usbipd. Pasang lewat `bash ios_automator/scripts/install_wda_windows.sh`, lalu kembalikan USB ke WSL. |
 | AltServer anisette / `-36607` | Set `ALTSERVER_ANISETTE_SERVER` ke server sendiri |
 | Untrusted developer | Settings → VPN & Device Management → Trust |
 | App hilang / tidak jalan setelah ~7 hari | Ulang langkah 3 (resign + install) |

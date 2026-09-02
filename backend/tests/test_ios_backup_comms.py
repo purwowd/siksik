@@ -129,3 +129,91 @@ def test_parse_contacts_and_inventory_records(tmp_path: Path) -> None:
     )
     assert msg.source_kind == "sms"
     assert msg.provenance.source_adapter == "ios_backup_messages"
+
+
+def _write_selective_backup(work: Path, udid: str) -> Path:
+    from app.acquisition.ios_backup_comms import _find_backup_udid_dir
+
+    root = work / udid
+    file_id = "0123456789abcdef0123456789abcdef01234567"
+    payload = root / file_id[:2] / file_id
+    payload.parent.mkdir(parents=True)
+    payload.write_bytes(b"sms-db")
+    con = sqlite3.connect(root / "Manifest.db")
+    con.execute("CREATE TABLE Files (fileID TEXT, relativePath TEXT)")
+    con.execute(
+        "INSERT INTO Files VALUES (?, ?)",
+        (file_id, "HomeDomain/Library/SMS/sms.db"),
+    )
+    con.commit()
+    con.close()
+    assert _find_backup_udid_dir(work, udid) == root
+    return root
+
+
+@pytest.mark.unit
+def test_backup_idle_watch_waits_for_stable_payload(tmp_path: Path) -> None:
+    from app.acquisition.ios_backup_comms import BackupIdleWatch
+
+    udid = "00008101-0008384601D8001E"
+    work = tmp_path / "work"
+    watch = BackupIdleWatch(work, udid, idle_needed=2)
+    assert watch.should_abort() is False
+    _write_selective_backup(work, udid)
+    assert watch.should_abort() is False
+    assert watch.should_abort() is False
+    assert watch.should_abort() is True
+
+
+@pytest.mark.unit
+async def test_selective_backup_keeps_payload_when_cli_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    from app.acquisition.ios_backup_comms import _run_selective_backup
+    from app.acquisition.process import ProcessResult
+
+    udid = "00008101-0008384601D8001E"
+    work = tmp_path / "work"
+    _write_selective_backup(work, udid)
+
+    async def fake_process(*_args, **_kwargs):
+        return ProcessResult(("backup2",), 9, "", "hung")
+
+    monkeypatch.setattr(
+        "app.acquisition.ios_backup_comms._puller_python",
+        lambda: Path(sys.executable),
+    )
+    monkeypatch.setattr("app.acquisition.ios_backup_comms.run_process", fake_process)
+    root = await _run_selective_backup(udid, work)
+    assert (root / "Manifest.db").is_file()
+
+
+@pytest.mark.unit
+async def test_selective_backup_recovers_payload_after_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    from app.acquisition.errors import ErrorCategory, acquisition_error
+    from app.acquisition.ios_backup_comms import _run_selective_backup
+
+    udid = "00008101-0008384601D8001E"
+    work = tmp_path / "work"
+    _write_selective_backup(work, udid)
+
+    async def fake_process(*_args, **_kwargs):
+        raise acquisition_error(
+            ErrorCategory.ADB_TIMEOUT,
+            "ios_backup_comms melewati batas waktu.",
+            retryable=True,
+        )
+
+    monkeypatch.setattr(
+        "app.acquisition.ios_backup_comms._puller_python",
+        lambda: Path(sys.executable),
+    )
+    monkeypatch.setattr("app.acquisition.ios_backup_comms.run_process", fake_process)
+    root = await _run_selective_backup(udid, work)
+    assert (root / "Manifest.db").is_file()

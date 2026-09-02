@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -69,6 +70,15 @@ class IosSetupService:
         self.devmode_polls = 8
         self.poll_sleep_s = 2.0
 
+    async def _restore_usb_to_wsl(self) -> None:
+        restore = getattr(self._host, "restore_usb_to_wsl", None)
+        if not callable(restore):
+            return
+        try:
+            await restore()
+        except (AcquisitionError, ImportError, OSError, RuntimeError):
+            write_setup_ios_log("WARN", "restore_usb_to_wsl", detail="skipped")
+
     async def shutdown(self) -> None:
         async with self._lock:
             job = self._job
@@ -78,11 +88,43 @@ class IosSetupService:
 
     async def status(self, device_id: str) -> IosSetupStatus:
         udid = validate_ios_udid(device_id)
+        failed_job: _SetupJob | None = None
+        ready_job: _SetupJob | None = None
         async with self._lock:
             job = self._job
             if job is not None and job.udid == udid:
-                return self._status_from_job(job)
-        return await self._probe(udid)
+                in_flight = job.task is not None and not job.task.done()
+                if in_flight:
+                    return self._status_from_job(job)
+                if job.state == IosSetupState.FAILED:
+                    failed_job = job
+                elif job.state == IosSetupState.READY:
+                    ready_job = job
+                else:
+                    return self._status_from_job(job)
+        if failed_job is None and ready_job is None:
+            return await self._probe(udid)
+        probed = await self._probe(udid)
+        if ready_job is not None:
+            if probed.wda_installed:
+                return probed
+            lockdown = bool(getattr(self._host, "pair_lockdown_stale", lambda: False)())
+            if lockdown:
+                return self._status_from_job(ready_job)
+            async with self._lock:
+                if self._job is ready_job:
+                    self._job = None
+                self._trusted.pop(udid, None)
+            return probed
+        if probed.wda_installed or probed.state in {
+            IosSetupState.AWAITING_DEVELOPER_TRUST,
+            IosSetupState.READY,
+        }:
+            async with self._lock:
+                if self._job is failed_job:
+                    self._job = None
+            return probed
+        return self._status_from_job(failed_job)
 
     async def start(self, device_id: str) -> IosSetupStatus:
         udid = validate_ios_udid(device_id)
@@ -104,8 +146,9 @@ class IosSetupService:
                 self._job = None
             job = _SetupJob(
                 udid=udid,
-                state=IosSetupState.AWAITING_USB_TRUST,
-                message="Meminta Trust USB di iPhone…",
+                state=IosSetupState.INSTALLING_WDA,
+                message="Memeriksa WebDriverAgent…",
+                paired=True,
             )
             job.task = asyncio.create_task(self._run_start(job))
             self._job = job
@@ -156,7 +199,8 @@ class IosSetupService:
 
     async def ack_trust(self, device_id: str) -> IosSetupStatus:
         udid = validate_ios_udid(device_id)
-        bundle = await self._host.list_wda_bundle(udid, use_tunnel=True)
+        windows = bool(getattr(self._host, "uses_windows_wda_install", lambda: False)())
+        bundle = await self._host.list_wda_bundle(udid, use_tunnel=not windows)
         if not bundle:
             return _status(
                 state=IosSetupState.NEEDS_WDA,
@@ -164,11 +208,20 @@ class IosSetupService:
                 paired=True,
                 apple_id_hint=self._host.apple_id_hint(),
             )
+        # Windows AMDS Trust check must not start a WSL go-ios tunnel.
+        # If USB is already in WSL, `ios apps --list` hangs on mux -8.
+        if not windows:
+            ensure_tunnel = getattr(self._host, "ensure_tunnel", None)
+            if callable(ensure_tunnel):
+                try:
+                    await ensure_tunnel(udid)
+                except AcquisitionError:
+                    pass
         launch = await self._host.launch_bundle(udid, bundle)
         write_setup_ios_log(
             "INFO",
             "ack_trust",
-            detail=f"launch={launch} bundle={bundle}",
+            detail=f"launch={launch} bundle={bundle} windows={int(windows)}",
             udid=udid,
         )
         async with self._lock:
@@ -195,7 +248,8 @@ class IosSetupService:
             )
         if launch != "ok":
             http_ok = await self._host.wda_http_ready() and self._host.stack_udid_matches(udid)
-            if not http_ok:
+            listed_on_windows = windows and bool(bundle)
+            if not http_ok and not listed_on_windows:
                 message = "WebDriverAgent terpasang tetapi belum bisa diluncurkan. Cek Trust profil, lalu periksa lagi."
                 if job is not None:
                     job.wda_installed = True
@@ -210,6 +264,7 @@ class IosSetupService:
                     apple_id_hint=self._host.apple_id_hint(),
                 )
         self._trusted[udid] = True
+        await self._restore_usb_to_wsl()
         if job is not None:
             job.wda_installed = True
             job.wda_trusted = True
@@ -277,20 +332,13 @@ class IosSetupService:
 
     async def _probe(self, udid: str) -> IosSetupStatus:
         hint = self._host.apple_id_hint()
-        paired = await self._host.pair_validate(udid)
-        if not paired:
-            return _status(
-                state=IosSetupState.USB_UNPAIRED,
-                message="Colok USB, unlock iPhone, lalu ketuk Trust This Computer.",
-                apple_id_hint=hint,
-            )
+        bundle = await self._host.list_wda_bundle(udid)
+        installed = bool(bundle)
         http_ok = False
         try:
             http_ok = await self._host.wda_http_ready() and self._host.stack_udid_matches(udid)
         except AcquisitionError:
             http_ok = False
-        bundle = await self._host.list_wda_bundle(udid)
-        installed = bool(bundle)
         if http_ok and installed:
             self._trusted[udid] = True
             return _status(
@@ -322,25 +370,34 @@ class IosSetupService:
                 wda_trusted=False,
                 apple_id_hint=hint,
             )
-        developer_mode: bool | None = None
-        try:
-            developer_mode = await self._host.developer_mode_enabled(udid)
-        except AcquisitionError:
-            developer_mode = None
-        if developer_mode is False:
+        paired = await self._host.pair_validate(udid)
+        lockdown = bool(getattr(self._host, "pair_lockdown_stale", lambda: False)())
+        if not paired and not lockdown:
             return _status(
-                state=IosSetupState.DEVELOPER_MODE_OFF,
-                message=(
-                    "Developer Mode masih OFF. Settings → Privacy & Security → "
-                    "Developer Mode → ON, restart jika diminta, lalu Siapkan iPhone lagi."
-                ),
-                paired=True,
-                developer_mode=False,
+                state=IosSetupState.USB_UNPAIRED,
+                message="Colok USB, unlock iPhone, lalu ketuk Trust This Computer.",
                 apple_id_hint=hint,
             )
+        developer_mode: bool | None = None
+        if not lockdown:
+            try:
+                developer_mode = await self._host.developer_mode_enabled(udid)
+            except AcquisitionError:
+                developer_mode = None
+            if developer_mode is False:
+                return _status(
+                    state=IosSetupState.DEVELOPER_MODE_OFF,
+                    message=(
+                        "Developer Mode masih OFF. Settings → Privacy & Security → "
+                        "Developer Mode → ON, restart jika diminta, lalu Siapkan iPhone lagi."
+                    ),
+                    paired=True,
+                    developer_mode=False,
+                    apple_id_hint=hint,
+                )
         return _status(
             state=IosSetupState.NEEDS_WDA,
-            message="WebDriverAgent belum terpasang. Jalankan Siapkan iPhone.",
+            message="WebDriverAgent belum terpasang. Ketuk Pasang WDA.",
             paired=True,
             developer_mode=developer_mode,
             apple_id_hint=hint,
@@ -349,9 +406,15 @@ class IosSetupService:
     async def _run_start(self, job: _SetupJob) -> None:
         udid = job.udid
         try:
-            await self._ensure_paired(job)
-            if not job.paired or job.state == IosSetupState.FAILED:
+            job.paired = True
+            windows = bool(getattr(self._host, "uses_windows_wda_install", lambda: False)())
+            if windows:
+                await self._run_windows_wda_check_or_install(job)
                 return
+            try:
+                await self._host.pair_request(udid)
+            except AcquisitionError:
+                pass
             try:
                 await self._host.ensure_tunnel(udid)
             except AcquisitionError:
@@ -359,11 +422,12 @@ class IosSetupService:
                     "ios_setup_tunnel_skipped",
                     extra={"device_ref": _ios_device_ref(udid)},
                 )
-            await self._ensure_developer_mode(job)
-            if job.state in {IosSetupState.DEVELOPER_MODE_OFF, IosSetupState.FAILED}:
-                return
+            try:
+                await self._host.reveal_developer_mode(udid)
+            except AcquisitionError:
+                pass
             job.state = IosSetupState.INSTALLING_WDA
-            job.message = "Memasang WebDriverAgent ke iPhone…"
+            job.message = "Memeriksa WebDriverAgent…"
             write_setup_ios_log(
                 "INFO",
                 "installing_wda",
@@ -390,7 +454,7 @@ class IosSetupService:
                         "Trust Apple ID, lalu ketuk Sudah di-Trust."
                     )
                     return
-            await self._run_altserver(job, ipa)
+            await self._run_wda_sideload(job, ipa)
         except asyncio.CancelledError:
             raise
         except AcquisitionError as exc:
@@ -405,6 +469,43 @@ class IosSetupService:
                     "error_type": type(exc).__name__,
                 },
             )
+
+    async def _run_windows_wda_check_or_install(self, job: _SetupJob) -> None:
+        udid = job.udid
+        hold = getattr(self._host, "hold_usb_on_windows", None)
+        if callable(hold):
+            hold()
+        release = getattr(self._host, "release_usb_to_windows", None)
+        if callable(release):
+            job.message = "Memindahkan USB iPhone ke Windows…"
+            try:
+                await release()
+            except AcquisitionError:
+                write_setup_ios_log(
+                    "WARN",
+                    "ios_usb_release_windows",
+                    detail="detach skipped",
+                    udid=udid,
+                )
+        job.state = IosSetupState.INSTALLING_WDA
+        job.message = "Memeriksa WebDriverAgent lewat USB Windows…"
+        write_setup_ios_log(
+            "INFO",
+            "installing_wda",
+            detail="cek WDA via Windows AMDS, bukan lockdownd WSL",
+            udid=udid,
+        )
+        bundle = await self._host.list_wda_bundle(udid, use_tunnel=False)
+        if bundle:
+            job.wda_installed = True
+            job.state = IosSetupState.AWAITING_DEVELOPER_TRUST
+            job.message = (
+                "WebDriverAgent terpasang. Settings → General → VPN & Device Management → "
+                "Trust Apple ID, lalu ketuk Sudah di-Trust."
+            )
+            return
+        ipa = self._host.resolve_ipa()
+        await self._run_windows_wda_install(job, ipa)
 
     async def _ensure_paired(self, job: _SetupJob) -> None:
         udid = job.udid
@@ -452,6 +553,63 @@ class IosSetupService:
         job.state = IosSetupState.DEVELOPER_MODE_OFF
         job.message = (
             "Developer Mode masih OFF. Selesaikan di iPhone, lalu Siapkan iPhone lagi."
+        )
+
+    async def _run_wda_sideload(self, job: _SetupJob, ipa: Any) -> None:
+        if bool(getattr(self._host, "uses_windows_wda_install", lambda: False)()):
+            await self._run_windows_wda_install(job, ipa)
+            return
+        await self._run_altserver(job, ipa)
+
+    async def _run_windows_wda_install(self, job: _SetupJob, ipa: Any) -> None:
+        creds = self._host.apple_credentials()
+        if creds is None:
+            await self._fail(
+                job,
+                "APPLE_ID / APPLE_ID_PASSWORD belum diset di ios-media-puller/.env.",
+            )
+            return
+        if ipa is None:
+            await self._fail(job, "Berkas WebDriverAgentRunner.ipa tidak ditemukan.")
+            return
+        job.state = IosSetupState.INSTALLING_WDA
+        job.message = (
+            "UAC Windows: pilih Yes. Kode 6 digit Apple diketik di jendela PowerShell "
+            "(bukan form SATRIA). USB tetap di Windows sampai profil di-Trust."
+        )
+        started = time.time()
+        process = await self._host.start_windows_wda_install(job.udid, ipa)
+        job.process = process
+        job.drain_task = asyncio.create_task(self._drain_altserver(process, job.udid))
+        returncode = await process.wait()
+        job.process = None
+        invalidate = getattr(self._host, "invalidate_usb_location", None)
+        if callable(invalidate):
+            invalidate()
+        listed = await self._host.list_wda_bundle(job.udid, use_tunnel=False)
+        log_ok = False
+        present_fn = getattr(self._host, "windows_wda_present_from_log", None)
+        if callable(present_fn):
+            try:
+                log_ok = bool(present_fn(since_unix=started - 2.0))
+            except TypeError:
+                log_ok = False
+        if returncode == 0 or listed or log_ok:
+            job.wda_installed = True
+            job.state = IosSetupState.AWAITING_DEVELOPER_TRUST
+            extra = ""
+            if returncode != 0 and not listed and log_ok:
+                extra = " USB mungkin masih di Windows; Trust profil tetap di iPhone."
+            job.message = (
+                "WebDriverAgent terpasang. Settings → General → VPN & Device Management → "
+                "Trust Apple ID, lalu ketuk Sudah di-Trust."
+                + extra
+            )
+            return
+        await self._fail(
+            job,
+            "Pemasangan WebDriverAgent lewat USB Windows gagal. Ulangi Siapkan iPhone, "
+            "atau jalankan: bash ios-media-puller/ios_automator/scripts/install_wda_windows.sh",
         )
 
     async def _run_altserver(self, job: _SetupJob, ipa: Any) -> None:

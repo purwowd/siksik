@@ -18,13 +18,10 @@ import {
   DEFAULT_ANALYSIS_SCOPE,
   planForScope,
 } from "@/features/operator/analysisScope";
-
-const EMPTY_PARTICIPANT = {
-  fullName: "",
-  registrationNo: "",
-  nik: "",
-  organization: "",
-};
+import {
+  EMPTY_PARTICIPANT,
+  syncParticipantForm,
+} from "@/features/operator/participantForm";
 
 export function useConsoleApp() {
   const [error, setError] = useState<string | null>(null);
@@ -71,18 +68,17 @@ export function useConsoleApp() {
   const teleRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
-    const id = session?.id ?? null;
-    const saved = session?.participant;
-    const hasIdentity = !!(saved?.full_name?.trim() || saved?.registration_no?.trim());
-    if (!id || !hasIdentity || hydratedParticipantSessionId.current === id) return;
-    hydratedParticipantSessionId.current = id;
-    setParticipantState({
-      fullName: saved?.full_name ?? "",
-      registrationNo: saved?.registration_no ?? "",
-      nik: saved?.nik ?? "",
-      organization: saved?.organization ?? "",
+    const next = syncParticipantForm({
+      sessionId: session?.id ?? null,
+      status: session?.status,
+      saved: session?.participant,
+      hydratedSessionId: hydratedParticipantSessionId.current,
     });
-  }, [session?.id, session?.participant]);
+    hydratedParticipantSessionId.current = next.hydratedSessionId;
+    if (next.form) {
+      setParticipantState(next.form);
+    }
+  }, [session?.id, session?.status, session?.participant]);
 
   const {
     auth,
@@ -254,6 +250,7 @@ export function useConsoleApp() {
     teleRef,
     goToTab,
     refreshSessionList: workspace.refreshSessionList,
+    refreshDevices: runtime.refreshDevices,
     setError,
     clearQueryPages: () => {
       queries.setFindingsPage(1);

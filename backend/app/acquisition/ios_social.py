@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 from app.acquisition.agent_client import InventoryRecordV1
 from app.acquisition.contracts import ProgressCallback
 from app.acquisition.errors import ErrorCategory, AcquisitionError, acquisition_error
+from app.acquisition.ios_usbmux import apply_usbmux_env
 from app.acquisition.process import run_process
 from app.core.config import settings
 from app.core.db import db, utcnow
@@ -39,6 +40,18 @@ PACKAGE_INSTAGRAM = "com.instagram.android"
 PACKAGE_X = "com.twitter.android"
 PACKAGE_FACEBOOK = "com.facebook.katana"
 
+# Operator-visible WDA launch IDs. Do not show Android packages on iOS sessions.
+IOS_BUNDLE_BY_PACKAGE = {
+    PACKAGE_INSTAGRAM: "com.burbn.instagram",
+    PACKAGE_X: "com.atebits.Tweetie2",
+    PACKAGE_FACEBOOK: "com.facebook.Facebook",
+}
+IOS_LABEL_BY_PACKAGE = {
+    PACKAGE_INSTAGRAM: "Instagram",
+    PACKAGE_X: "X",
+    PACKAGE_FACEBOOK: "Facebook",
+}
+
 FLOW_BY_PACKAGE = {
     PACKAGE_INSTAGRAM: "ig-profile",
     PACKAGE_X: "x-profile",
@@ -46,6 +59,18 @@ FLOW_BY_PACKAGE = {
 }
 
 _INVOKE_SCRIPT = Path(__file__).resolve().parent / "ios_wda" / "invoke.py"
+
+
+def ios_social_operator_target(package: str) -> str:
+    """Human + iOS bundle for operator progress; never Android package IDs."""
+    bundle = IOS_BUNDLE_BY_PACKAGE.get(package, package)
+    label = IOS_LABEL_BY_PACKAGE.get(package)
+    if label and bundle != package:
+        return f"{label} ({bundle})"
+    if label:
+        return label
+    return bundle
+
 
 def _ios_device_ref(udid: str) -> str:
     digest = hashlib.sha256(f"siksik-ios-device:{udid}".encode("utf-8")).hexdigest()
@@ -201,7 +226,12 @@ async def ensure_ios_wda_stack(*, udid: str, restart: bool = False) -> str:
     """
     base = settings.ios_social_wda_url.rstrip("/")
     if not restart:
-        already = await _wda_ready(base)
+        already = False
+        for _ in range(10):
+            already = await _wda_ready(base)
+            if already:
+                break
+            await asyncio.sleep(1)
         if already and stack_udid_matches(udid):
             return base
 
@@ -315,12 +345,14 @@ async def _run_flow(
     )
     job_path = output_dir / "job.json"
     job_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
-    env = {
-        **os.environ,
-        "PATH": f"{Path.home() / '.local' / 'bin'}:{os.environ.get('PATH', '')}",
-        "IOS_SKIP_WDA_INSTALL": "1",
-        "IOS_TEMP_CRAWL_SESSION": str(os.environ.get("IOS_TEMP_CRAWL_SESSION") or ""),
-    }
+    env = apply_usbmux_env(
+        {
+            **os.environ,
+            "PATH": f"{Path.home() / '.local' / 'bin'}:{os.environ.get('PATH', '')}",
+            "IOS_SKIP_WDA_INSTALL": "1",
+            "IOS_TEMP_CRAWL_SESSION": str(os.environ.get("IOS_TEMP_CRAWL_SESSION") or ""),
+        }
+    )
     result = await run_process(
         [str(python_bin), str(_INVOKE_SCRIPT), str(job_path)],
         timeout=settings.ios_social_flow_timeout_s,
@@ -982,8 +1014,9 @@ async def acquire_ios_social_ui(
         await on_progress(
             SessionStatus.ACQUIRING,
             44,
-            f"iOS social: {package}",
+            f"iOS social: {ios_social_operator_target(package)}",
             acquisition_method="ios_wda_social",
+            crawl_target=IOS_BUNDLE_BY_PACKAGE.get(package, package),
         )
         try:
             wda_url = await ensure_ios_wda_stack(udid=udid, restart=not first_flow)

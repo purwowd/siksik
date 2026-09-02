@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import shutil
 import sqlite3
 import sys
@@ -255,6 +256,8 @@ async def run(args: argparse.Namespace) -> int:
         logger.error("pymobiledevice3 belum terpasang. Aktifkan .venv dulu.")
         return 2
 
+    from wsl_usbmux import lockdown_usbmux_kwargs
+
     if args.count < 1:
         logger.error("--count harus >= 1")
         return 2
@@ -273,7 +276,10 @@ async def run(args: argparse.Namespace) -> int:
     t0 = time.time()
 
     try:
-        lockdown = await create_using_usbmux()
+        lockdown = await create_using_usbmux(
+            serial=os.environ.get("UDID") or None,
+            **lockdown_usbmux_kwargs(),
+        )
     except Exception as exc:
         logger.error("Tidak bisa konek device: %s", exc)
         return 1

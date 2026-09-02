@@ -82,7 +82,15 @@ def _should_install_wda(args: argparse.Namespace) -> bool:
 
 
 def _run_wda_install() -> None:
-    script = ROOT / "scripts" / "install_wda_altserver.sh"
+    scripts = ROOT / "scripts"
+    windows = scripts / "install_wda_windows.sh"
+    altserver = scripts / "install_wda_altserver.sh"
+    on_wsl = False
+    try:
+        on_wsl = "microsoft" in Path("/proc/version").read_text(encoding="utf-8").lower()
+    except OSError:
+        on_wsl = False
+    script = windows if on_wsl and windows.is_file() else altserver
     if not script.is_file():
         raise SystemExit(f"Script tidak ada: {script}")
     if not os.environ.get("APPLE_ID") or not os.environ.get("APPLE_ID_PASSWORD"):
@@ -90,7 +98,7 @@ def _run_wda_install() -> None:
             "Install WDA butuh APPLE_ID + APPLE_ID_PASSWORD.\n"
             "Isi file .env di root repo (lihat .env.example) atau export di shell."
         )
-    logger.info("Menjalankan AltServer install WDA dulu…")
+    logger.info("Menjalankan install WDA (%s)…", script.name)
     subprocess.run(["bash", str(script)], check=True, cwd=str(REPO))
 
 

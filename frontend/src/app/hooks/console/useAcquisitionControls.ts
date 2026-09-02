@@ -39,6 +39,7 @@ type Params = {
   clearQueryPages: () => void;
   clearFindingsData: () => void;
   clearReportData: () => void;
+  refreshDevices: (opts?: { reattachUsb?: boolean }) => Promise<void>;
 };
 
 function participantPayload(form: ParticipantForm) {
@@ -110,6 +111,9 @@ export function useAcquisitionControls(p: Params) {
     p.setError(null);
     setBusy(true);
     try {
+      if (p.selected.device_type === "ios") {
+        await p.refreshDevices({ reattachUsb: true });
+      }
       const s = await api.startSession({
         device_id: p.selected.device_id,
         device_type: p.selected.device_type === "simulated" ? "android" : p.selected.device_type,

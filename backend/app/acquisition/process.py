@@ -10,6 +10,7 @@ from pathlib import Path
 from app.acquisition.errors import AcquisitionError, ErrorCategory, acquisition_error
 
 ProcessLineCallback = Callable[[str], Awaitable[None]]
+ProcessAbortCallback = Callable[[], bool]
 logger = logging.getLogger("siksik.acquisition.process")
 
 
@@ -81,6 +82,63 @@ async def _emit_process_line(callback: ProcessLineCallback, line: str) -> None:
         )
 
 
+async def _stop_child(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    try:
+        process.kill()
+    except (ProcessLookupError, OSError):
+        pass
+    try:
+        await process.wait()
+    except (ProcessLookupError, OSError):
+        pass
+
+
+async def _wait_child(
+    process: asyncio.subprocess.Process,
+    *,
+    timeout: float,
+    abort_when: ProcessAbortCallback | None,
+    abort_poll_s: float,
+    abort_grace_s: float,
+    operation: str,
+    timeout_category: ErrorCategory,
+) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    abort_ready_at: float | None = None
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            await _stop_child(process)
+            raise acquisition_error(
+                timeout_category,
+                f"{operation} melewati batas waktu.",
+                retryable=True,
+            )
+        slice_s = remaining if abort_when is None else min(max(abort_poll_s, 0.05), remaining)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=slice_s)
+            return
+        except asyncio.TimeoutError:
+            if abort_when is None:
+                continue
+            if abort_when():
+                now = loop.time()
+                if abort_ready_at is None:
+                    abort_ready_at = now
+                if now - abort_ready_at >= abort_grace_s:
+                    logger.info(
+                        "process_aborted_after_idle",
+                        extra={"operation": operation},
+                    )
+                    await _stop_child(process)
+                    return
+            else:
+                abort_ready_at = None
+
+
 async def run_process(
     argv: Sequence[str],
     *,
@@ -94,6 +152,9 @@ async def run_process(
     failure_category: ErrorCategory = ErrorCategory.ADB_COMMAND_FAILED,
     operation: str = "dependency_command",
     on_stdout_line: ProcessLineCallback | None = None,
+    abort_when: ProcessAbortCallback | None = None,
+    abort_poll_s: float = 1.0,
+    abort_grace_s: float = 2.0,
 ) -> ProcessResult:
     command = tuple(str(value) for value in argv)
     if not command or timeout <= 0 or output_limit_bytes < 0:
@@ -110,6 +171,7 @@ async def run_process(
             env=dict(env) if env is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
     except (FileNotFoundError, PermissionError, OSError) as exc:
         raise acquisition_error(
@@ -122,40 +184,34 @@ async def run_process(
     )
     stderr_task = asyncio.create_task(_read_bounded(process.stderr, output_limit_bytes))
     try:
-        await asyncio.wait_for(process.wait(), timeout=timeout)
-    except asyncio.TimeoutError as exc:
-        if process.returncode is None:
-            try:
-                process.kill()
-            except (ProcessLookupError, OSError):
-                pass
-        try:
-            await process.wait()
-        except (ProcessLookupError, OSError):
-            pass
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-        raise acquisition_error(
-            timeout_category,
-            f"{operation} melewati batas waktu.",
-            retryable=True,
-        ) from exc
+        await _wait_child(
+            process,
+            timeout=timeout,
+            abort_when=abort_when,
+            abort_poll_s=abort_poll_s,
+            abort_grace_s=abort_grace_s,
+            operation=operation,
+            timeout_category=timeout_category,
+        )
     except asyncio.CancelledError:
-        if process.returncode is None:
-            try:
-                process.kill()
-            except (ProcessLookupError, OSError):
-                pass
-            try:
-                await process.wait()
-            except (ProcessLookupError, OSError):
-                pass
+        await _stop_child(process)
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        raise
+    except AcquisitionError:
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         raise
 
-    (stdout, stdout_truncated), (stderr, stderr_truncated) = await asyncio.gather(
-        stdout_task,
-        stderr_task,
-    )
+    try:
+        (stdout, stdout_truncated), (stderr, stderr_truncated) = await asyncio.wait_for(
+            asyncio.gather(stdout_task, stderr_task),
+            timeout=5.0,
+        )
+    except asyncio.TimeoutError:
+        stdout_task.cancel()
+        stderr_task.cancel()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        stdout, stdout_truncated = b"", True
+        stderr, stderr_truncated = b"", True
     result = ProcessResult(
         argv=command,
         returncode=int(process.returncode or 0),

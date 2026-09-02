@@ -23,6 +23,8 @@ from app.acquisition.contracts import (
 )
 from app.acquisition.errors import AcquisitionError, ErrorCategory
 from app.acquisition.file_identity import stable_file_id
+from app.acquisition.ios_usb_wsl import ensure_iphone_lockdown, ensure_iphone_on_wsl
+from app.acquisition.ios_usbmux import running_under_wsl, windows_holds_iphone_usb
 from app.acquisition.process import run_process
 from app.acquisition.providers import AcquisitionProviderRegistry
 from app.core.config import settings
@@ -334,6 +336,14 @@ async def _run(cmd: list[str], timeout: float = 30.0) -> tuple[int, str, str]:
         return code, "", exc.public_message
 
 
+async def _wsl_lsusb_has_iphone() -> bool:
+    for spec in ("05ac:12a8", "05ac:12ab"):
+        code, out, _ = await _run(["lsusb", "-d", spec], timeout=2)
+        if code == 0 and (out or "").strip():
+            return True
+    return False
+
+
 async def toolchain_status() -> dict:
     try:
         adb_result = await AsyncAdbTransport(
@@ -357,7 +367,9 @@ async def toolchain_status() -> dict:
     }
 
 
-async def detect_devices(*, include_simulators: bool = True) -> list[DeviceInfo]:
+async def detect_devices(
+    *, include_simulators: bool = True, reattach_usb: bool = False
+) -> list[DeviceInfo]:
     devices: list[DeviceInfo] = []
 
     try:
@@ -450,8 +462,13 @@ async def detect_devices(*, include_simulators: bool = True) -> list[DeviceInfo]
     except AcquisitionError:
         pass
 
+    await ensure_iphone_on_wsl(reattach=reattach_usb)
+    wsl_iphone = (not running_under_wsl()) or await _wsl_lsusb_has_iphone()
+    if windows_holds_iphone_usb():
+        wsl_iphone = False
+
     code, out, _ = await _run(["idevice_id", "-l"], timeout=5)
-    if code == 0:
+    if code == 0 and wsl_iphone:
         for udid in out.strip().splitlines():
             udid = udid.strip()
             if not udid:

@@ -384,8 +384,14 @@ async def auth_roles() -> dict:
 
 
 @router.get("/devices", response_model=list[DeviceInfo])
-async def list_devices(_: Annotated[AuthUser, Depends(require_perm("devices"))]) -> list[DeviceInfo]:
-    return await detect_devices(include_simulators=settings.lab_demo_mode)
+async def list_devices(
+    _: Annotated[AuthUser, Depends(require_perm("devices"))],
+    reattach_usb: bool = Query(False),
+) -> list[DeviceInfo]:
+    return await detect_devices(
+        include_simulators=settings.lab_demo_mode,
+        reattach_usb=reattach_usb,
+    )
 
 
 @router.get("/toolchain")

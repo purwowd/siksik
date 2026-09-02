@@ -25,6 +25,7 @@ from typing import Any
 from app.acquisition.agent_client import InventoryRecordV1
 from app.acquisition.contracts import ProgressCallback
 from app.acquisition.errors import AcquisitionError, ErrorCategory, acquisition_error
+from app.acquisition.ios_usbmux import apply_usbmux_env, lockdown_error_token
 from app.acquisition.process import run_process
 from app.acquisition.time_scope import build_time_scope
 from app.core.config import settings
@@ -132,6 +133,8 @@ def _resolve_manifest_file(backup_root: Path, relative_like: str) -> Path | None
 
 
 def _find_backup_udid_dir(work: Path, udid: str) -> Path | None:
+    if not work.is_dir():
+        return None
     direct = work / udid
     if (direct / "Manifest.db").is_file():
         return direct
@@ -139,6 +142,67 @@ def _find_backup_udid_dir(work: Path, udid: str) -> Path | None:
         if child.is_dir() and (child / "Manifest.db").is_file():
             return child
     return None
+
+
+def _dir_fingerprint(path: Path) -> tuple[int, int]:
+    files = 0
+    total = 0
+    if not path.is_dir():
+        return (0, 0)
+    for child in path.rglob("*"):
+        try:
+            if not child.is_file():
+                continue
+            files += 1
+            total += child.stat().st_size
+        except OSError:
+            continue
+    return files, total
+
+
+def _backup_has_comms_payload(backup_root: Path) -> bool:
+    for pattern in (
+        "%Library/SMS/sms.db",
+        "%/SMS/sms.db",
+        "%Library/AddressBook/AddressBook.sqlitedb",
+        "%AddressBook.sqlitedb",
+    ):
+        found = _resolve_manifest_file(backup_root, pattern)
+        if found is not None and found.is_file() and found.stat().st_size > 0:
+            return True
+    return False
+
+
+def _usable_backup_root(work: Path, udid: str) -> Path | None:
+    root = _find_backup_udid_dir(work, udid)
+    if root is None or not _backup_has_comms_payload(root):
+        return None
+    return root
+
+
+class BackupIdleWatch:
+    """Abort hung backup2 CLI once SMS/contacts files stop growing."""
+
+    def __init__(self, work: Path, udid: str, *, idle_needed: int = 8) -> None:
+        self._work = work
+        self._udid = udid
+        self._idle_needed = idle_needed
+        self._sig: tuple[int, int] | None = None
+        self._idle = 0
+
+    def should_abort(self) -> bool:
+        root = _usable_backup_root(self._work, self._udid)
+        if root is None:
+            self._sig = None
+            self._idle = 0
+            return False
+        sig = _dir_fingerprint(root)
+        if sig != self._sig:
+            self._sig = sig
+            self._idle = 0
+            return False
+        self._idle += 1
+        return self._idle >= self._idle_needed
 
 
 async def _run_selective_backup(udid: str, work: Path) -> Path:
@@ -149,52 +213,85 @@ async def _run_selective_backup(udid: str, work: Path) -> Path:
             "ios-media-puller venv tidak siap untuk backup2.",
         )
     work.mkdir(parents=True, exist_ok=True)
-    env = {
-        **os.environ,
-        "PATH": f"{Path.home() / '.local' / 'bin'}:{os.environ.get('PATH', '')}",
-        "UDID": udid,
-    }
-    result = await run_process(
-        [
-            str(python_bin),
-            "-m",
-            "pymobiledevice3",
-            "backup2",
-            "backup",
-            "--udid",
-            udid,
-            "--full",
-            "--only",
-            "sms",
-            "--only",
-            "contacts",
-            str(work),
-        ],
-        timeout=settings.ios_backup_comms_timeout_s,
-        cwd=settings.ios_media_puller_path.resolve(),
-        env=env,
-        check=False,
-        output_limit_bytes=512 * 1024,
-        operation="ios_backup_comms",
-        not_found_category=ErrorCategory.DEPENDENCY_NOT_FOUND,
-        timeout_category=ErrorCategory.ADB_TIMEOUT,
-        failure_category=ErrorCategory.AGENT_UNREACHABLE,
+    env = apply_usbmux_env(
+        {
+            **os.environ,
+            "PATH": f"{Path.home() / '.local' / 'bin'}:{os.environ.get('PATH', '')}",
+            "UDID": udid,
+        }
     )
+    watch = BackupIdleWatch(work, udid)
+    try:
+        result = await run_process(
+            [
+                str(python_bin),
+                "-m",
+                "pymobiledevice3",
+                "backup2",
+                "backup",
+                "--udid",
+                udid,
+                "--full",
+                "--only",
+                "sms",
+                "--only",
+                "contacts",
+                str(work),
+            ],
+            timeout=settings.ios_backup_comms_timeout_s,
+            cwd=settings.ios_media_puller_path.resolve(),
+            env=env,
+            check=False,
+            output_limit_bytes=512 * 1024,
+            operation="ios_backup_comms",
+            not_found_category=ErrorCategory.DEPENDENCY_NOT_FOUND,
+            timeout_category=ErrorCategory.ADB_TIMEOUT,
+            failure_category=ErrorCategory.AGENT_UNREACHABLE,
+            abort_when=watch.should_abort,
+            abort_poll_s=1.0,
+            abort_grace_s=1.0,
+        )
+    except AcquisitionError as exc:
+        recovered = _usable_backup_root(work, udid)
+        if recovered is not None:
+            logger.info(
+                "ios_backup_comms_recovered_after_cli_error",
+                extra={"error_category": exc.category.value},
+            )
+            return recovered
+        raise
+    recovered = _usable_backup_root(work, udid)
+    if recovered is not None:
+        if result.returncode != 0:
+            logger.info(
+                "ios_backup_comms_used_idle_snapshot",
+                extra={"dependency_exit_code": result.returncode},
+            )
+        return recovered
     if result.returncode != 0:
+        token = lockdown_error_token(f"{result.stderr or ''}\n{result.stdout or ''}")
+        logger.info(
+            "ios_backup_comms_failed",
+            extra={
+                "dependency_exit_code": result.returncode,
+                "lockdown_error": token,
+            },
+        )
         raise acquisition_error(
             ErrorCategory.AGENT_UNREACHABLE,
-            "Selective iOS backup (sms/contacts) gagal.",
+            (
+                "Selective iOS backup (sms/contacts) gagal (koneksi USB/usbmux)."
+                if token == "ConnectionFailedToUsbmuxdError"
+                else "Selective iOS backup (sms/contacts) gagal."
+            ),
             retryable=True,
             dependency_exit_code=result.returncode,
         )
-    backup_root = _find_backup_udid_dir(work, udid)
-    if backup_root is None:
-        raise acquisition_error(
-            ErrorCategory.AGENT_UNREACHABLE,
-            "Manifest.db selective backup tidak ditemukan.",
-            retryable=True,
-        )
-    return backup_root
+    raise acquisition_error(
+        ErrorCategory.AGENT_UNREACHABLE,
+        "Manifest.db selective backup tidak ditemukan.",
+        retryable=True,
+    )
 
 
 def _table_columns(con: sqlite3.Connection, table: str) -> set[str]:

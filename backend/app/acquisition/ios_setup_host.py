@@ -22,16 +22,25 @@ _QUIET_OK = frozenset(
     {
         "ios_pair_validate",
         "ios_list_apps_usb",
+        "ios_list_apps_windows",
+        "ios_usbipd_list",
         "ios_devmode_get",
     }
 )
 
-WDA_BUNDLE_RE = re.compile(r"com\.facebook\.WebDriverAgentRunner[^\s,]*")
+# AltServer / Apple ID resign replaces com.facebook with the signing-team prefix.
+WDA_BUNDLE_RE = re.compile(
+    r"(?:[A-Za-z0-9-]+\.)+WebDriverAgentRunner(?:\.[A-Za-z0-9._-]+)*"
+)
 UNTRUSTED_RE = re.compile(
     r"deviceprocesscontrolservice|Error code: 2|could not get pid|Untrusted|not verified",
     re.IGNORECASE,
 )
 EMAIL_RE = re.compile(r"^([^@\s]+)@([^@\s]+\.[^@\s]+)$")
+LOCKDOWN_RE = re.compile(
+    r"could not connect to lockdownd|mux error \(-8\)|lockdownd, error code",
+    re.IGNORECASE,
+)
 
 
 def _tool_env() -> dict[str, str]:
@@ -81,6 +90,40 @@ def parse_puller_env() -> dict[str, str]:
     return parsed
 
 
+def is_lockdown_error(blob: str) -> bool:
+    return bool(LOCKDOWN_RE.search(blob or ""))
+
+
+_WINDOWS_WDA_LOG_OK = re.compile(
+    r"Installation Succeeded|WDA terdeteksi|WDA sudah terpasang",
+    re.IGNORECASE,
+)
+_WINDOWS_WDA_LOG_FAIL = re.compile(r"Install WDA gagal \(exit", re.IGNORECASE)
+_WINDOWS_WDA_LOG_MAX_AGE_S = 12 * 3600
+
+
+def windows_install_log_shows_wda(text: str) -> bool:
+    last_ok = -1
+    last_fail = -1
+    for index, line in enumerate((text or "").splitlines()):
+        if _WINDOWS_WDA_LOG_OK.search(line):
+            last_ok = index
+        if _WINDOWS_WDA_LOG_FAIL.search(line):
+            last_fail = index
+    return last_ok >= 0 and last_ok > last_fail
+
+
+def usbipd_apple_attached_to_wsl(blob: str) -> bool:
+    for line in (blob or "").splitlines():
+        lower = line.lower()
+        if "05ac:12a8" not in lower and "05ac:12ab" not in lower:
+            continue
+        parts = line.split()
+        if parts and parts[-1] == "Attached":
+            return True
+    return False
+
+
 def extract_wda_bundle(blob: str) -> str | None:
     match = WDA_BUNDLE_RE.search(blob)
     return match.group(0) if match else None
@@ -99,10 +142,19 @@ class IosSetupTransport(Protocol):
     def resolve_altserver(self) -> Path | None: ...
     def apple_credentials(self) -> tuple[str, str] | None: ...
     def apple_id_hint(self) -> str | None: ...
+    def uses_windows_wda_install(self) -> bool: ...
+    def windows_wda_present_from_log(self, *, since_unix: float | None = None) -> bool: ...
+    def invalidate_usb_location(self) -> None: ...
+    async def restore_usb_to_wsl(self) -> None: ...
+    def hold_usb_on_windows(self) -> None: ...
+    async def release_usb_to_windows(self) -> None: ...
     async def wda_http_ready(self) -> bool: ...
     def stack_udid_matches(self, udid: str) -> bool: ...
     async def start_altserver(
         self, udid: str, ipa: Path, apple_id: str, password: str
+    ) -> asyncio.subprocess.Process: ...
+    async def start_windows_wda_install(
+        self, udid: str, ipa: Path
     ) -> asyncio.subprocess.Process: ...
 
 
@@ -112,6 +164,68 @@ class LiveIosSetupHost:
         self._pair_udid: str | None = None
         self._pair_ok = False
         self._pair_ok_until = 0.0
+        self._pair_lockdown = False
+        self._usb_wsl: bool | None = None
+        self._usb_wsl_until = 0.0
+
+    def _invalidate_pair(self) -> None:
+        self._pair_ok = False
+        self._pair_ok_until = 0.0
+
+    def pair_lockdown_stale(self) -> bool:
+        return self._pair_lockdown
+
+    def invalidate_usb_location(self) -> None:
+        self._usb_wsl = None
+        self._usb_wsl_until = 0.0
+
+    async def restore_usb_to_wsl(self) -> None:
+        from app.acquisition.ios_usb_wsl import ensure_iphone_on_wsl
+
+        self.invalidate_usb_location()
+        await ensure_iphone_on_wsl(force=True)
+
+    def hold_usb_on_windows(self) -> None:
+        from app.acquisition.ios_usbmux import mark_iphone_usb_windows
+
+        mark_iphone_usb_windows()
+        self.invalidate_usb_location()
+
+    async def release_usb_to_windows(self) -> None:
+        self.hold_usb_on_windows()
+        script = _puller_root() / "ios_automator" / "scripts" / "release_iphone_windows.sh"
+        if not script.is_file():
+            return
+        try:
+            await self._run(
+                ["bash", str(script)],
+                timeout=20.0,
+                operation="ios_usb_release_windows",
+                cwd=_puller_root(),
+            )
+        except AcquisitionError:
+            write_setup_ios_log(
+                "WARN",
+                "ios_usb_release_windows",
+                detail="detach usbipd skipped",
+            )
+
+    def windows_wda_present_from_log(self, *, since_unix: float | None = None) -> bool:
+        path = Path("/mnt/c/Users/Admin/wda/install-wda.log")
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return False
+        now = time.time()
+        if now - mtime > _WINDOWS_WDA_LOG_MAX_AGE_S:
+            return False
+        if since_unix is not None and mtime < since_unix:
+            return False
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")[-200_000:]
+        except OSError:
+            return False
+        return windows_install_log_shows_wda(text)
 
     async def _run(
         self,
@@ -188,8 +302,10 @@ class LiveIosSetupHost:
                 udid=udid,
             )
             ok = result.returncode == 0
+            blob = f"{result.stdout or ''}\n{result.stderr or ''}"
             self._pair_udid = udid
             self._pair_ok = ok
+            self._pair_lockdown = (not ok) and is_lockdown_error(blob)
             self._pair_ok_until = now + (8.0 if ok else 4.0)
             return ok
 
@@ -201,15 +317,93 @@ class LiveIosSetupHost:
             udid=udid,
         )
 
+    async def apple_usb_attached_to_wsl(self) -> bool:
+        now = time.monotonic()
+        if self._usb_wsl is not None and now < self._usb_wsl_until:
+            return self._usb_wsl
+        try:
+            result = await self._run(
+                ["usbipd.exe", "list"],
+                timeout=5.0,
+                operation="ios_usbipd_list",
+            )
+        except AcquisitionError:
+            self._usb_wsl = True
+            self._usb_wsl_until = now + 4.0
+            return True
+        attached = usbipd_apple_attached_to_wsl(
+            f"{result.stdout or ''}\n{result.stderr or ''}"
+        )
+        self._usb_wsl = attached
+        self._usb_wsl_until = now + 4.0
+        return attached
+
+    async def _list_wda_windows(self, udid: str) -> str | None:
+        script = _puller_root() / "ios_automator" / "scripts" / "check_wda_windows.sh"
+        if not script.is_file():
+            return None
+        try:
+            result = await self._run(
+                ["bash", str(script), udid],
+                timeout=20.0,
+                operation="ios_list_apps_windows",
+                cwd=_puller_root(),
+                udid=udid,
+            )
+        except AcquisitionError:
+            return None
+        return extract_wda_bundle(f"{result.stdout or ''}\n{result.stderr or ''}")
+
+    async def _launch_windows(self, udid: str, bundle: str) -> str:
+        script = _puller_root() / "ios_automator" / "scripts" / "launch_wda_windows.sh"
+        if not script.is_file():
+            return "error"
+        try:
+            result = await self._run(
+                ["bash", str(script), udid, bundle],
+                timeout=20.0,
+                operation="ios_launch_wda_windows",
+                cwd=_puller_root(),
+                udid=udid,
+            )
+        except AcquisitionError:
+            return "error"
+        blob = f"{result.stdout or ''}\n{result.stderr or ''}"
+        if UNTRUSTED_RE.search(blob):
+            return "untrusted"
+        if result.returncode == 0:
+            return "ok"
+        return "error"
+
     async def list_wda_bundle(self, udid: str, *, use_tunnel: bool = False) -> str | None:
+        windows = self.uses_windows_wda_install()
+        if windows:
+            if not await self.apple_usb_attached_to_wsl():
+                listed = await self._list_wda_windows(udid)
+                if listed:
+                    return listed
+                return None
         usb = await self._run(
             ["ideviceinstaller", "-u", udid, "-l"],
-            timeout=12.0,
+            timeout=8.0 if windows else 12.0,
             operation="ios_list_apps_usb",
             udid=udid,
         )
+        usb_blob = f"{usb.stdout or ''}\n{usb.stderr or ''}"
         bundle = extract_wda_bundle(usb.stdout or "")
-        if bundle or not use_tunnel:
+        if bundle:
+            return bundle
+        lockdown = is_lockdown_error(usb_blob)
+        if lockdown:
+            self._invalidate_pair()
+            self._pair_lockdown = True
+            write_setup_ios_log(
+                "WARN",
+                "ios_list_apps_usb",
+                detail="lockdownd unreachable; not treating as WDA missing",
+                udid=udid,
+            )
+        if windows or not use_tunnel:
             return bundle
         tunnel = await self._run(
             [
@@ -320,6 +514,9 @@ class LiveIosSetupHost:
         return fallback.returncode == 0
 
     async def launch_bundle(self, udid: str, bundle: str) -> str:
+        windows = self.uses_windows_wda_install()
+        if windows:
+            return await self._launch_windows(udid, bundle)
         result = await self._run(
             [
                 "ios",
@@ -381,6 +578,14 @@ class LiveIosSetupHost:
             return None
         return mask_apple_id(creds[0])
 
+    def uses_windows_wda_install(self) -> bool:
+        if os.environ.get("USBMUXD_SOCKET_ADDRESS"):
+            return False
+        try:
+            return "microsoft" in Path("/proc/version").read_text(encoding="utf-8").lower()
+        except OSError:
+            return False
+
     async def wda_http_ready(self) -> bool:
         from app.acquisition.ios_social import _wda_ready
 
@@ -431,4 +636,39 @@ class LiveIosSetupHost:
             raise acquisition_error(
                 ErrorCategory.DEPENDENCY_NOT_FOUND,
                 "AltServer tidak dapat dijalankan.",
+            ) from exc
+
+    async def start_windows_wda_install(
+        self, udid: str, ipa: Path
+    ) -> asyncio.subprocess.Process:
+        script = _puller_root() / "ios_automator" / "scripts" / "install_wda_windows.sh"
+        if not script.is_file():
+            raise acquisition_error(
+                ErrorCategory.DEPENDENCY_NOT_FOUND,
+                "Skrip install_wda_windows.sh tidak ditemukan.",
+            )
+        env = {
+            **_tool_env(),
+            "SIKSIK_WDA_INSTALL_WAIT_ENTER": "0",
+        }
+        write_setup_ios_log(
+            "INFO",
+            "windows_wda_install_start",
+            detail=f"script={script.name} ipa={ipa.name}",
+            udid=udid,
+        )
+        try:
+            return await asyncio.create_subprocess_exec(
+                "bash",
+                str(script),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+                cwd=str(_puller_root()),
+            )
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            raise acquisition_error(
+                ErrorCategory.DEPENDENCY_NOT_FOUND,
+                "Tidak dapat menjalankan install_wda_windows.sh.",
             ) from exc

@@ -225,12 +225,26 @@ if [[ "${SADT_SD_DETECTOR_ENABLED}" == "1" ]]; then
   start_sd_sidecar
 fi
 
+# iPhone USB default di WSL. Windows AMDS hanya saat pasang WDA.
+if grep -qi microsoft /proc/version 2>/dev/null; then
+  IPHONE_WSL="$ROOT/ios-media-puller/ios_automator/scripts/ensure_iphone_wsl.sh"
+  if [[ -f "$IPHONE_WSL" ]]; then
+    echo "iPhone USB → WSL (default SATRIA)…"
+    bash "$IPHONE_WSL" --startup || true
+  fi
+fi
+
 # Watchdog: if uvicorn dies (OOM/Killed:9), bring it back without killing Vite.
+# Do not restart after Ctrl+C / SIGTERM (uvicorn often exits 0 after graceful stop).
 API_WATCHDOG_PID=""
 (
+  trap 'exit 0' INT TERM
   while true; do
     uvicorn app.main:app --host "$API_HOST" --port "$API_PORT" --workers 1
     ec=$?
+    if [[ "$ec" -eq 0 || "$ec" -eq 130 || "$ec" -eq 143 ]]; then
+      exit "$ec"
+    fi
     echo "API exited (code=$ec) — restarting in 3s…"
     sleep 3
   done
@@ -255,10 +269,12 @@ npx vite --host "$UI_BIND" --port "$UI_PORT" &
 UI_PID=$!
 
 cleanup() {
-  kill "$UI_PID" 2>/dev/null || true
-  if [[ -n "${API_WATCHDOG_PID}" ]]; then
+  if [[ -n "${UI_PID:-}" ]]; then
+    kill "$UI_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${API_WATCHDOG_PID:-}" ]]; then
+    pkill -P "$API_WATCHDOG_PID" 2>/dev/null || true
     kill "$API_WATCHDOG_PID" 2>/dev/null || true
-    # Also stop the child uvicorn if still bound.
     if command -v lsof >/dev/null 2>&1; then
       PIDS="$(lsof -ti:"$API_PORT" || true)"
       if [[ -n "${PIDS}" ]]; then
@@ -266,13 +282,32 @@ cleanup() {
         kill $PIDS 2>/dev/null || true
       fi
     fi
+    wait "$API_WATCHDOG_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${UI_PID:-}" ]]; then
+    wait "$UI_PID" 2>/dev/null || true
   fi
   if [[ "${SIDECAR_OWNED}" == "1" && -n "${SIDECAR_PID}" ]]; then
     kill "$SIDECAR_PID" 2>/dev/null || true
     wait "$SIDECAR_PID" 2>/dev/null || true
   fi
+  pkill -P $$ 2>/dev/null || true
+  if command -v lsof >/dev/null 2>&1; then
+    extra="$(lsof -ti:"${SD_PORT}" || true)"
+    if [[ -n "${extra}" ]]; then
+      # shellcheck disable=SC2086
+      kill $extra 2>/dev/null || true
+    fi
+  fi
 }
-trap cleanup EXIT INT TERM
+
+stop_from_signal() {
+  trap - EXIT INT TERM
+  cleanup
+  exit 130
+}
+trap stop_from_signal INT TERM
+trap cleanup EXIT
 
 echo ""
 if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -296,4 +331,4 @@ else
   echo "    powershell -ExecutionPolicy Bypass -File C:\\siksik\\scripts\\expose_lan.ps1"
   echo "  Ctrl+C to stop"
 fi
-wait
+wait "$UI_PID" "$API_WATCHDOG_PID"

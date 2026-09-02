@@ -726,6 +726,8 @@ async def collect(args: argparse.Namespace) -> int:
     from pymobiledevice3.lockdown import create_using_usbmux
     from pymobiledevice3.services.afc import AfcService
 
+    from wsl_usbmux import lockdown_usbmux_kwargs
+
     output = args.output.expanduser().resolve()
     if output.exists():
         raise RuntimeError("output directory already exists")
@@ -734,7 +736,7 @@ async def collect(args: argparse.Namespace) -> int:
     artifacts: list[Artifact] = []
     warnings: set[str] = set()
     budget = CaptureBudget(args.max_items, args.max_bytes, args.max_file_bytes)
-    lockdown = await create_using_usbmux(serial=args.udid)
+    lockdown = await create_using_usbmux(serial=args.udid, **lockdown_usbmux_kwargs())
     try:
         async with AfcService(lockdown) as afc:
             database = await _pull_photos_database(

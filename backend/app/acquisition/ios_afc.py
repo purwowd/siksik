@@ -22,7 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.acquisition.contracts import ProgressCallback
 from app.acquisition.errors import AcquisitionError, ErrorCategory, acquisition_error
-from app.acquisition.process import run_process
+from app.acquisition.ios_usbmux import apply_usbmux_env, lockdown_error_token
+from app.acquisition.process import ProcessResult, run_process
 from app.core.config import settings
 from app.models.schemas import AcquisitionMode, SessionStatus
 
@@ -228,6 +229,20 @@ def _puller_root() -> Path:
 
 def _venv_python() -> Path:
     return _puller_root() / ".venv" / "bin" / "python"
+
+
+def _puller_env(device_id: str) -> dict[str, str]:
+    return apply_usbmux_env(
+        {
+            **os.environ,
+            "UDID": device_id,
+            "PATH": f"{Path.home() / '.local' / 'bin'}:{os.environ.get('PATH', '')}",
+        }
+    )
+
+
+def _process_lockdown_token(result: ProcessResult) -> str | None:
+    return lockdown_error_token(f"{result.stderr or ''}\n{result.stdout or ''}")
 
 
 def _count_for_mode(mode: AcquisitionMode, quick: int, full: int) -> int:
@@ -495,15 +510,12 @@ async def acquire_ios_afc_media(
     if work.exists():
         await _run_blocking(shutil.rmtree, work)
     work.mkdir(parents=True, exist_ok=True)
-    env = {
-        **os.environ,
-        "UDID": device_id,
-        "PATH": f"{Path.home() / '.local' / 'bin'}:{os.environ.get('PATH', '')}",
-    }
+    env = _puller_env(device_id)
     from app.acquisition.time_scope import build_time_scope
 
     scope = build_time_scope(mode)
     recent_error: AcquisitionError | None = None
+    recent_lockdown_token: str | None = None
     recent_succeeded = False
     moved_recent = 0
     try:
@@ -547,9 +559,14 @@ async def acquire_ios_afc_media(
                 staging,
             )
         else:
+            recent_lockdown_token = _process_lockdown_token(result)
             recent_error = acquisition_error(
                 ErrorCategory.AGENT_UNREACHABLE,
-                "AFC media iOS gagal menarik DCIM.",
+                (
+                    "AFC media iOS gagal menarik DCIM (koneksi USB/usbmux)."
+                    if recent_lockdown_token == "ConnectionFailedToUsbmuxdError"
+                    else "AFC media iOS gagal menarik DCIM."
+                ),
                 retryable=True,
                 dependency_exit_code=result.returncode,
             )
@@ -557,6 +574,7 @@ async def acquire_ios_afc_media(
     moved_library = 0
     library_manifest: IOSLibraryManifestV1 | None = None
     library_error: AcquisitionError | None = None
+    library_lockdown_token: str | None = None
     if settings.ios_photo_library_recovery_enabled:
         worker = _puller_root() / "pull_library_artifacts.py"
         if not worker.is_file():
@@ -632,6 +650,7 @@ async def acquire_ios_afc_media(
                         staging,
                     )
                 else:
+                    library_lockdown_token = _process_lockdown_token(library_result)
                     library_error = acquisition_error(
                         ErrorCategory.AGENT_UNREACHABLE,
                         "Recovery Photos iOS gagal.",
@@ -654,6 +673,7 @@ async def acquire_ios_afc_media(
                 "session_id": session_id,
                 "dependency_exit_code": recent_error.dependency_exit_code,
                 "error_category": recent_error.category.value,
+                "lockdown_error": recent_lockdown_token,
             },
         )
     if library_error is not None:
@@ -663,6 +683,7 @@ async def acquire_ios_afc_media(
                 "session_id": session_id,
                 "dependency_exit_code": library_error.dependency_exit_code,
                 "error_category": library_error.category.value,
+                "lockdown_error": library_lockdown_token,
             },
         )
 
@@ -737,11 +758,7 @@ async def acquire_ios_afc_docs(
         f"iOS AFC dokumen ({cap_label})…",
         acquisition_method="ios_afc_docs",
     )
-    env = {
-        **os.environ,
-        "UDID": device_id,
-        "PATH": f"{Path.home() / '.local' / 'bin'}:{os.environ.get('PATH', '')}",
-    }
+    env = _puller_env(device_id)
     from app.acquisition.time_scope import build_time_scope
 
     scope = build_time_scope(mode)
@@ -780,17 +797,23 @@ async def acquire_ios_afc_docs(
     # Empty roots → exit 0 with no files is OK (fail-soft).
     if result.returncode not in (0,):
         await _run_blocking(shutil.rmtree, work, ignore_errors=True)
+        token = _process_lockdown_token(result)
         logger.info(
             "ios_afc_docs_failed",
             extra={
                 "session_id": session_id,
                 "dependency_exit_code": result.returncode,
                 "error_category": ErrorCategory.AGENT_UNREACHABLE.value,
+                "lockdown_error": token,
             },
         )
         raise acquisition_error(
             ErrorCategory.AGENT_UNREACHABLE,
-            "AFC dokumen iOS gagal.",
+            (
+                "AFC dokumen iOS gagal (koneksi USB/usbmux)."
+                if token == "ConnectionFailedToUsbmuxdError"
+                else "AFC dokumen iOS gagal."
+            ),
             retryable=True,
             dependency_exit_code=result.returncode,
         )

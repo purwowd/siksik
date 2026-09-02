@@ -17,6 +17,8 @@ export ROOT
 # shellcheck disable=SC1091
 [[ -f "$ROOT/.env" ]] && set -a && source "$ROOT/.env" && set +a
 [[ -f "$ROOT/ios_automator/scripts/run_log.sh" ]] && source "$ROOT/ios_automator/scripts/run_log.sh"
+# shellcheck source=ios_usb.sh
+source "$ROOT/ios_automator/scripts/ios_usb.sh"
 
 die() {
   echo "[ensure-wda] $*" >&2
@@ -47,11 +49,31 @@ detect_wda_bundle_tunnel() {
     | awk '/WebDriverAgentRunner/ {print $1; exit}'
 }
 
+detect_wda_bundle_windows() {
+  local script="$ROOT/ios_automator/scripts/check_wda_windows.sh"
+  [[ -x "$script" || -f "$script" ]] || return 1
+  ios_usb_prefer_windows_install || return 1
+  ios_usb_iphone_in_lsusb && return 1
+  bash "$script" "$UDID" 2>/dev/null \
+    | awk '/WebDriverAgentRunner/ {print $1; exit}'
+}
+
 detect_wda_bundle_usb() {
   if ! command -v ideviceinstaller >/dev/null 2>&1; then
     return 1
   fi
-  ideviceinstaller -l 2>/dev/null \
+  set +e
+  ios_usb_wda_status "$UDID"
+  local st=$?
+  set -e
+  if [[ "$st" -eq 3 ]]; then
+    log "lockdownd macet — bukan 'WDA belum terpasang'. Pulihkan USB, jangan resign."
+    return 1
+  fi
+  if [[ "$st" -ne 0 ]]; then
+    return 1
+  fi
+  ideviceinstaller ${UDID:+-u "$UDID"} -l 2>/dev/null \
     | awk -F', ' '/WebDriverAgentRunner/ {gsub(/,.*/,"",$1); print $1; exit}'
 }
 
@@ -63,11 +85,20 @@ detect_wda_bundle() {
     echo "$WDA_BUNDLE"
     return 0
   fi
+  bundle="$(detect_wda_bundle_windows || true)"
+  if [[ -n "$bundle" ]]; then
+    echo "$bundle" >"$BUNDLE_CACHE"
+    echo "$bundle"
+    return 0
+  fi
   bundle="$(detect_wda_bundle_usb || true)"
   if [[ -n "$bundle" ]]; then
     echo "$bundle" >"$BUNDLE_CACHE"
     echo "$bundle"
     return 0
+  fi
+  if ios_usb_prefer_windows_install; then
+    return 1
   fi
   bundle="$(detect_wda_bundle_tunnel || true)"
   if [[ -n "$bundle" ]]; then
@@ -77,7 +108,7 @@ detect_wda_bundle() {
   fi
   if [[ -f "$BUNDLE_CACHE" ]]; then
     bundle="$(tr -d '[:space:]' <"$BUNDLE_CACHE" || true)"
-    if [[ "$bundle" == com.facebook.WebDriverAgentRunner* ]]; then
+    if [[ "$bundle" == *".WebDriverAgentRunner"* ]]; then
       # Cache per-UDID hanya sebagai fallback setelah list apps gagal.
       echo "$bundle"
       return 0
@@ -186,9 +217,8 @@ install_wda() {
   if declare -F log_wda_install_start >/dev/null 2>&1; then
     log_wda_install_start
   fi
-  log "install via AltServer | ipa=$ipa"
-  log "tunggu banner VERIFIKASI APPLE ID — ketik kode dari layar iPhone"
-  bash "$ROOT/ios_automator/scripts/install_wda_altserver.sh" "$ipa"
+  log "install WDA"
+  ios_usb_wda_install "$ipa"
   rm -f "$BUNDLE_CACHE"
 }
 
@@ -340,7 +370,7 @@ ensure_wda_ready() {
     die "WDA launch gagal (kemungkinan cert expired ~7 hari).
 IOS_AUTOMATOR_INSTALL_WDA=0 → tidak reinstall otomatis dari run_ig_profile.
 Jalankan manual di terminal interaktif:
-  bash $ROOT/ios_automator/scripts/install_wda_altserver.sh
+  bash $ROOT/ios_automator/scripts/install_wda_windows.sh
 Lalu Trust developer di iPhone."
   fi
 
@@ -356,5 +386,5 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   command -v ios >/dev/null 2>&1 || die "go-ios (ios) tidak ada di PATH"
   bundle="$(ensure_wda_ready)"
   # stdout hanya bundle id (hindari polusi env / argument list too long)
-  grep -oE 'com\.facebook\.WebDriverAgentRunner[^[:space:]]+' <<<"$bundle" | tail -1
+  grep -oE '([A-Za-z0-9-]+\.)+WebDriverAgentRunner(\.[A-Za-z0-9._-]+)*' <<<"$bundle" | tail -1
 fi

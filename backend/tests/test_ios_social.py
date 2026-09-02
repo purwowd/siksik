@@ -11,6 +11,7 @@ from app.acquisition.ios_social import (
     PACKAGE_X,
     _wda_ready,
     build_wda_flow_job,
+    ios_social_operator_target,
     records_from_fb_output,
     records_from_ig_output,
     records_from_x_output,
@@ -274,6 +275,20 @@ def test_records_from_fb_skips_activity_log_hub_chrome(tmp_path: Path) -> None:
         artifacts_dir=arts,
     )
     assert [item[0].metadata.social_scope for item in records] == ["own_profile"]
+
+
+@pytest.mark.unit
+def test_ios_social_operator_target_uses_ios_bundles() -> None:
+    assert ios_social_operator_target(PACKAGE_INSTAGRAM) == (
+        "Instagram (com.burbn.instagram)"
+    )
+    assert ios_social_operator_target(PACKAGE_X) == "X (com.atebits.Tweetie2)"
+    assert ios_social_operator_target(PACKAGE_FACEBOOK) == (
+        "Facebook (com.facebook.Facebook)"
+    )
+    assert "android" not in ios_social_operator_target(PACKAGE_INSTAGRAM)
+    assert "android" not in ios_social_operator_target(PACKAGE_X)
+    assert "katana" not in ios_social_operator_target(PACKAGE_FACEBOOK)
 
 
 @pytest.mark.unit

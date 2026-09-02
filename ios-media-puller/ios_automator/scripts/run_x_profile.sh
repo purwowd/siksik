@@ -15,13 +15,13 @@ source "$ROOT/ios_automator/scripts/run_log.sh"
 # shellcheck disable=SC1091
 [[ -f "$ROOT/.env" ]] && set -a && source "$ROOT/.env" && set +a
 
+# shellcheck source=ios_usb.sh
+source "$ROOT/ios_automator/scripts/ios_usb.sh"
+
 WDA_DIR="${WDA_DIR:-$HOME/wda}"
 
 wda_on_device_usb() {
-  if ! command -v ideviceinstaller >/dev/null 2>&1; then
-    return 2
-  fi
-  ideviceinstaller -l 2>/dev/null | grep -qi 'WebDriverAgentRunner\|xctrunner'
+  ios_usb_wda_status
 }
 
 check_wda_install_prereqs() {
@@ -86,6 +86,12 @@ log_device_connected
 
 if ! wda_on_device_usb; then
   wda_usb_rc=$?
+  if [[ "$wda_usb_rc" -eq 3 ]]; then
+    run_log ERROR "lockdownd macet — pulihkan USB, jangan treat sebagai WDA absen"
+    echo "[preflight] Could not connect to lockdownd. USB macet setelah tulis IPA." >&2
+    echo "  bash ios_automator/scripts/recover_ios_lockdown.sh" >&2
+    exit 2
+  fi
   if [[ "$wda_usb_rc" -eq 1 ]]; then
     log_wda_missing
     check_wda_install_prereqs
