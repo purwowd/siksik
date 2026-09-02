@@ -20,6 +20,32 @@ internal object SocialUiTextPolicy {
         "diikuti oleh ",
     )
 
+    /** Empty-state copy on X profile timelines (EN + ID, including recent X app variants). */
+    val xEmptyTimelineLabels = listOf(
+        "No posts yet",
+        "No replies yet",
+        "Belum ada postingan",
+        "Belum ada balasan",
+        "hasn't posted",
+        "hasn’t posted",
+        "haven't posted",
+        "haven’t posted",
+        "You haven't posted yet",
+        "You haven’t posted yet",
+        "When you send posts or replies",
+        "belum memposting",
+        "Post now",
+        "Posting sekarang",
+        "Kirim postingan",
+        "Jika sudah, Anda dapat melihatnya di sini.",
+        "Belum ada apa-apa di sini.",
+        "belum ada apa-apa",
+        "When you post",
+        "Share your thoughts",
+        "Share a post",
+        "Bagikan pemikiran",
+    )
+
     val AUTH_WALL_EXACT_LABELS = listOf(
         "Log in",
         "Log In",
@@ -143,6 +169,12 @@ internal object SocialUiTextPolicy {
         return xProfileMetadataPrefixes.any(normalized::startsWith)
     }
 
+    fun isXEmptyTimelineText(value: String): Boolean =
+        xEmptyTimelineLabels.any { phrase -> value.contains(phrase, ignoreCase = true) }
+
+    fun labelsContainXEmptyTimeline(labels: Iterable<String>): Boolean =
+        labels.any(::isXEmptyTimelineText)
+
     fun isAuthWallText(value: String): Boolean {
         val normalized = normalizeAuthLabel(value)
         if (normalized.isEmpty()) return false
@@ -204,9 +236,49 @@ internal object SocialUiTextPolicy {
         if (dump.isBlank()) return false
         val lower = dump.lowercase(Locale.ROOT)
         if (!lower.contains("com.facebook.katana")) return false
-        if (lower.contains("loginactivity") || lower.contains("loggedout")) return true
+        if (looksLikeFacebookHomeFeedDump(dump)) return false
+        if (lower.contains("loggedout")) return true
         return facebookLoginPhrases.any(lower::contains)
     }
+
+    fun looksLikeFacebookHomeFeedDump(dump: String): Boolean {
+        if (dump.isBlank()) return false
+        val lower = dump.lowercase(Locale.ROOT)
+        if (!lower.contains("com.facebook.katana")) return false
+        return facebookHomeFeedPhrases.any(lower::contains)
+    }
+
+    fun looksLikeFacebookHomeFeedLabels(labels: Iterable<String>): Boolean {
+        val joined = labels
+            .map { it.trim().lowercase(Locale.ROOT) }
+            .filter(String::isNotEmpty)
+            .joinToString(" ")
+        if (joined.isEmpty()) return false
+        return facebookHomeFeedPhrases.any(joined::contains)
+    }
+
+    fun looksLikeFacebookLoginLabels(labels: Iterable<String>): Boolean {
+        val joined = labels
+            .map { it.trim().lowercase(Locale.ROOT) }
+            .filter(String::isNotEmpty)
+            .joinToString(" ")
+        if (joined.isEmpty()) return false
+        return facebookLoginPhrases.any(joined::contains)
+    }
+
+    private val facebookHomeFeedPhrases = listOf(
+        "what's on your mind",
+        "on your mind",
+        "apa yang anda pikirkan",
+        "di pikiranmu",
+        "beranda, tab",
+        "home, tab",
+        "logo facebook",
+        "buka profil",
+        "open profile",
+        "pengiriman pesan",
+        "messaging",
+    )
 
     private val facebookLoginPhrases = listOf(
         "join facebook",

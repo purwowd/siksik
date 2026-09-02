@@ -709,6 +709,7 @@ def _scope_progress_line(
     screenshot_count: int = 0,
     failure_class: str | None = None,
     reason: str | None = None,
+    diagnosis: str | None = None,
 ) -> str:
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -724,6 +725,8 @@ def _scope_progress_line(
         payload["failure_class"] = failure_class
     if reason is not None:
         payload["reason"] = reason
+    if diagnosis is not None:
+        payload["diagnosis"] = diagnosis
     return (
         "INSTRUMENTATION_STATUS: siksik_scope_progress="
         + json.dumps(payload, separators=(",", ":"))
@@ -749,6 +752,27 @@ def test_parse_instrumentation_scope_progress_accepts_valid_line() -> None:
     assert parsed.attempt == 2
     assert parsed.scroll_count == 4
     assert parsed.screenshot_count == 1
+
+
+@pytest.mark.unit
+def test_parse_instrumentation_scope_progress_accepts_diagnosis() -> None:
+    parsed = parse_instrumentation_scope_progress(
+        _scope_progress_line(
+            target="com.twitter.android",
+            scope="own_replies",
+            stage="diagnosis",
+            state="running",
+            attempt=2,
+            failure_class="observation",
+            reason="x_timeline_extraction_failed",
+            diagnosis='{"a11y_nodes":12,"shell_dump_status":"timeout"}',
+        ),
+        "com.twitter.android",
+    )
+    assert parsed is not None
+    assert parsed.diagnosis is not None
+    assert "timeout" in parsed.diagnosis
+    assert parsed.reason == "x_timeline_extraction_failed"
 
 
 @pytest.mark.unit
@@ -809,6 +833,7 @@ def test_enforce_required_scope_evidence_fails_when_observed_scopes_incomplete()
             attempt=1,
             failure_class=None,
             reason=None,
+            diagnosis=None,
             scroll_count=0,
             screenshot_count=0,
         ),
@@ -820,6 +845,7 @@ def test_enforce_required_scope_evidence_fails_when_observed_scopes_incomplete()
             attempt=3,
             failure_class="action",
             reason="scope_navigation_failed",
+            diagnosis=None,
             scroll_count=0,
             screenshot_count=0,
         ),
@@ -853,6 +879,7 @@ def test_enforce_required_scope_evidence_keeps_complete_when_all_required_comple
             attempt=1,
             failure_class=None,
             reason=None,
+            diagnosis=None,
             scroll_count=1,
             screenshot_count=0,
         )

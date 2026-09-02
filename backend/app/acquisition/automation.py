@@ -76,6 +76,7 @@ class AutomationScopeProgressV1:
     attempt: int
     failure_class: str | None
     reason: str | None
+    diagnosis: str | None
     scroll_count: int
     screenshot_count: int
 
@@ -1159,6 +1160,7 @@ def parse_instrumentation_scope_progress(
     attempt = payload.get("attempt")
     failure_class = payload.get("failure_class")
     reason = payload.get("reason")
+    diagnosis = payload.get("diagnosis")
     scroll_count = payload.get("scroll_count")
     screenshot_count = payload.get("screenshot_count")
     valid_integer_fields = (
@@ -1190,6 +1192,13 @@ def parse_instrumentation_scope_progress(
                 or re.fullmatch(r"[a-z0-9_]{1,128}", reason) is None
             )
         )
+        or (
+            diagnosis is not None
+            and (
+                not isinstance(diagnosis, str)
+                or len(diagnosis) > 8_192
+            )
+        )
     ):
         raise acquisition_error(
             ErrorCategory.AGENT_INVALID_RESPONSE,
@@ -1203,6 +1212,7 @@ def parse_instrumentation_scope_progress(
         attempt=attempt,
         failure_class=failure_class,
         reason=reason,
+        diagnosis=diagnosis if isinstance(diagnosis, str) else None,
         scroll_count=scroll_count,
         screenshot_count=screenshot_count,
     )

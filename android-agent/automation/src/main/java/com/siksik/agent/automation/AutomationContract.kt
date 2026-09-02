@@ -51,6 +51,7 @@ data class AutomationScopeProgress(
     val attempt: Int,
     val failureClass: ScopeFailureClass? = null,
     val reason: String? = null,
+    val diagnosis: String? = null,
     val scrollCount: Int = 0,
     val screenshotCount: Int = 0,
 )
@@ -95,6 +96,7 @@ interface AutomationDriver {
         if (scrollForward()) ScrollResult.MOVED else ScrollResult.EXHAUSTED
     fun captureScope(scope: SocialScope, takeScreenshot: Boolean): ScopeCapture
     fun lastFailureReason(): String? = null
+    fun lastFailureDiagnosis(): String? = null
     fun recommendedAdditionalCaptures(scope: SocialScope): Int? = null
     fun requireSignedInSession(targetPackage: String): Boolean = true
     fun recoverScope(
@@ -435,13 +437,36 @@ class AutomationEngine(
                                 }
                                 scopeFailureReason = attemptOutcome.reason
                                     ?: "scope_navigation_failed"
-                                val failureClass = classifyScopeFailure(scopeFailureReason)
+                                val failureClass = ScopeFailurePolicy.classify(scopeFailureReason)
                                 logScopeFailure(
                                     strategy.targetPackage,
                                     scope,
                                     scopeFailureReason,
                                     attempt,
                                 )
+                                failureDiagnosis(driver)?.let { diagnosis ->
+                                    Log.i(
+                                        AUTOMATION_LOG_TAG,
+                                        "event=social_scope stage=diagnosis target=${strategy.targetPackage} " +
+                                            "scope=${scope.wireName} attempt=$attempt " +
+                                            "reason=$scopeFailureReason diagnosis=$diagnosis",
+                                    )
+                                    emitProgress(
+                                        onProgress,
+                                        AutomationScopeProgress(
+                                            strategy.targetPackage,
+                                            scope,
+                                            stage = "diagnosis",
+                                            state = "running",
+                                            attempt = attempt,
+                                            failureClass = failureClass,
+                                            reason = scopeFailureReason,
+                                            diagnosis = diagnosis,
+                                            scrollCount = scopeScrollCount,
+                                            screenshotCount = scopeScreenshotCount,
+                                        ),
+                                    )
+                                }
                                 emitProgress(
                                     onProgress,
                                     AutomationScopeProgress(
@@ -452,6 +477,7 @@ class AutomationEngine(
                                         attempt = attempt,
                                         failureClass = failureClass,
                                         reason = scopeFailureReason,
+                                        diagnosis = failureDiagnosis(driver),
                                         scrollCount = scopeScrollCount,
                                         screenshotCount = scopeScreenshotCount,
                                     ),
@@ -459,7 +485,7 @@ class AutomationEngine(
                                 if (
                                     attempt >= MAX_SCOPE_ATTEMPTS ||
                                     !isActive() ||
-                                    !isRetryableScopeFailure(scopeFailureReason)
+                                    !ScopeFailurePolicy.isRetryable(scopeFailureReason)
                                 ) {
                                     break
                                 }
@@ -554,7 +580,7 @@ class AutomationEngine(
                                     scope,
                                     "failed",
                                     attempt.coerceAtMost(MAX_SCOPE_ATTEMPTS),
-                                    classifyScopeFailure(finalReason),
+                                    ScopeFailurePolicy.classify(finalReason),
                                     finalReason,
                                     scopeScrollCount,
                                     scopeScreenshotCount,
@@ -769,27 +795,8 @@ class AutomationEngine(
         }
     }
 
-    private fun isRetryableScopeFailure(reason: String): Boolean =
-        reason !in NON_RETRYABLE_SCOPE_FAILURES &&
-            !reason.endsWith("_navigation_deadline") &&
-            !reason.endsWith("_deadline")
-
-    private fun classifyScopeFailure(reason: String): ScopeFailureClass = when {
-        reason.contains("content_not_visible") ||
-            reason.contains("content_empty") ||
-            reason.endsWith("_empty") -> ScopeFailureClass.EMPTY_CONTENT
-        reason.contains("not_verified") ||
-            reason.contains("verification") ||
-            reason.contains("not_ready") ||
-            reason == "scope_lost" ||
-            reason == "scope_exhaustion_unverified" ||
-            reason == "scope_checkpoint_rejected" -> ScopeFailureClass.POSTCONDITION
-        reason.contains("not_found") ||
-            reason.contains("capture") ||
-            reason.contains("not_foreground") ||
-            reason.contains("missing") -> ScopeFailureClass.OBSERVATION
-        else -> ScopeFailureClass.ACTION
-    }
+    private fun failureDiagnosis(driver: AutomationDriver): String? =
+        driver.lastFailureDiagnosis()?.takeIf { it.isNotBlank() }
 
     private fun emitProgress(
         callback: (AutomationScopeProgress) -> Unit,
@@ -876,14 +883,5 @@ class AutomationEngine(
     companion object {
         private const val AUTOMATION_LOG_TAG = "SIKSIKAutomation"
         internal const val MAX_SCOPE_ATTEMPTS = 4
-        private val NON_RETRYABLE_SCOPE_FAILURES = setOf(
-            "account_not_signed_in",
-            "crawl_cancelled",
-            "navigation_deadline",
-            "scope_checkpoint_rejected",
-            "scope_ledger_rejected",
-            "snapshot_store_rejected",
-            "target_not_installed",
-        )
     }
 }

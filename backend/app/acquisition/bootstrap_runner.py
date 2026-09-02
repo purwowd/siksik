@@ -476,6 +476,7 @@ class Phase7AndroidAgentRunner:
                     "attempt_started": "memulai",
                     "initial_captured": "bukti awal tersimpan",
                     "capture_scrolled": "mengambil halaman lanjutan",
+                    "diagnosis": "mendiagnosis kegagalan",
                     "attempt_failed": "percobaan gagal",
                     "recovery_failed": "pemulihan state gagal, mencoba ulang",
                     "state_recovered": "state dipulihkan",
@@ -515,6 +516,14 @@ class Phase7AndroidAgentRunner:
                 async def on_social_scope_progress(
                     progress: AutomationScopeProgressV1,
                 ) -> None:
+                    if progress.diagnosis:
+                        logger.info(
+                            "social_scope_diagnosis target=%s scope=%s reason=%s diagnosis=%s",
+                            progress.target_package,
+                            progress.scope,
+                            progress.reason,
+                            progress.diagnosis,
+                        )
                     app_label = social_labels.get(
                         progress.target_package,
                         progress.target_package,
@@ -526,10 +535,15 @@ class Phase7AndroidAgentRunner:
                         if progress.attempt > 0
                         else ""
                     )
+                    reason_suffix = (
+                        f" · {progress.reason}"
+                        if progress.reason and progress.stage in {"diagnosis", "attempt_failed"}
+                        else ""
+                    )
                     await context.on_progress(
                         SessionStatus.ACQUIRING,
                         12.0,
-                        f"Crawl {app_label} — {scope_label}: {stage_label}{attempt_suffix}",
+                        f"Crawl {app_label} — {scope_label}: {stage_label}{attempt_suffix}{reason_suffix}",
                         crawl_id=run.crawl_id,
                         crawl_state="social_automation",
                         crawl_source="accessibility_visible_ui",

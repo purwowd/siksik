@@ -69,6 +69,19 @@ class SocialUiTextPolicyTest {
     }
 
     @Test
+    fun detectsXEmptyTimelineInEnglishAndIndonesian() {
+        assertTrue(SocialUiTextPolicy.isXEmptyTimelineText("Belum ada postingan"))
+        assertTrue(SocialUiTextPolicy.isXEmptyTimelineText("Kirim postingan"))
+        assertTrue(
+            SocialUiTextPolicy.isXEmptyTimelineText(
+                "Jika sudah, Anda dapat melihatnya di sini.",
+            ),
+        )
+        assertTrue(SocialUiTextPolicy.labelsContainXEmptyTimeline(listOf("Posting sekarang")))
+        assertFalse(SocialUiTextPolicy.isXEmptyTimelineText("Isi balasan pengguna"))
+    }
+
+    @Test
     fun detectsFacebookLoginActivityComponent() {
         assertTrue(
             SocialUiTextPolicy.isFacebookLoginComponent(
@@ -100,6 +113,31 @@ class SocialUiTextPolicyTest {
         assertTrue(
             SocialUiTextPolicy.looksLikeFacebookLoginDump(
                 """<node package="com.facebook.katana" class="com.facebook.katana.LoginActivity" text="Join Facebook"/>""",
+            ),
+        )
+        assertFalse(
+            SocialUiTextPolicy.looksLikeFacebookLoginDump(
+                """<node package="com.facebook.katana" class="com.facebook.katana.LoginActivity" text="Apa yang Anda pikirkan?"/>""",
+            ),
+        )
+        assertTrue(
+            SocialUiTextPolicy.looksLikeFacebookHomeFeedDump(
+                """<node package="com.facebook.katana" text="Apa yang Anda pikirkan?"/>""",
+            ),
+        )
+        assertTrue(
+            SocialUiTextPolicy.looksLikeFacebookHomeFeedLabels(
+                listOf("Apa yang Anda pikirkan?", "Beranda, Tab 1 dari 5"),
+            ),
+        )
+        assertFalse(
+            SocialUiTextPolicy.looksLikeFacebookLoginLabels(
+                listOf("Apa yang Anda pikirkan?", "Beranda, Tab 1 dari 5"),
+            ),
+        )
+        assertTrue(
+            SocialUiTextPolicy.looksLikeFacebookLoginLabels(
+                listOf("Masuk ke Facebook", "Buat akun baru"),
             ),
         )
         assertFalse(

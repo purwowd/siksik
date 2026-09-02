@@ -20,6 +20,7 @@ internal class AutomationDebugMapper(
     private var targetDirectory: File? = null
     private var sequence = 0
     private var targetAttempt = 0
+    private var observationEntries = JSONArray()
 
     fun startTarget(packageName: String) {
         if (!enabled) return
@@ -50,6 +51,7 @@ internal class AutomationDebugMapper(
             targetAttempt += 1
         } else {
             entries = JSONArray()
+            observationEntries = JSONArray()
             sequence = 0
             targetAttempt = 1
         }
@@ -111,6 +113,22 @@ internal class AutomationDebugMapper(
         return captured
     }
 
+    fun recordObservation(
+        stage: String,
+        scope: SocialScope?,
+        payload: JSONObject,
+    ) {
+        if (!enabled || targetDirectory == null) return
+        observationEntries.put(
+            JSONObject()
+                .put("captured_at_epoch_ms", System.currentTimeMillis())
+                .put("stage", stage.take(MAX_STAGE_LENGTH))
+                .put("scope", scope?.wireName ?: JSONObject.NULL)
+                .put("payload", payload),
+        )
+        writeManifest()
+    }
+
     private fun writeManifest() {
         val directory = targetDirectory ?: return
         val target = File(directory, MANIFEST_FILE_NAME)
@@ -123,6 +141,7 @@ internal class AutomationDebugMapper(
                 .put("target_package", targetPackage ?: JSONObject.NULL)
                 .put("attempt", targetAttempt)
                 .put("screenshots", entries)
+                .put("observations", observationEntries)
             FileOutputStream(temporary).use { output ->
                 output.write(document.toString(2).toByteArray(Charsets.UTF_8))
             }

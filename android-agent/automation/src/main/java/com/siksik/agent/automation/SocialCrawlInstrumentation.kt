@@ -120,6 +120,7 @@ class SocialCrawlInstrumentation {
         .put("attempt", value.attempt)
         .put("failure_class", value.failureClass?.wireName ?: JSONObject.NULL)
         .put("reason", value.reason ?: JSONObject.NULL)
+        .put("diagnosis", value.diagnosis ?: JSONObject.NULL)
         .put("scroll_count", value.scrollCount)
         .put("screenshot_count", value.screenshotCount)
 
