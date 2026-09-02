@@ -1,10 +1,43 @@
 # SIKSIK Flow Implementation Changelog
 
-- Work period: 2026-07-16 to 2026-08-30
+- Work period: 2026-07-16 to 2026-09-02
 - Status: Unreleased local changes
 - Git baseline: `78e39c6` (+ local batch below)
 - Android agent: `0.7.0`, API `1.0`
 - Primary project: `/home/me/siksik` (WSL lab); Mac mirror `/Users/macbook/Documents/Product1/siksik`
+
+## 2026-09-02: WhatsApp dual-layout automation and bounded recovery
+
+- Ported the updated `whatsapp_tools/wa_ui_automator.py` behavior into the
+  native SATRIA acquisition implementation without adding a runtime dependency
+  on the reference project. WhatsApp layout detection now prefers the new
+  bottom-right **You/Anda/Profile** tab when present and preserves the legacy
+  three-dot overflow → Settings path when it is absent.
+- New-layout navigation recognizes the profile/settings surface, performs
+  resolution-relative scrolling until the Chats row is visible, enters Chat
+  backup through invariant resource IDs, and supports both Indonesian and
+  English labels. The existing legacy flow remains available in the same state
+  machine.
+- Navigation now has 16 bounded state probes, safe cancellation-dialog handling,
+  informational-dialog dismissal, Back recovery, and two in-attempt relaunch
+  checkpoints. UI hierarchy capture retries locally with explicit command
+  deadlines; the outer acquisition contract remains exactly four complete
+  attempts and still fails closed after the fourth UI failure.
+- Existing end-to-end backup encryption is detected in either language and is
+  replaced through the lost-key → disable → verify-off flow before a fresh
+  64-digit key is generated. Continue, saved-key confirmation, create, and
+  return-to-backup transitions are bounded and verified without logging key or
+  collected UI content.
+- Backup completion is polled without unbounded waits. Crypt15 discovery now
+  checks WhatsApp-owned storage roots first, preserves newest-first ordering,
+  performs bounded polling, falls back to Android media storage, and removes a
+  stale local destination before each pull. Parser failure semantics are
+  unchanged and remain separate from strict UI automation failure.
+- Added synthetic regression coverage for new/legacy navigation, bilingual
+  encryption-state detection, and existing-key replacement. A direct async
+  harness and the sanitized marker checks against the supplied reference UI
+  dumps pass. Verification completed with the focused WhatsApp suite
+  (`20 passed`) and the full backend suite (`543 passed, 7 skipped`).
 
 ## 2026-08-30: Stable completed-session workspace selection
 

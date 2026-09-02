@@ -19,12 +19,15 @@ from app.acquisition.whatsapp_backup import (
     WhatsAppAcquisitionResult,
     WhatsAppBackupArtifact,
     WhatsAppDatabaseParser,
+    WhatsAppE2eState,
+    WhatsAppLayout,
     WhatsAppNotSignedInError,
     WhatsAppParseError,
     WhatsAppUiAutomationError,
     WhatsAppUiAutomator,
     activity_shows_unsigned_in,
     decrypt_crypt15,
+    detect_whatsapp_layout,
     hierarchy_shows_unsigned_in,
 )
 from app.core.config import settings
@@ -368,8 +371,307 @@ async def test_ui_automator_returns_on_fourth_success(tmp_path: Path) -> None:
     assert result.ui_attempts == 4
 
 
-def _ui(resource_id: str = "", text: str = "", content_desc: str = "") -> UIElement:
-    return UIElement(resource_id, text, content_desc, (0, 0, 120, 80), True)
+def _ui(
+    resource_id: str = "",
+    text: str = "",
+    content_desc: str = "",
+    *,
+    bounds: tuple[int, int, int, int] = (0, 0, 120, 80),
+    clickable: bool = True,
+) -> UIElement:
+    return UIElement(resource_id, text, content_desc, bounds, clickable)
+
+
+def _screen(*elements: UIElement) -> list[UIElement]:
+    return [
+        _ui(bounds=(0, 0, 1080, 2400), clickable=False),
+        *elements,
+    ]
+
+
+def test_layout_detection_prefers_new_profile_tab_and_preserves_old_overflow() -> None:
+    overflow = _ui(
+        "com.whatsapp:id/menuitem_overflow",
+        content_desc="Opsi lainnya",
+        bounds=(960, 80, 1080, 220),
+    )
+    profile_tab = _ui(
+        content_desc="Anda",
+        bounds=(820, 2050, 1080, 2300),
+    )
+    message_you = _ui(text="You: pesan", bounds=(100, 500, 700, 620))
+
+    assert (
+        detect_whatsapp_layout(_screen(overflow, profile_tab, message_you))
+        is WhatsAppLayout.PROFILE_TAB
+    )
+    assert (
+        detect_whatsapp_layout(_screen(overflow, message_you))
+        is WhatsAppLayout.OVERFLOW_MENU
+    )
+    assert detect_whatsapp_layout(_screen(message_you)) is WhatsAppLayout.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_new_layout_navigation_uses_profile_tab_scroll_and_chat_rows(
+    tmp_path: Path,
+) -> None:
+    screens = iter(
+        [
+            _screen(
+                _ui(
+                    "com.whatsapp:id/conversations_row_contact_name",
+                    bounds=(80, 420, 620, 520),
+                ),
+                _ui(
+                    "com.whatsapp:id/menuitem_overflow",
+                    content_desc="Opsi lainnya",
+                    bounds=(960, 80, 1080, 220),
+                ),
+                _ui(content_desc="Anda", bounds=(820, 2050, 1080, 2300)),
+            ),
+            _screen(
+                _ui("com.whatsapp:id/me_tab_root_layout"),
+                _ui("com.whatsapp:id/settings_account_info", text="Akun"),
+            ),
+            _screen(
+                _ui("com.whatsapp:id/me_tab_root_layout"),
+                _ui(
+                    "com.whatsapp:id/settings_chat",
+                    content_desc="Chat,Riwayat obrolan, cadangan",
+                    bounds=(20, 1250, 1060, 1450),
+                ),
+            ),
+            _screen(
+                _ui("com.whatsapp:id/enter_key_preference"),
+                _ui(
+                    "com.whatsapp:id/chat_backup_preference",
+                    content_desc="Cadangan obrolan",
+                    bounds=(20, 1350, 1060, 1530),
+                ),
+            ),
+            _screen(_ui("com.whatsapp:id/google_drive_backup_now_btn")),
+        ]
+    )
+    taps: list[str] = []
+    scrolls = 0
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    class NewLayoutAutomator(WhatsAppUiAutomator):
+        async def launch_whatsapp(self) -> None:
+            return None
+
+        async def _activity_top_dump(self) -> str:
+            return ""
+
+        async def dump_hierarchy(self) -> list[UIElement]:
+            return next(screens)
+
+        async def tap_element(
+            self,
+            element: UIElement,
+            delay: float = 1.5,
+        ) -> None:
+            del delay
+            taps.append(element.resource_id or element.content_desc or element.text)
+
+        async def swipe_up(self, elements: list[UIElement]) -> None:
+            nonlocal scrolls
+            del elements
+            scrolls += 1
+
+    automator = NewLayoutAutomator(
+        serial="device-1",
+        work_dir=tmp_path,
+        sleep=no_sleep,
+    )
+
+    assert await automator.navigate_to_chat_backup() is True
+    assert automator.layout_mode is WhatsAppLayout.PROFILE_TAB
+    assert taps == [
+        "Anda",
+        "com.whatsapp:id/settings_chat",
+        "com.whatsapp:id/chat_backup_preference",
+    ]
+    assert scrolls == 1
+
+
+@pytest.mark.asyncio
+async def test_old_layout_navigation_remains_overflow_settings_path(
+    tmp_path: Path,
+) -> None:
+    screens = iter(
+        [
+            _screen(
+                _ui(
+                    "com.whatsapp:id/conversations_row_contact_name",
+                    bounds=(80, 420, 620, 520),
+                ),
+                _ui(
+                    "com.whatsapp:id/menuitem_overflow",
+                    content_desc="More options",
+                    bounds=(960, 80, 1080, 220),
+                ),
+            ),
+            _screen(
+                _ui(text="New group"),
+                _ui(text="Settings", bounds=(600, 900, 1040, 1040)),
+            ),
+            _screen(
+                _ui("com.whatsapp:id/settings_nested_scroll_view"),
+                _ui(
+                    "com.whatsapp:id/settings_chat",
+                    content_desc="Chats,Chat history, backup",
+                    bounds=(20, 850, 1060, 1030),
+                ),
+            ),
+            _screen(
+                _ui("com.whatsapp:id/enter_key_preference"),
+                _ui(
+                    "com.whatsapp:id/chat_backup_preference",
+                    content_desc="Chat backup",
+                    bounds=(20, 1350, 1060, 1530),
+                ),
+            ),
+            _screen(_ui("com.whatsapp:id/google_drive_backup_now_btn")),
+        ]
+    )
+    taps: list[str] = []
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    class OldLayoutAutomator(WhatsAppUiAutomator):
+        async def launch_whatsapp(self) -> None:
+            return None
+
+        async def _activity_top_dump(self) -> str:
+            return ""
+
+        async def dump_hierarchy(self) -> list[UIElement]:
+            return next(screens)
+
+        async def tap_element(
+            self,
+            element: UIElement,
+            delay: float = 1.5,
+        ) -> None:
+            del delay
+            taps.append(element.resource_id or element.content_desc or element.text)
+
+    automator = OldLayoutAutomator(
+        serial="device-1",
+        work_dir=tmp_path,
+        sleep=no_sleep,
+    )
+
+    assert await automator.navigate_to_chat_backup() is True
+    assert automator.layout_mode is WhatsAppLayout.OVERFLOW_MENU
+    assert taps == [
+        "com.whatsapp:id/menuitem_overflow",
+        "Settings",
+        "com.whatsapp:id/settings_chat",
+        "com.whatsapp:id/chat_backup_preference",
+    ]
+
+
+def test_encrypted_backup_state_supports_english_and_indonesian() -> None:
+    disabled = _ui(
+        "com.whatsapp:id/settings_gdrive_e2e_encryption",
+        content_desc="Cadangan terenkripsi end-to-end,Nonaktif",
+        bounds=(20, 1500, 1060, 1680),
+    )
+    enabled = _ui(
+        "com.whatsapp:id/settings_gdrive_e2e_encryption",
+        content_desc="End-to-end encrypted backup,On · 64-digit key",
+        bounds=(20, 1500, 1060, 1680),
+    )
+
+    assert (
+        WhatsAppUiAutomator._encrypted_backup_state(_screen(disabled), disabled)
+        is WhatsAppE2eState.DISABLED
+    )
+    assert (
+        WhatsAppUiAutomator._encrypted_backup_state(_screen(enabled), enabled)
+        is WhatsAppE2eState.ENABLED
+    )
+
+
+@pytest.mark.asyncio
+async def test_existing_encryption_is_replaced_with_new_64_digit_key(
+    tmp_path: Path,
+) -> None:
+    encrypted_on = _ui(
+        "com.whatsapp:id/settings_gdrive_e2e_encryption",
+        content_desc="Cadangan terenkripsi end-to-end,Nyala · Kunci enkripsi 64 digit",
+        bounds=(20, 1500, 1060, 1680),
+    )
+    encrypted_off = _ui(
+        "com.whatsapp:id/settings_gdrive_e2e_encryption",
+        content_desc="Cadangan terenkripsi end-to-end,Nonaktif",
+        bounds=(20, 1500, 1060, 1680),
+    )
+    chunks = [_ui(text=f"{value:04x}") for value in range(16)]
+    screens = iter(
+        [
+            _screen(encrypted_on),
+            _screen(
+                _ui("com.whatsapp:id/enc_backup_enabled_landing_disable_button")
+            ),
+            _screen(_ui("com.whatsapp:id/enc_backup_encryption_key_input_forgot")),
+            _screen(_ui("com.whatsapp:id/confirm_disable_disable_button")),
+            _screen(_ui("com.whatsapp:id/disable_done_done_button")),
+            _screen(encrypted_off),
+            _screen(encrypted_off),
+            _screen(_ui("com.whatsapp:id/enable_info_more_options_button")),
+            _screen(_ui("com.whatsapp:id/enc_backup_more_options_encryption_key")),
+            _screen(_ui("com.whatsapp:id/encryption_key_info_bottom_button")),
+            _screen(
+                *chunks,
+                _ui(
+                    "com.whatsapp:id/encryption_key_info_bottom_button",
+                    text="LANJUT",
+                ),
+            ),
+            _screen(_ui("com.whatsapp:id/encryption_key_confirm_button_confirm")),
+            _screen(_ui("com.whatsapp:id/enable_done_create_button")),
+            _screen(encrypted_on),
+        ]
+    )
+    taps: list[str] = []
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    class EncryptionAutomator(WhatsAppUiAutomator):
+        async def dump_hierarchy(self) -> list[UIElement]:
+            return next(screens)
+
+        async def tap_element(
+            self,
+            element: UIElement,
+            delay: float = 1.5,
+        ) -> None:
+            del delay
+            taps.append(element.resource_id or element.text)
+
+    automator = EncryptionAutomator(
+        serial="device-1",
+        work_dir=tmp_path,
+        sleep=no_sleep,
+    )
+
+    key = await automator.setup_or_extract_64digit_key()
+
+    assert key == "".join(f"{value:04x}" for value in range(16))
+    assert "com.whatsapp:id/enc_backup_enabled_landing_disable_button" in taps
+    assert "com.whatsapp:id/enc_backup_encryption_key_input_forgot" in taps
+    assert "com.whatsapp:id/confirm_disable_disable_button" in taps
+    assert "com.whatsapp:id/enc_backup_more_options_encryption_key" in taps
+    assert "com.whatsapp:id/encryption_key_confirm_button_confirm" in taps
+    assert "com.whatsapp:id/enable_done_create_button" in taps
 
 
 def test_hierarchy_detects_phone_registration_and_ignores_logged_in_chats() -> None:

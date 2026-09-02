@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable
 
@@ -30,10 +31,19 @@ WHATSAPP_PACKAGE = "com.whatsapp"
 WHATSAPP_COMPONENT = "com.whatsapp/.Main"
 WHATSAPP_MESSAGE_MIME = "application/vnd.satria.whatsapp-message+json"
 WHATSAPP_UI_ATTEMPTS = 4
-WHATSAPP_NAVIGATION_STEPS = 12
+WHATSAPP_NAVIGATION_STEPS = 16
+WHATSAPP_NAVIGATION_RELAUNCH_STEPS = frozenset({6, 11})
+WHATSAPP_UI_DUMP_ATTEMPTS = 2
+WHATSAPP_UI_DUMP_TIMEOUT_S = 20.0
+WHATSAPP_UI_READ_TIMEOUT_S = 10.0
+WHATSAPP_BACKUP_IDLE_POLLS = 8
+WHATSAPP_BACKUP_FIND_POLLS = 10
+WHATSAPP_BACKUP_FIND_POLL_S = 2.0
 WHATSAPP_UI_DUMP = "/sdcard/window_dump.xml"
 WHATSAPP_BACKUP_FIND = (
-    "find /sdcard/ -name 'msgstore*.db.crypt15' -exec ls -ld {} + 2>/dev/null"
+    "find /sdcard/Android/media/com.whatsapp/ /sdcard/WhatsApp/ "
+    "/sdcard/Android/media/com.whatsapp.w4b/ -name 'msgstore*.db.crypt15' "
+    "-exec ls -lt {} + 2>/dev/null"
 )
 WHATSAPP_BACKUP_FIND_FALLBACK = (
     "find /sdcard/Android/media/ -name 'msgstore.db.crypt15' 2>/dev/null"
@@ -59,6 +69,18 @@ class WhatsAppNotSignedInError(Exception):
 
 class WhatsAppParseError(RuntimeError):
     """The acquired backup could not be converted into canonical records."""
+
+
+class WhatsAppLayout(str, Enum):
+    UNKNOWN = "unknown"
+    PROFILE_TAB = "profile_tab"
+    OVERFLOW_MENU = "overflow_menu"
+
+
+class WhatsAppE2eState(str, Enum):
+    UNKNOWN = "unknown"
+    DISABLED = "disabled"
+    ENABLED = "enabled"
 
 
 UNSIGNED_IN_RESOURCE_MARKERS = (
@@ -122,6 +144,105 @@ class UIElement:
     def center(self) -> tuple[int, int]:
         x1, y1, x2, y2 = self.bounds
         return ((x1 + x2) // 2, (y1 + y2) // 2)
+
+
+def _normalized_ui_value(value: str) -> str:
+    return " ".join((value or "").casefold().split())
+
+
+def _ui_labels(element: UIElement) -> tuple[str, str]:
+    return (
+        _normalized_ui_value(element.text),
+        _normalized_ui_value(element.content_desc),
+    )
+
+
+def _ui_blob(element: UIElement) -> str:
+    return " ".join(value for value in _ui_labels(element) if value)
+
+
+def _resource_contains(element: UIElement, *markers: str) -> bool:
+    resource_id = element.resource_id.casefold()
+    return any(marker.casefold() in resource_id for marker in markers)
+
+
+def _label_is(element: UIElement, *labels: str) -> bool:
+    expected = {_normalized_ui_value(label) for label in labels}
+    return any(value in expected for value in _ui_labels(element) if value)
+
+
+def _label_contains(element: UIElement, *phrases: str) -> bool:
+    expected = tuple(_normalized_ui_value(phrase) for phrase in phrases)
+    return any(
+        phrase in value
+        for value in _ui_labels(element)
+        for phrase in expected
+        if phrase
+    )
+
+
+def _hierarchy_dimensions(elements: list[UIElement]) -> tuple[int, int]:
+    width = max((element.bounds[2] for element in elements), default=0)
+    height = max((element.bounds[3] for element in elements), default=0)
+    return (width if width > 0 else 1080, height if height > 0 else 2400)
+
+
+def _visible_in_viewport(
+    element: UIElement,
+    elements: list[UIElement],
+    *,
+    bottom_margin: int = 100,
+) -> bool:
+    width, height = _hierarchy_dimensions(elements)
+    x, y = element.center
+    return 0 < x < width and 0 < y < max(height - bottom_margin, 1)
+
+
+def _find_profile_tab(elements: list[UIElement]) -> UIElement | None:
+    width, height = _hierarchy_dimensions(elements)
+    excluded = (
+        "calls",
+        "panggilan",
+        "communities",
+        "komunitas",
+        "updates",
+        "pembaruan",
+    )
+    profile_labels = ("anda", "you", "profil", "profile", "me")
+    for element in elements:
+        x, y = element.center
+        if y <= height * 0.80 or x <= width * 0.75:
+            continue
+        labels = tuple(value for value in _ui_labels(element) if value)
+        if not labels or any(marker in value for value in labels for marker in excluded):
+            continue
+        if any(
+            value == label or value.startswith(f"{label},")
+            for value in labels
+            for label in profile_labels
+        ):
+            return element
+    return None
+
+
+def _find_overflow_button(elements: list[UIElement]) -> UIElement | None:
+    return next(
+        (
+            element
+            for element in elements
+            if _resource_contains(element, "menuitem_overflow")
+            or _label_is(element, "More options", "Opsi lainnya")
+        ),
+        None,
+    )
+
+
+def detect_whatsapp_layout(elements: list[UIElement]) -> WhatsAppLayout:
+    if _find_profile_tab(elements) is not None:
+        return WhatsAppLayout.PROFILE_TAB
+    if _find_overflow_button(elements) is not None:
+        return WhatsAppLayout.OVERFLOW_MENU
+    return WhatsAppLayout.UNKNOWN
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +363,8 @@ class WhatsAppUiAutomator:
         self.sleep = sleep
         self.session_key_path = self.work_dir / "wa_64digit.key"
         self.device_key_path = whatsapp_key_path(serial)
+        self.layout_mode = WhatsAppLayout.UNKNOWN
+        self._last_stage = "idle"
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
     async def package_installed(self) -> bool:
@@ -277,58 +400,120 @@ class WhatsAppUiAutomator:
         await self.tap(*element.center, delay=delay)
 
     async def dump_hierarchy(self) -> list[UIElement]:
+        last_transport_error: AcquisitionError | None = None
+        last_parse_error: ET.ParseError | None = None
+        for local_attempt in range(1, WHATSAPP_UI_DUMP_ATTEMPTS + 1):
+            try:
+                dumped = await self.transport.run(
+                    self.serial,
+                    [
+                        "shell",
+                        "uiautomator",
+                        "dump",
+                        "--compressed",
+                        WHATSAPP_UI_DUMP,
+                    ],
+                    operation="whatsapp_ui_dump",
+                    timeout=WHATSAPP_UI_DUMP_TIMEOUT_S,
+                    check=False,
+                )
+                if dumped.returncode != 0:
+                    if local_attempt < WHATSAPP_UI_DUMP_ATTEMPTS:
+                        await self.sleep(0.5)
+                        continue
+                    break
+                result = await self.transport.run(
+                    self.serial,
+                    ["shell", "cat", WHATSAPP_UI_DUMP],
+                    operation="whatsapp_ui_read",
+                    timeout=WHATSAPP_UI_READ_TIMEOUT_S,
+                    check=False,
+                )
+            except asyncio.CancelledError:
+                raise
+            except AcquisitionError as exc:
+                last_transport_error = exc
+                if local_attempt < WHATSAPP_UI_DUMP_ATTEMPTS:
+                    await self.sleep(0.5)
+                    continue
+                break
+
+            if result.returncode != 0 or "<hierarchy" not in result.stdout:
+                if local_attempt < WHATSAPP_UI_DUMP_ATTEMPTS:
+                    await self.sleep(0.5)
+                    continue
+                break
+            try:
+                root = ET.fromstring(result.stdout)
+            except ET.ParseError as exc:
+                last_parse_error = exc
+                if local_attempt < WHATSAPP_UI_DUMP_ATTEMPTS:
+                    await self.sleep(0.5)
+                    continue
+                break
+
+            elements: list[UIElement] = []
+            for node in root.iter("node"):
+                raw_bounds = node.attrib.get("bounds", "[0,0][0,0]")
+                matches = re.findall(r"\[(\d+),(\d+)\]", raw_bounds)
+                bounds = (
+                    (
+                        int(matches[0][0]),
+                        int(matches[0][1]),
+                        int(matches[1][0]),
+                        int(matches[1][1]),
+                    )
+                    if len(matches) == 2
+                    else (0, 0, 0, 0)
+                )
+                elements.append(
+                    UIElement(
+                        resource_id=node.attrib.get("resource-id", "")[:512],
+                        text=node.attrib.get("text", "")[:4096],
+                        content_desc=node.attrib.get("content-desc", "")[:4096],
+                        bounds=bounds,
+                        clickable=(
+                            node.attrib.get("clickable", "false").casefold() == "true"
+                        ),
+                    )
+                )
+            return elements
+
+        if last_transport_error is not None:
+            raise last_transport_error
+        if last_parse_error is not None:
+            raise WhatsAppUiAutomationError(
+                "Hierarchy UI WhatsApp tidak valid"
+            ) from last_parse_error
+        raise WhatsAppUiAutomationError("Hierarchy UI WhatsApp tidak tersedia")
+
+    async def press_back(self, *, delay: float = 1.0) -> None:
         await self.transport.run(
             self.serial,
-            ["shell", "uiautomator", "dump", "--compressed", WHATSAPP_UI_DUMP],
-            operation="whatsapp_ui_dump",
-            timeout=30.0,
-        )
-        result = await self.transport.run(
-            self.serial,
-            ["shell", "cat", WHATSAPP_UI_DUMP],
-            operation="whatsapp_ui_read",
+            ["shell", "input", "keyevent", "4"],
+            operation="whatsapp_ui_back",
             check=False,
         )
-        if not result.stdout or "<hierarchy" not in result.stdout:
-            await self.sleep(1.0)
-            result = await self.transport.run(
-                self.serial,
-                ["shell", "cat", WHATSAPP_UI_DUMP],
-                operation="whatsapp_ui_read_retry",
-                check=False,
-            )
-        if not result.stdout or "<hierarchy" not in result.stdout:
-            raise WhatsAppUiAutomationError("Hierarchy UI WhatsApp tidak tersedia")
+        await self.sleep(delay)
 
-        try:
-            root = ET.fromstring(result.stdout)
-        except ET.ParseError as exc:
-            raise WhatsAppUiAutomationError("Hierarchy UI WhatsApp tidak valid") from exc
-
-        elements: list[UIElement] = []
-        for node in root.iter("node"):
-            raw_bounds = node.attrib.get("bounds", "[0,0][0,0]")
-            matches = re.findall(r"\[(\d+),(\d+)\]", raw_bounds)
-            bounds = (
-                (
-                    int(matches[0][0]),
-                    int(matches[0][1]),
-                    int(matches[1][0]),
-                    int(matches[1][1]),
-                )
-                if len(matches) == 2
-                else (0, 0, 0, 0)
-            )
-            elements.append(
-                UIElement(
-                    resource_id=node.attrib.get("resource-id", "")[:512],
-                    text=node.attrib.get("text", "")[:4096],
-                    content_desc=node.attrib.get("content-desc", "")[:4096],
-                    bounds=bounds,
-                    clickable=node.attrib.get("clickable", "false").casefold() == "true",
-                )
-            )
-        return elements
+    async def swipe_up(self, elements: list[UIElement]) -> None:
+        width, height = _hierarchy_dimensions(elements)
+        x = width // 2
+        await self.transport.run(
+            self.serial,
+            [
+                "shell",
+                "input",
+                "swipe",
+                str(x),
+                str(int(height * 0.72)),
+                str(x),
+                str(int(height * 0.32)),
+                "350",
+            ],
+            operation="whatsapp_ui_scroll",
+        )
+        await self.sleep(1.2)
 
     async def launch_whatsapp(self) -> None:
         for args, operation in (
@@ -375,253 +560,723 @@ class WhatsAppUiAutomator:
             return ""
         return f"{result.stdout}\n{result.stderr}"
 
+    @staticmethod
+    def _is_chat_backup_screen(elements: list[UIElement]) -> bool:
+        return any(
+            _resource_contains(
+                element,
+                "backup_settings_header_view",
+                "google_drive_backup_now_btn",
+                "settings_gdrive_e2e_encryption",
+            )
+            or _label_is(
+                element,
+                "Backup settings",
+                "Pengaturan Cadangan",
+                "BACK UP",
+                "CADANGKAN",
+                "Back up",
+                "Cadangkan",
+            )
+            for element in elements
+        )
+
+    @staticmethod
+    def _find_chat_backup_item(elements: list[UIElement]) -> UIElement | None:
+        return next(
+            (
+                element
+                for element in elements
+                if _resource_contains(element, "chat_backup_preference")
+                or _label_contains(
+                    element,
+                    "Cadangan obrolan",
+                    "Cadangan chat",
+                    "Chat backup",
+                    "Chat-backup",
+                )
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _is_chats_settings_screen(elements: list[UIElement]) -> bool:
+        return any(
+            _resource_contains(
+                element,
+                "enter_key_preference",
+                "media_visibility_preference",
+                "chat_backup_preference",
+            )
+            or _label_contains(
+                element,
+                "Pengaturan obrolan",
+                "Chat settings",
+                "Setelan chat",
+                "Enter untuk mengirim",
+                "Enter is send",
+                "Visibilitas media",
+                "Media visibility",
+                "Arsip obrolan",
+                "Archived chats",
+            )
+            for element in elements
+        )
+
+    @staticmethod
+    def _is_main_chat_screen(elements: list[UIElement]) -> bool:
+        return any(
+            _resource_contains(
+                element,
+                "conversations_row_contact_name",
+                "conversations_row_date",
+            )
+            or element.resource_id
+            in {
+                "com.whatsapp:id/fab",
+                "com.whatsapp:id/extended_mini_fab",
+            }
+            for element in elements
+        )
+
+    @staticmethod
+    def _is_settings_or_profile_screen(
+        elements: list[UIElement],
+        *,
+        is_main_screen: bool,
+    ) -> bool:
+        if is_main_screen:
+            return False
+        return any(
+            _resource_contains(
+                element,
+                "me_tab_root_layout",
+                "me_tab_profile_info",
+                "settings_nested_scroll_view",
+                "settings_account_info",
+                "privacy_preference",
+                "settings_chat",
+            )
+            for element in elements
+        )
+
+    @staticmethod
+    def _find_chats_item(elements: list[UIElement]) -> UIElement | None:
+        _width, height = _hierarchy_dimensions(elements)
+        return next(
+            (
+                element
+                for element in elements
+                if _resource_contains(element, "settings_chat")
+                or (
+                    element.resource_id == "com.whatsapp:id/row_text"
+                    and _label_is(element, "Chats", "Chat", "Obrolan")
+                )
+                or (
+                    element.center[1] < height * 0.88
+                    and not _resource_contains(element, "navigation_bar")
+                    and any(
+                        label.startswith(prefix)
+                        for label in _ui_labels(element)
+                        if label
+                        for prefix in ("chats,", "chat,", "obrolan,")
+                    )
+                )
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _is_overflow_open(elements: list[UIElement]) -> bool:
+        return any(
+            _label_contains(
+                element,
+                "Grup baru",
+                "New group",
+                "Komunitas baru",
+                "New community",
+                "Daftar siaran",
+                "Broadcast lists",
+                "New broadcast",
+            )
+            for element in elements
+        )
+
+    @staticmethod
+    def _find_settings_item(elements: list[UIElement]) -> UIElement | None:
+        return next(
+            (
+                element
+                for element in elements
+                if _label_is(element, "Settings", "Setelan")
+                and element.center[1] > 200
+            ),
+            None,
+        )
+
+    async def _dismiss_blocking_dialog(self, elements: list[UIElement]) -> bool:
+        has_dialog = any(
+            _resource_contains(element, "alerttitle")
+            or element.resource_id == "android:id/message"
+            for element in elements
+        )
+        if not has_dialog:
+            return False
+
+        dialog_text = " ".join(_ui_blob(element) for element in elements)
+        cancellation_warning = any(
+            marker in dialog_text
+            for marker in ("akan dihapus", "dihapus", "will be deleted")
+        )
+        if cancellation_warning:
+            negative = next(
+                (
+                    element
+                    for element in elements
+                    if element.resource_id == "android:id/button2"
+                    or _label_is(element, "Kembali", "Back", "Batal", "Cancel")
+                ),
+                None,
+            )
+            if negative is not None:
+                await self.tap_element(negative)
+            else:
+                await self.press_back()
+            return True
+
+        wait_dialog = any(
+            marker in dialog_text
+            for marker in (
+                "tunggu sampai",
+                "selesai sebelum",
+                "wait until",
+                "finish before",
+            )
+        )
+        positive = next(
+            (
+                element
+                for element in elements
+                if _label_is(element, "OKE", "OK", "Ok")
+                or (wait_dialog and element.resource_id == "android:id/button1")
+            ),
+            None,
+        )
+        if positive is not None:
+            await self.tap_element(positive)
+        else:
+            await self.press_back()
+        return True
+
+    @staticmethod
+    def _backup_in_progress(elements: list[UIElement]) -> bool:
+        return any(
+            _resource_contains(element, "cancel_download", "google_drive_progress")
+            or _label_contains(
+                element,
+                "Mempersiapkan",
+                "Preparing",
+                "Mencadangkan",
+                "Backing up",
+                "Pencadangan sedang",
+                "Backup in progress",
+            )
+            for element in elements
+        )
+
+    @staticmethod
+    def _find_encrypted_backup_item(
+        elements: list[UIElement],
+    ) -> UIElement | None:
+        return next(
+            (
+                element
+                for element in elements
+                if _resource_contains(element, "settings_gdrive_e2e_encryption")
+                or _label_contains(
+                    element,
+                    "End-to-end encrypted backup",
+                    "Cadangan terenkripsi end-to-end",
+                )
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _encrypted_backup_state(
+        elements: list[UIElement],
+        encrypted_backup: UIElement,
+    ) -> WhatsAppE2eState:
+        _width, height = _hierarchy_dimensions(elements)
+        nearby_distance = max(80, int(height * 0.04))
+        nearby = " ".join(
+            _ui_blob(element)
+            for element in elements
+            if abs(element.center[1] - encrypted_backup.center[1]) <= nearby_distance
+        )
+        combined = f"{_ui_blob(encrypted_backup)} {nearby}"
+        if any(marker in combined for marker in ("nonaktif", "disabled")):
+            return WhatsAppE2eState.DISABLED
+        if re.search(r"\boff\b", combined):
+            return WhatsAppE2eState.DISABLED
+        if any(marker in combined for marker in ("nyala", "enabled")):
+            return WhatsAppE2eState.ENABLED
+        if re.search(r"\b(on|aktif)\b", combined):
+            return WhatsAppE2eState.ENABLED
+        return WhatsAppE2eState.UNKNOWN
+
+    @staticmethod
+    def _find_button(
+        elements: list[UIElement],
+        *,
+        resource_markers: tuple[str, ...],
+        labels: tuple[str, ...],
+    ) -> UIElement | None:
+        return next(
+            (
+                element
+                for element in elements
+                if _resource_contains(element, *resource_markers)
+                or _label_is(element, *labels)
+            ),
+            None,
+        )
+
     async def navigate_to_chat_backup(self) -> bool:
+        self._last_stage = "navigation_launch"
+        self.layout_mode = WhatsAppLayout.UNKNOWN
         await self.launch_whatsapp()
         if activity_shows_unsigned_in(await self._activity_top_dump()):
             raise WhatsAppNotSignedInError
-        for _ in range(WHATSAPP_NAVIGATION_STEPS):
+
+        for step in range(1, WHATSAPP_NAVIGATION_STEPS + 1):
+            self._last_stage = "navigation_probe"
             elements = await self.dump_hierarchy()
             if hierarchy_shows_unsigned_in(elements):
                 raise WhatsAppNotSignedInError
-            if any(
-                "google_drive_backup_now_btn" in element.resource_id
-                or element.text in {"BACK UP", "CADANGKAN"}
-                or "Backup settings" in element.text
-                for element in elements
-            ):
+
+            if await self._dismiss_blocking_dialog(elements):
+                continue
+
+            if self._is_chat_backup_screen(elements):
+                self._last_stage = "chat_backup_ready"
                 return True
 
-            backup_item = next(
-                (
-                    element
-                    for element in elements
-                    if "chat_backup_preference" in element.resource_id
-                    or element.text in {"Chat backup", "Cadangan chat"}
-                    or element.content_desc in {"Chat backup", "Cadangan chat"}
-                ),
-                None,
-            )
-            if backup_item and any(
-                "Chat settings" in element.text
-                or "Setelan chat" in element.text
-                or "Enter is send" in element.text
-                for element in elements
-            ):
-                await self.tap_element(backup_item)
+            backup_item = self._find_chat_backup_item(elements)
+            if self._is_chats_settings_screen(elements) or backup_item is not None:
+                if backup_item is not None and _visible_in_viewport(
+                    backup_item,
+                    elements,
+                ):
+                    self._last_stage = "open_chat_backup"
+                    await self.tap_element(backup_item, delay=2.0)
+                else:
+                    self._last_stage = "scroll_chat_settings"
+                    await self.swipe_up(elements)
                 continue
 
-            chats_item = next(
-                (
-                    element
-                    for element in elements
-                    if "settings_chat" in element.resource_id
-                    or element.content_desc.startswith("Chats,")
-                    or element.content_desc.startswith("Chat,")
-                    or (
-                        element.text in {"Chats", "Chat"}
-                        and element.center[1] > 1700
+            is_main_screen = self._is_main_chat_screen(elements)
+            if self._is_settings_or_profile_screen(
+                elements,
+                is_main_screen=is_main_screen,
+            ):
+                chats_item = self._find_chats_item(elements)
+                if chats_item is not None and _visible_in_viewport(
+                    chats_item,
+                    elements,
+                    bottom_margin=120,
+                ):
+                    self._last_stage = "open_chat_settings"
+                    await self.tap_element(chats_item, delay=2.0)
+                else:
+                    self._last_stage = "scroll_settings"
+                    await self.swipe_up(elements)
+                continue
+
+            if self._is_overflow_open(elements):
+                settings_item = self._find_settings_item(elements)
+                if settings_item is not None:
+                    self._last_stage = "open_settings"
+                    await self.tap_element(settings_item, delay=2.0)
+                else:
+                    self._last_stage = "close_unusable_overflow"
+                    await self.press_back()
+                continue
+
+            has_navigation_marker = any(
+                _resource_contains(element, "bottom_nav", "menuitem_overflow")
+                for element in elements
+            )
+            if is_main_screen or has_navigation_marker:
+                layout = detect_whatsapp_layout(elements)
+                if layout is WhatsAppLayout.PROFILE_TAB:
+                    profile_tab = _find_profile_tab(elements)
+                    if profile_tab is not None:
+                        self.layout_mode = layout
+                        self._last_stage = "open_profile_tab"
+                        logger.info(
+                            "whatsapp_ui_layout_detected",
+                            extra={"layout": layout.value, "navigation_step": step},
+                        )
+                        await self.tap_element(profile_tab, delay=2.0)
+                        continue
+
+                overflow = _find_overflow_button(elements)
+                if overflow is not None:
+                    self.layout_mode = WhatsAppLayout.OVERFLOW_MENU
+                    self._last_stage = "open_overflow_menu"
+                    logger.info(
+                        "whatsapp_ui_layout_detected",
+                        extra={
+                            "layout": WhatsAppLayout.OVERFLOW_MENU.value,
+                            "navigation_step": step,
+                        },
                     )
-                ),
-                None,
-            )
-            if chats_item and any(
-                "Account" in (element.text or element.content_desc)
-                or "Akun" in (element.text or element.content_desc)
-                or "Privacy" in (element.text or element.content_desc)
-                for element in elements
-            ):
-                await self.tap_element(chats_item)
-                continue
+                    await self.tap_element(overflow)
+                    continue
 
-            settings_item = next(
-                (
-                    element
-                    for element in elements
-                    if (
-                        element.text.startswith("Settings")
-                        or element.text.startswith("Setelan")
-                        or element.content_desc in {"Settings", "Setelan"}
-                    )
-                    and element.center[1] > 800
-                ),
-                None,
-            )
-            if settings_item and any(
-                "New group" in element.text
-                or "Grup baru" in element.text
-                or "Linked devices" in element.text
-                for element in elements
-            ):
-                await self.tap_element(settings_item)
-                continue
-
-            overflow = next(
-                (
-                    element
-                    for element in elements
-                    if "menuitem_overflow" in element.resource_id
-                    or element.content_desc in {"More options", "Opsi lainnya"}
-                ),
-                None,
-            )
-            if overflow:
-                await self.tap_element(overflow)
-                continue
-
-            await self.transport.run(
-                self.serial,
-                ["shell", "input", "keyevent", "4"],
-                operation="whatsapp_ui_back",
-                check=False,
-            )
-            await self.sleep(1.0)
+            self._last_stage = "navigation_recovery_back"
+            await self.press_back(delay=1.2)
+            if step in WHATSAPP_NAVIGATION_RELAUNCH_STEPS:
+                self._last_stage = "navigation_relaunch"
+                await self.launch_whatsapp()
         return False
 
-    async def setup_or_extract_64digit_key(self) -> str | None:
-        elements = await self.dump_hierarchy()
-        create_button = next(
-            (
-                element
-                for element in elements
-                if "enable_done_create_button" in element.resource_id
-                or element.text in {"CREATE", "BUAT"}
-            ),
-            None,
-        )
-        if create_button:
-            await self.tap_element(create_button, delay=3.0)
-            elements = await self.dump_hierarchy()
+    async def _wait_for_backup_idle(
+        self,
+        elements: list[UIElement],
+    ) -> list[UIElement]:
+        current = elements
+        for poll in range(WHATSAPP_BACKUP_IDLE_POLLS):
+            if await self._dismiss_blocking_dialog(current):
+                current = await self.dump_hierarchy()
+                continue
+            if not self._backup_in_progress(current):
+                return current
+            if poll < WHATSAPP_BACKUP_IDLE_POLLS - 1:
+                await self.sleep(1.0)
+                current = await self.dump_hierarchy()
+        return current
 
-        encrypted_backup = next(
-            (
-                element
-                for element in elements
-                if "settings_gdrive_e2e_encryption" in element.resource_id
-                or "End-to-end encrypted backup" in element.content_desc
-                or "Cadangan terenkripsi end-to-end" in element.content_desc
-            ),
-            None,
+    async def disable_existing_e2e_encryption(
+        self,
+        encrypted_backup: UIElement | None = None,
+        *,
+        landing_open: bool = False,
+    ) -> None:
+        self._last_stage = "disable_e2e_open"
+        if not landing_open:
+            if encrypted_backup is None:
+                elements = await self.dump_hierarchy()
+                encrypted_backup = self._find_encrypted_backup_item(elements)
+            if encrypted_backup is None:
+                raise WhatsAppUiAutomationError(
+                    "Pengaturan cadangan terenkripsi tidak ditemukan"
+                )
+            await self.tap_element(encrypted_backup, delay=2.0)
+
+        elements = await self.dump_hierarchy()
+        if await self._dismiss_blocking_dialog(elements):
+            raise WhatsAppUiAutomationError(
+                "Cadangan WhatsApp masih berjalan saat enkripsi akan diubah"
+            )
+
+        self._last_stage = "disable_e2e_landing"
+        disable_button = self._find_button(
+            elements,
+            resource_markers=("enc_backup_enabled_landing_disable_button",),
+            labels=("MATIKAN", "TURN OFF", "DISABLE"),
         )
-        if encrypted_backup:
+        if disable_button is None:
+            raise WhatsAppUiAutomationError(
+                "Tombol untuk mematikan enkripsi cadangan tidak ditemukan"
+            )
+        await self.tap_element(disable_button, delay=2.0)
+
+        self._last_stage = "disable_e2e_key_recovery"
+        elements = await self.dump_hierarchy()
+        forgot_button = self._find_button(
+            elements,
+            resource_markers=("enc_backup_encryption_key_input_forgot",),
+            labels=(
+                "Saya kehilangan kunci enkripsi",
+                "Kehilangan kunci enkripsi",
+                "I lost my encryption key",
+                "Lost my encryption key",
+                "I forgot my encryption key",
+                "Forgot my encryption key",
+            ),
+        )
+        if forgot_button is None:
+            raise WhatsAppUiAutomationError(
+                "Opsi pemulihan kunci enkripsi tidak ditemukan"
+            )
+        await self.tap_element(forgot_button, delay=2.0)
+
+        self._last_stage = "disable_e2e_confirm"
+        elements = await self.dump_hierarchy()
+        confirm_button = self._find_button(
+            elements,
+            resource_markers=("confirm_disable_disable_button",),
+            labels=("MATIKAN", "TURN OFF", "DISABLE"),
+        )
+        if confirm_button is None:
+            raise WhatsAppUiAutomationError(
+                "Konfirmasi mematikan enkripsi cadangan tidak ditemukan"
+            )
+        await self.tap_element(confirm_button, delay=3.0)
+
+        self._last_stage = "disable_e2e_finish"
+        elements = await self.dump_hierarchy()
+        done_button = self._find_button(
+            elements,
+            resource_markers=("disable_done_done_button",),
+            labels=("SELESAI", "DONE"),
+        )
+        if done_button is not None:
+            await self.tap_element(done_button, delay=2.0)
+
+        self._last_stage = "disable_e2e_verify"
+        for verification in range(5):
+            elements = await self.dump_hierarchy()
+            encrypted_backup = self._find_encrypted_backup_item(elements)
+            if (
+                encrypted_backup is not None
+                and self._encrypted_backup_state(elements, encrypted_backup)
+                is WhatsAppE2eState.DISABLED
+            ):
+                return
+            if (
+                self._is_chat_backup_screen(elements)
+                and encrypted_backup is None
+                and verification == 0
+            ):
+                await self.swipe_up(elements)
+                continue
+            if verification < 4:
+                await self.sleep(1.0)
+        raise WhatsAppUiAutomationError(
+            "Status nonaktif enkripsi cadangan tidak dapat diverifikasi"
+        )
+
+    async def _complete_key_setup(self, elements: list[UIElement]) -> None:
+        current = elements
+        for transition in range(8):
+            if await self._dismiss_blocking_dialog(current):
+                current = await self.dump_hierarchy()
+                continue
+            if self._is_chat_backup_screen(current):
+                return
+
+            continue_button = self._find_button(
+                current,
+                resource_markers=("encryption_key_info_bottom_button",),
+                labels=("CONTINUE", "LANJUT"),
+            )
+            if continue_button is not None:
+                self._last_stage = "confirm_key_continue"
+                await self.tap_element(continue_button)
+                current = await self.dump_hierarchy()
+                continue
+
+            saved_button = self._find_button(
+                current,
+                resource_markers=("encryption_key_confirm_button_confirm",),
+                labels=(
+                    "I SAVED MY 64-DIGIT KEY",
+                    "I HAVE SAVED MY 64-DIGIT ENCRYPTION KEY",
+                    "SAYA MENYIMPAN KUNCI 64 DIGIT SAYA",
+                    "SAYA SUDAH MENYIMPAN KUNCI ENKRIPSI 64 DIGIT",
+                ),
+            )
+            if saved_button is not None:
+                self._last_stage = "confirm_key_saved"
+                await self.tap_element(saved_button)
+                current = await self.dump_hierarchy()
+                continue
+
+            create_button = self._find_button(
+                current,
+                resource_markers=("enable_done_create_button",),
+                labels=("CREATE", "BUAT"),
+            )
+            if create_button is not None:
+                self._last_stage = "confirm_key_create"
+                await self.tap_element(create_button, delay=4.0)
+                current = await self.dump_hierarchy()
+                continue
+
+            if transition < 7:
+                await self.sleep(0.5)
+                current = await self.dump_hierarchy()
+        raise WhatsAppUiAutomationError(
+            "Konfirmasi pembuatan cadangan terenkripsi tidak selesai"
+        )
+
+    async def setup_or_extract_64digit_key(self) -> str | None:
+        self._last_stage = "e2e_settings_probe"
+        elements = await self.dump_hierarchy()
+        elements = await self._wait_for_backup_idle(elements)
+        if self._backup_in_progress(elements):
+            raise WhatsAppUiAutomationError(
+                "Cadangan WhatsApp masih berjalan setelah penantian terbatas"
+            )
+
+        encrypted_backup = self._find_encrypted_backup_item(elements)
+        if encrypted_backup is None:
+            self._last_stage = "e2e_settings_scroll"
+            await self.swipe_up(elements)
+            elements = await self.dump_hierarchy()
+            encrypted_backup = self._find_encrypted_backup_item(elements)
+        if encrypted_backup is None:
+            raise WhatsAppUiAutomationError(
+                "Pengaturan cadangan terenkripsi tidak ditemukan"
+            )
+
+        state = self._encrypted_backup_state(elements, encrypted_backup)
+        if state is WhatsAppE2eState.ENABLED:
+            await self.disable_existing_e2e_encryption(encrypted_backup)
+            elements = await self.dump_hierarchy()
+            encrypted_backup = self._find_encrypted_backup_item(elements)
+            if encrypted_backup is None:
+                await self.swipe_up(elements)
+                elements = await self.dump_hierarchy()
+                encrypted_backup = self._find_encrypted_backup_item(elements)
+            if encrypted_backup is None:
+                raise WhatsAppUiAutomationError(
+                    "Pengaturan enkripsi tidak ditemukan setelah dinonaktifkan"
+                )
+
+        self._last_stage = "e2e_settings_open"
+        await self.tap_element(encrypted_backup, delay=2.0)
+        elements = await self.dump_hierarchy()
+        if await self._dismiss_blocking_dialog(elements):
+            raise WhatsAppUiAutomationError(
+                "Pengaturan enkripsi tertahan oleh proses cadangan"
+            )
+
+        enabled_landing = self._find_button(
+            elements,
+            resource_markers=("enc_backup_enabled_landing_disable_button",),
+            labels=("MATIKAN", "TURN OFF", "DISABLE"),
+        )
+        if enabled_landing is not None:
+            await self.disable_existing_e2e_encryption(landing_open=True)
+            elements = await self.dump_hierarchy()
+            encrypted_backup = self._find_encrypted_backup_item(elements)
+            if encrypted_backup is None:
+                await self.swipe_up(elements)
+                elements = await self.dump_hierarchy()
+                encrypted_backup = self._find_encrypted_backup_item(elements)
+            if encrypted_backup is None:
+                raise WhatsAppUiAutomationError(
+                    "Pengaturan enkripsi tidak ditemukan setelah recovery"
+                )
             await self.tap_element(encrypted_backup, delay=2.0)
             elements = await self.dump_hierarchy()
 
-        more_options = next(
-            (
-                element
-                for element in elements
-                if "enable_info_more_options_button" in element.resource_id
-                or element.text in {"MORE OPTIONS", "OPSI LAINNYA"}
-            ),
-            None,
+        self._last_stage = "e2e_more_options"
+        more_options = self._find_button(
+            elements,
+            resource_markers=("enable_info_more_options_button",),
+            labels=("MORE OPTIONS", "OPSI LAINNYA"),
         )
-        if more_options:
+        if more_options is not None:
             await self.tap_element(more_options)
             elements = await self.dump_hierarchy()
+        else:
+            turn_on = self._find_button(
+                elements,
+                resource_markers=("enable_info_turn_on_button",),
+                labels=("TURN ON", "NYALAKAN"),
+            )
+            if turn_on is not None:
+                await self.tap_element(turn_on)
+                elements = await self.dump_hierarchy()
 
-        key_option = next(
-            (
-                element
-                for element in elements
-                if "enc_backup_more_options_encryption_key" in element.resource_id
-                or element.text
-                in {"64-digit encryption key", "Kunci enkripsi 64 digit"}
-                or element.content_desc
-                in {"64-digit encryption key", "Kunci enkripsi 64 digit"}
-            ),
-            None,
+        self._last_stage = "e2e_select_key"
+        key_option = self._find_button(
+            elements,
+            resource_markers=("enc_backup_more_options_encryption_key",),
+            labels=("64-digit encryption key", "Kunci enkripsi 64 digit"),
         )
-        if key_option:
+        if key_option is not None:
             await self.tap_element(key_option)
             elements = await self.dump_hierarchy()
 
-        generate_button = next(
-            (
-                element
-                for element in elements
-                if element.text
-                in {
-                    "GENERATE YOUR 64-DIGIT KEY",
-                    "Generate your 64-digit key",
-                    "BUAT KUNCI 64 DIGIT ANDA",
-                    "TURN ON",
-                    "NYALAKAN",
-                }
+        self._last_stage = "e2e_generate_key"
+        generate_button = self._find_button(
+            elements,
+            resource_markers=(
+                "encryption_key_info_middle_button",
+                "encryption_key_info_bottom_button",
             ),
-            None,
+            labels=(
+                "GENERATE YOUR 64-DIGIT KEY",
+                "Generate your 64-digit key",
+                "BUAT KUNCI 64 DIGIT ANDA",
+                "TURN ON",
+                "NYALAKAN",
+            ),
         )
-        if generate_button:
-            await self.tap_element(generate_button, delay=2.0)
-            elements = await self.dump_hierarchy()
-
         chunks = [
             element.text.strip().casefold()
             for element in elements
             if re.fullmatch(r"[0-9a-fA-F]{4}", element.text.strip())
         ]
+        if generate_button is not None and len(chunks) < 16:
+            await self.tap_element(generate_button, delay=2.0)
+            elements = await self.dump_hierarchy()
+            chunks = [
+                element.text.strip().casefold()
+                for element in elements
+                if re.fullmatch(r"[0-9a-fA-F]{4}", element.text.strip())
+            ]
         if len(chunks) < 16:
-            return None
+            await self.sleep(1.0)
+            elements = await self.dump_hierarchy()
+            chunks = [
+                element.text.strip().casefold()
+                for element in elements
+                if re.fullmatch(r"[0-9a-fA-F]{4}", element.text.strip())
+            ]
+        if len(chunks) < 16:
+            raise WhatsAppUiAutomationError(
+                "Kunci enkripsi 64 digit tidak tampil lengkap"
+            )
+
         hex_key = "".join(chunks[:16])
         if not HEX_KEY_RE.fullmatch(hex_key):
-            return None
+            raise WhatsAppUiAutomationError("Kunci enkripsi 64 digit tidak valid")
 
-        continue_button = next(
-            (
-                element
-                for element in elements
-                if "encryption_key_info_bottom_button" in element.resource_id
-                or element.text in {"CONTINUE", "LANJUT"}
-            ),
-            None,
-        )
-        if continue_button:
-            await self.tap_element(continue_button)
-            elements = await self.dump_hierarchy()
-
-        saved_button = next(
-            (
-                element
-                for element in elements
-                if "encryption_key_confirm_button_confirm" in element.resource_id
-                or element.text
-                in {
-                    "I SAVED MY 64-DIGIT KEY",
-                    "SAYA MENYIMPAN KUNCI 64 DIGIT SAYA",
-                }
-            ),
-            None,
-        )
-        if saved_button:
-            await self.tap_element(saved_button)
-            elements = await self.dump_hierarchy()
-
-        create_button = next(
-            (
-                element
-                for element in elements
-                if "enable_done_create_button" in element.resource_id
-                or element.text in {"CREATE", "BUAT"}
-            ),
-            None,
-        )
-        if create_button:
-            await self.tap_element(create_button, delay=4.0)
+        await self._complete_key_setup(elements)
         return hex_key
 
     async def trigger_backup(self) -> bool:
+        self._last_stage = "trigger_backup"
         elements = await self.dump_hierarchy()
-        backup_button = next(
-            (
-                element
-                for element in elements
-                if "google_drive_backup_now_btn" in element.resource_id
-                or element.text in {"BACK UP", "CADANGKAN"}
-            ),
-            None,
+        if await self._dismiss_blocking_dialog(elements):
+            elements = await self.dump_hierarchy()
+        backup_button = self._find_button(
+            elements,
+            resource_markers=("google_drive_backup_now_btn",),
+            labels=("BACK UP", "CADANGKAN", "Back up", "Cadangkan"),
         )
         if backup_button is None:
             return False
-        await self.tap_element(backup_button, delay=4.0)
+        await self.tap_element(backup_button, delay=3.0)
+
+        for poll in range(WHATSAPP_BACKUP_IDLE_POLLS):
+            elements = await self.dump_hierarchy()
+            if await self._dismiss_blocking_dialog(elements):
+                elements = await self.dump_hierarchy()
+            if (
+                not self._backup_in_progress(elements)
+                and self._is_chat_backup_screen(elements)
+            ):
+                return True
+            if poll < WHATSAPP_BACKUP_IDLE_POLLS - 1:
+                await self.sleep(1.0)
         return True
 
     @staticmethod
@@ -641,20 +1296,27 @@ class WhatsAppUiAutomator:
         return list(dict.fromkeys(paths))
 
     async def pull_newest_crypt15(self) -> Path | None:
-        result = await self.transport.run(
-            self.serial,
-            ["shell", WHATSAPP_BACKUP_FIND],
-            operation="whatsapp_backup_find",
-            timeout=120.0,
-            check=False,
-        )
-        paths = self._remote_backup_paths(result.stdout)
+        self._last_stage = "find_crypt15"
+        paths: list[str] = []
+        for poll in range(WHATSAPP_BACKUP_FIND_POLLS):
+            result = await self.transport.run(
+                self.serial,
+                ["shell", WHATSAPP_BACKUP_FIND],
+                operation="whatsapp_backup_find",
+                timeout=30.0,
+                check=False,
+            )
+            paths = self._remote_backup_paths(result.stdout)
+            if paths:
+                break
+            if poll < WHATSAPP_BACKUP_FIND_POLLS - 1:
+                await self.sleep(WHATSAPP_BACKUP_FIND_POLL_S)
         if not paths:
             result = await self.transport.run(
                 self.serial,
                 ["shell", WHATSAPP_BACKUP_FIND_FALLBACK],
                 operation="whatsapp_backup_find_fallback",
-                timeout=120.0,
+                timeout=60.0,
                 check=False,
             )
             paths = self._remote_backup_paths(result.stdout)
@@ -670,6 +1332,13 @@ class WhatsAppUiAutomator:
                 target = candidate
 
         destination = self.work_dir / "msgstore.db.crypt15"
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError as exc:
+            raise WhatsAppUiAutomationError(
+                "Artifact Crypt15 lama tidak dapat dibersihkan"
+            ) from exc
+        self._last_stage = "pull_crypt15"
         await self.transport.run(
             self.serial,
             ["pull", target, str(destination)],
@@ -694,9 +1363,11 @@ class WhatsAppUiAutomator:
         return _read_hex_key(self.session_key_path) or _read_hex_key(self.device_key_path)
 
     async def _single_attempt(self) -> WhatsAppBackupArtifact:
+        self._last_stage = "navigate_to_backup"
         if not await self.navigate_to_chat_backup():
             raise WhatsAppUiAutomationError("Navigasi ke Cadangan chat gagal")
 
+        self._last_stage = "setup_encryption_key"
         generated_key = await self.setup_or_extract_64digit_key()
         if generated_key:
             self._store_key(generated_key)
@@ -711,9 +1382,11 @@ class WhatsAppUiAutomator:
             await self.trigger_backup()
 
         await self.sleep(3.0)
+        self._last_stage = "acquire_crypt15"
         backup = await self.pull_newest_crypt15()
         if backup is None:
             raise WhatsAppUiAutomationError("msgstore.db.crypt15 tidak ditemukan")
+        self._last_stage = "complete"
         return WhatsAppBackupArtifact(backup, hex_key, 1)
 
     async def acquire_backup(
@@ -723,6 +1396,8 @@ class WhatsAppUiAutomator:
     ) -> WhatsAppBackupArtifact:
         last_error: BaseException | None = None
         for attempt in range(1, WHATSAPP_UI_ATTEMPTS + 1):
+            self.layout_mode = WhatsAppLayout.UNKNOWN
+            self._last_stage = "attempt_start"
             await on_progress(
                 SessionStatus.ACQUIRING,
                 38.0,
@@ -749,9 +1424,23 @@ class WhatsAppUiAutomator:
                             if isinstance(exc, AcquisitionError)
                             else "ui_automation"
                         ),
+                        "failure_stage": self._last_stage,
+                        "layout": self.layout_mode.value,
                     },
                 )
                 if attempt < WHATSAPP_UI_ATTEMPTS:
+                    try:
+                        await self.press_back(delay=0.5)
+                    except asyncio.CancelledError:
+                        raise
+                    except AcquisitionError as recovery_error:
+                        logger.warning(
+                            "whatsapp_ui_retry_recovery_failed",
+                            extra={
+                                "attempt": attempt,
+                                "error_category": recovery_error.category.value,
+                            },
+                        )
                     await self.sleep(1.0)
                 continue
             return WhatsAppBackupArtifact(
