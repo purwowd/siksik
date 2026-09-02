@@ -23,7 +23,9 @@ from app.acquisition.android_notes.ui import (
     card_signature,
     editor_content,
     find_action,
+    find_notes_tab,
     first_timestamp,
+    is_tasks_tab_active,
     looks_like_editor,
     looks_like_note_list,
     normalize_text,
@@ -75,6 +77,7 @@ class GenericNotesExtractor:
                 (_gateway_warning(self._gateway, "notes_launch_failed"),),
             )
         width, height = await self._gateway.screen_size()
+        await self._ensure_notes_tab_selected(policy, width, height)
         seen_cards: set[str] = set()
         records: list[NoteRecord] = []
         warnings: set[str] = set()
@@ -99,6 +102,16 @@ class GenericNotesExtractor:
                 if signature and signature not in seen_cards:
                     pending.append((card, signature))
             if not pending:
+                if await self._ensure_notes_tab_selected(policy, width, height):
+                    snapshot = await self._snapshot(policy)
+                    cards = note_cards(snapshot, (width, height))
+                    for card in cards:
+                        signature = card_signature(snapshot, card)
+                        if signature and signature not in seen_cards:
+                            pending.append((card, signature))
+                    if pending:
+                        stagnant = 0
+                        continue
                 stagnant += 1
                 if scrolls >= policy.max_list_scrolls:
                     break
@@ -176,6 +189,25 @@ class GenericNotesExtractor:
             tuple(sorted(warnings)),
             skipped,
         )
+
+    async def _ensure_notes_tab_selected(
+        self,
+        policy: NotesPolicy,
+        width: int,
+        height: int,
+    ) -> bool:
+        snapshot = await self._snapshot(policy)
+        if _snapshot_failure(self._gateway, snapshot) is not None:
+            return False
+        if note_cards(snapshot, (width, height)):
+            return True
+        if is_tasks_tab_active(snapshot) or find_notes_tab(snapshot) is not None:
+            notes_tab = find_notes_tab(snapshot)
+            if notes_tab is not None:
+                if await self._gateway.tap(*notes_tab.bounds.center):
+                    await self._gateway.settle(0.6)
+                    return True
+        return False
 
     async def _snapshot(self, policy: NotesPolicy) -> UiSnapshot:
         return parse_ui(await self._gateway.dump_ui(policy.max_ui_bytes))

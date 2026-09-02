@@ -96,6 +96,34 @@ EXCLUDED_CARD_LABELS = frozenset(
         "batal",
     }
 )
+EXCLUDED_CARD_PATTERN = re.compile(
+    r"^(?:"
+    r"search|cari|cari\s+catatan|search\s+notes?|"
+    r"settings?|pengaturan|"
+    r"navigation|laci|menu|more|lainnya|"
+    r"new\s+note|catatan\s+baru|ketuk\s+untuk\s+buat\s+catatan|tap\s+to\s+create\s+a\s+note|\+|"
+    r"tambah\s+catatan|tambahkan\s+catatan|add(?:\s+a)?\s+note|create(?:\s+a)?\s+note|buat(?:\s+catatan)?|"
+    r"tugas(?:\s*\(.*?\)|,\s*tab\b.*|\s+tab\b.*|\s+\d+.*)?|"
+    r"tasks?(?:\s*\(.*?\)|,\s*tab\b.*|\s+tab\b.*|\s+\d+.*)?|"
+    r"to-?do(?:\s*\(.*?\)|,\s*tab\b.*|\s+tab\b.*|\s+\d+.*)?|"
+    r"catatan(?:\s*\(.*?\)|,\s*tab\b.*|\s+tab\b.*|\s+\d+.*)?|"
+    r"notes?(?:\s*\(.*?\)|,\s*tab\b.*|\s+tab\b.*|\s+\d+.*)?|"
+    r"folder.*|kelola\s+folder|manage\s+folders?|"
+    r"urutkan|sort|"
+    r"semua(?:\s+catatan)?|all(?:\s+notes)?|"
+    r"hapus|delete|"
+    r"back|kembali|batal|cancel|done|selesai"
+    r")$",
+    re.IGNORECASE,
+)
+NOTES_TAB_RE = re.compile(
+    r"^(?:catatan|notes?)(?:,\s*tab\b.*|\s+tab\b.*|\s*\(\d+\)|$)",
+    re.IGNORECASE,
+)
+TASKS_TAB_RE = re.compile(
+    r"^(?:tugas|tasks?|to-?do)(?:,\s*tab\b.*|\s+tab\b.*|\s*\(\d+\)|$)",
+    re.IGNORECASE,
+)
 CARD_RESOURCE_TOKENS = frozenset(
     {
         "preview",
@@ -114,6 +142,8 @@ CARD_CONTROL_RESOURCE_TOKENS = frozenset(
         "create",
         "fab",
         "filter",
+        "header",
+        "indicator",
         "menu",
         "navigation",
         "new",
@@ -121,7 +151,14 @@ CARD_CONTROL_RESOURCE_TOKENS = frozenset(
         "setting",
         "settings",
         "sort",
+        "switch",
+        "tab",
+        "tabs",
+        "task",
+        "tasks",
+        "todo",
         "toolbar",
+        "tugas",
     }
 )
 EDITOR_RESOURCE_TOKENS = (
@@ -299,6 +336,50 @@ def selected_count(snapshot: UiSnapshot) -> int | None:
     return max(values) if values else None
 
 
+def is_tab_or_control(node: UiNode) -> bool:
+    class_name = node.class_name.casefold()
+    if any(
+        token in class_name
+        for token in ("tabitem", "tablayout", "actionbar$tab", "navigationbar", "toolbar")
+    ):
+        return True
+    resource = _resource_name(node.resource_id)
+    if any(token in resource for token in ("tab", "task", "tugas", "todo")):
+        return True
+    label = node.label.strip()
+    if label and EXCLUDED_CARD_PATTERN.match(label):
+        return True
+    return False
+
+
+def find_notes_tab(snapshot: UiSnapshot) -> UiNode | None:
+    candidates: list[UiNode] = []
+    for node in snapshot.nodes:
+        if not node.clickable or node.bounds.area <= 0:
+            continue
+        label = node.label.strip()
+        resource = _resource_name(node.resource_id)
+        if NOTES_TAB_RE.match(label) or (
+            any(tok in resource for tok in ("tab", "nav"))
+            and any(tok in label.casefold() for tok in ("catatan", "note"))
+        ):
+            candidates.append(node)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda n: (n.bounds.top, n.bounds.left))
+
+
+def is_tasks_tab_active(snapshot: UiSnapshot) -> bool:
+    for node in snapshot.nodes:
+        label = node.label.strip()
+        resource = _resource_name(node.resource_id)
+        if (TASKS_TAB_RE.match(label) or "task" in resource or "tugas" in resource) and (
+            node.selected or node.checked
+        ):
+            return True
+    return False
+
+
 def note_cards(
     snapshot: UiSnapshot,
     screen_size: tuple[int, int] | None = None,
@@ -306,6 +387,8 @@ def note_cards(
     cards: list[UiNode] = []
     for node in snapshot.nodes:
         if not node.clickable or node.bounds.area <= 0:
+            continue
+        if is_tab_or_control(node):
             continue
         if not _within_card_region(node, screen_size):
             continue
@@ -315,7 +398,12 @@ def note_cards(
         label_values = [node.label]
         label_values.extend(child.label for child in snapshot.descendants(node.index))
         meaningful = [normalize_text(value, 4096) for value in label_values if value.strip()]
-        meaningful = [value for value in meaningful if value.casefold() not in EXCLUDED_CARD_LABELS]
+        meaningful = [
+            value
+            for value in meaningful
+            if value.casefold() not in EXCLUDED_CARD_LABELS
+            and not EXCLUDED_CARD_PATTERN.match(value)
+        ]
         joined = normalize_text("\n".join(dict.fromkeys(meaningful)), 8192)
         node_width = node.bounds.right - node.bounds.left
         node_height = node.bounds.bottom - node.bounds.top

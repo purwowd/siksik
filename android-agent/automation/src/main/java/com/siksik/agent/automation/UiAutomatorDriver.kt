@@ -4648,6 +4648,7 @@ class UiAutomatorDriver(
     /** FB 2025+ profile setup wizard (Xiaomi ID: "Selamat datang di profil Anda"). */
     private fun isFacebookProfileOnboarding(): Boolean {
         if (!isForeground(FACEBOOK_PACKAGE)) return false
+        if (facebookHarvestedLabelsContainAny(EDIT_PROFILE_LABELS)) return false
         if (facebookHarvestedLabelsContainAny(FACEBOOK_PROFILE_ONBOARDING_FRAGMENTS)) return true
         if (
             facebookHarvestedLabelsContainAny(FACEBOOK_PROFILE_PHOTO_SETUP_LABELS) &&
@@ -4755,13 +4756,42 @@ class UiAutomatorDriver(
             if (abortIfFacebookSignedOut()) return false
             dismissBlockingSystemPrompts()
             dismissFacebookImmersiveSurface()
-            recoverFacebookFromWrongSurface()
+            if (hasFacebookOwnProfileProof() || looksLikeFacebookProfileWall()) {
+                val marker = fbAccountMarker() ?: inferFacebookMenuAccountName()
+                if (marker != null) {
+                    verifiedOwnAccountPackages.add(FACEBOOK_PACKAGE)
+                    fbOwnAccountMarker = marker
+                    Log.i(
+                        LOG_TAG,
+                        "event=facebook_profile_verified marker=$marker attempt=$attempt via=already_on_wall",
+                    )
+                    return facebookProfileVerifiedComplete()
+                }
+                refreshFacebookAccountMarker(forceShell = true)
+                if (fbOwnAccountMarker != null || hasFacebookOwnProfileProof()) {
+                    verifiedOwnAccountPackages.add(FACEBOOK_PACKAGE)
+                    Log.i(
+                        LOG_TAG,
+                        "event=facebook_profile_verified marker=${fbOwnAccountMarker ?: "deferred"} " +
+                            "attempt=$attempt via=already_on_wall_shell",
+                    )
+                    return facebookProfileVerifiedComplete()
+                }
+            }
+            if (
+                !hasFacebookOwnProfileProof() &&
+                !looksLikeFacebookProfileWall() &&
+                !isFacebookMenuDrawerOpen()
+            ) {
+                recoverFacebookFromWrongSurface()
+            }
             if (isFacebookProfileOnboarding()) {
                 recoverFromFacebookProfileOnboarding()
                 return@repeat
             }
             if (openFacebookProfileViaTopMenu()) {
-                if (hasFacebookOwnProfileProof()) {
+                waitForFacebookProfileProof()
+                if (hasFacebookOwnProfileProof() || looksLikeFacebookProfileWall()) {
                     val marker = fbAccountMarker()
                     if (marker != null) {
                         verifiedOwnAccountPackages.add(FACEBOOK_PACKAGE)
@@ -4782,11 +4812,17 @@ class UiAutomatorDriver(
                         )
                         return facebookProfileVerifiedComplete()
                     }
-                    if (hasFacebookOwnProfileProof()) {
+                    if (hasFacebookOwnProfileProof() || looksLikeFacebookProfileWall()) {
+                        inferFacebookMenuAccountName()?.let { inferred ->
+                            if (fbOwnAccountMarker.isNullOrBlank()) {
+                                fbOwnAccountMarker = inferred
+                            }
+                        }
                         verifiedOwnAccountPackages.add(FACEBOOK_PACKAGE)
                         Log.i(
                             LOG_TAG,
-                            "event=facebook_profile_verified marker=deferred attempt=$attempt via=top_menu",
+                            "event=facebook_profile_verified marker=${fbOwnAccountMarker ?: "deferred"} " +
+                                "attempt=$attempt via=top_menu",
                         )
                         return facebookProfileVerifiedComplete()
                     }
@@ -4948,24 +4984,23 @@ class UiAutomatorDriver(
 
     private fun selectFacebookUsernameFromMenuDrawer(): Boolean {
         if (hasFacebookOwnProfileProof()) return true
-        val viaLabeledControl = clickFacebookLabeledControl(FACEBOOK_OWN_PROFILE_LABELS) ||
-            clickDescriptionContains(FACEBOOK_OWN_PROFILE_LABELS) ||
-            clickExactText(FACEBOOK_OWN_PROFILE_LABELS) ||
-            clickExactDescription(FACEBOOK_OWN_PROFILE_LABELS) ||
-            clickFacebookLabeledControl(FACEBOOK_OWN_PROFILE_LABELS, allowActionClick = false)
-        if (viaLabeledControl) {
-            waitNavigation()
-            SystemClock.sleep(FB_GATE_SETTLE_MS)
-            if (waitForFacebookGate { hasFacebookOwnProfileProof() }) {
-                inferFacebookMenuAccountName()?.let { name ->
-                    fbOwnAccountMarker = name
-                }
+        val menuAccountName = inferFacebookMenuAccountName()
+        if (clickFacebookOwnProfileFromOpenMenu()) {
+            if (waitForFacebookProfileProof()) {
+                menuAccountName?.let { fbOwnAccountMarker = it }
                 Log.i(LOG_TAG, "event=facebook_menu_profile via=labeled_control")
                 return true
             }
+            if (looksLikeFacebookProfileWall(menuAccountName) &&
+                !isFacebookProfileSwitcherBlockingProfile()
+            ) {
+                menuAccountName?.let { fbOwnAccountMarker = it }
+                verifiedOwnAccountPackages.add(FACEBOOK_PACKAGE)
+                Log.i(LOG_TAG, "event=facebook_menu_profile via=labeled_control_wall")
+                return true
+            }
         }
-        fbOwnAccountMarker = null
-        val menuAccountName = inferFacebookMenuAccountName() ?: run {
+        val marker = menuAccountName ?: run {
             val candidates = harvestFacebookMenuCandidates()
             val a11yCount = harvestFacebookLabeledBounds(FACEBOOK_PACKAGE).size
             Log.i(
@@ -4974,11 +5009,32 @@ class UiAutomatorDriver(
                     "drawer_open=${FacebookMenuAccountPolicy.hasMenuProfileRow(candidates)} " +
                     "a11y_nodes=$a11yCount hierarchy_nodes=${candidates.size}",
             )
-            return false
+            return looksLikeFacebookProfileWall()
         }
-        if (!clickFacebookMenuAccountName(menuAccountName)) return false
-        if (!hasFacebookOwnProfileProof()) return false
-        fbOwnAccountMarker = menuAccountName
+        if (clickFacebookMenuAccountName(marker)) {
+            fbOwnAccountMarker = marker
+            return true
+        }
+        if (looksLikeFacebookProfileWall(marker) && !isFacebookProfileSwitcherBlockingProfile()) {
+            fbOwnAccountMarker = marker
+            verifiedOwnAccountPackages.add(FACEBOOK_PACKAGE)
+            Log.i(LOG_TAG, "event=facebook_menu_profile via=username_wall marker=$marker")
+            return true
+        }
+        return false
+    }
+
+    /** Primary menu entry — compound labels such as "Lihat profil Anda" (48a4548 path). */
+    private fun clickFacebookOwnProfileFromOpenMenu(): Boolean {
+        val opened = clickFacebookLabeledControl(FACEBOOK_OWN_PROFILE_LABELS) ||
+            clickDescriptionContains(FACEBOOK_OWN_PROFILE_LABELS) ||
+            clickExactTextWithScroll(FACEBOOK_OWN_PROFILE_LABELS, MENU_SCROLL_LIMIT) ||
+            clickExactText(FACEBOOK_OWN_PROFILE_LABELS) ||
+            clickExactDescription(FACEBOOK_OWN_PROFILE_LABELS) ||
+            clickFacebookLabeledControl(FACEBOOK_OWN_PROFILE_LABELS, allowActionClick = false)
+        if (!opened) return false
+        waitNavigation()
+        SystemClock.sleep(FB_PROFILE_MENU_SETTLE_MS)
         return true
     }
 
@@ -4995,13 +5051,21 @@ class UiAutomatorDriver(
             if (selectFacebookUsernameFromMenuDrawer()) {
                 return true
             }
+            if (looksLikeFacebookProfileWall() || hasFacebookOwnProfileProof()) {
+                return true
+            }
+            if (!isFacebookMenuDrawerOpen()) {
+                return hasFacebookOwnProfileProof() || looksLikeFacebookProfileWall()
+            }
             resetFacebookMenuDrawerForUsernameRetry()
         }
         if (!ensureFacebookMenuDrawerReady()) {
             failureReason = failureReason ?: "facebook_menu_drawer_failed"
             return false
         }
-        return selectFacebookUsernameFromMenuDrawer() || hasFacebookOwnProfileProof()
+        return selectFacebookUsernameFromMenuDrawer() ||
+            hasFacebookOwnProfileProof() ||
+            looksLikeFacebookProfileWall()
     }
 
     private fun facebookMenuSurfaceVisible(): Boolean {
@@ -5395,6 +5459,9 @@ class UiAutomatorDriver(
         labels.any { label ->
             EDIT_PROFILE_LABELS.any { it.equals(label, ignoreCase = true) } ||
                 FACEBOOK_MORE_PROFILE_SETTINGS_LABELS.any { it.equals(label, ignoreCase = true) } ||
+                listOf("About", "Tentang").any { it.equals(label, ignoreCase = true) } ||
+                listOf("Add to story", "Tambahkan ke cerita", "Edit public details")
+                    .any { it.equals(label, ignoreCase = true) } ||
                 FacebookPostsSurfacePolicy.looksLikeAllPostsSurfaceLabel(label) ||
                 FacebookPostsSurfacePolicy.looksLikeProfileMediaTabs(listOf(label))
         }
@@ -5468,27 +5535,38 @@ class UiAutomatorDriver(
         labels: List<String> = harvestAccessibilityLabels(FACEBOOK_PACKAGE),
     ): Boolean {
         if (isFacebookProfileOnboarding()) return false
-        val editVisible = labels.any { label ->
-            EDIT_PROFILE_LABELS.any { it.equals(label, ignoreCase = true) }
+        val metricSignal = labels.any { FacebookProfileMetricParser.isMetricLine(it) } ||
+            facebookProfileMetricObjects().isNotEmpty()
+        val profileChrome = labelsContainProfileWallChrome(labels)
+        val mediaTabs = FacebookPostsSurfacePolicy.looksLikeProfileMediaTabs(labels)
+        if (
+            FacebookProfileProofPolicy.hasClassicProfileProof(
+                labels = labels,
+                editProfileLabels = EDIT_PROFILE_LABELS,
+                hasMetricSignal = metricSignal,
+                hasProfileChrome = profileChrome,
+                hasMediaTabs = mediaTabs,
+            )
+        ) {
+            return true
         }
-        if (editVisible) {
-            val metricVisible = labels.any { FacebookProfileMetricParser.isMetricLine(it) } ||
-                facebookProfileMetricObjects().isNotEmpty()
-            val profileChrome = labels.any { label ->
-                listOf("About", "Tentang").any { it.equals(label, ignoreCase = true) } ||
-                    FacebookPostsSurfacePolicy.looksLikeAllPostsSurfaceLabel(label) ||
-                    listOf("Add to story", "Tambahkan ke cerita", "Edit public details")
-                        .any { it.equals(label, ignoreCase = true) }
-            }
-            return metricVisible ||
-                profileChrome ||
-                FacebookPostsSurfacePolicy.looksLikeProfileMediaTabs(labels)
+        val marker = fbOwnAccountMarker ?: inferFacebookMenuAccountName()
+        if (
+            marker != null &&
+            FacebookProfileProofPolicy.hasEarlyProfileWallProof(
+                labels = labels,
+                marker = marker,
+                hasProfileChrome = profileChrome,
+                hasMediaTabs = mediaTabs,
+                hasMetricLine = labels.any { FacebookProfileMetricParser.isMetricLine(it) },
+            )
+        ) {
+            return true
         }
         if (!facebookSessionProfileVerified()) return false
-        val marker = fbOwnAccountMarker ?: return false
-        if (!labels.any { it.equals(marker, ignoreCase = true) }) return false
-        return labelsContainProfileWallChrome(labels) ||
-            FacebookPostsSurfacePolicy.looksLikeProfileMediaTabs(labels)
+        val sessionMarker = fbOwnAccountMarker ?: return false
+        if (!labels.any { it.equals(sessionMarker, ignoreCase = true) }) return false
+        return profileChrome || mediaTabs
     }
 
     private fun ensureFacebookAllPostsSurface(): Boolean {
@@ -7815,24 +7893,52 @@ class UiAutomatorDriver(
         for ((index, target) in targets.withIndex()) {
             if (!tapFacebookMenuNameTarget(normalizedMarker, target, index)) continue
             waitNavigation()
-            SystemClock.sleep(FB_GATE_SETTLE_MS)
-            if (waitForFacebookGate { hasFacebookOwnProfileProof() }) {
+            SystemClock.sleep(FB_PROFILE_MENU_SETTLE_MS)
+            if (waitForFacebookProfileProof()) {
                 return true
             }
-            Log.i(
-                LOG_TAG,
-                "event=facebook_menu_username_mis_tap marker=$normalizedMarker " +
-                    "candidate=$index surface=${facebookWrongSurfaceTag()}",
-            )
-            recoverFacebookFromWrongSurface()
+            if (
+                looksLikeFacebookProfileWall(normalizedMarker) &&
+                !isFacebookProfileSwitcherBlockingProfile()
+            ) {
+                Log.i(
+                    LOG_TAG,
+                    "event=facebook_menu_username_wall marker=$normalizedMarker candidate=$index",
+                )
+                return true
+            }
+            if (isFacebookProfileSwitcherBlockingProfile()) {
+                Log.i(
+                    LOG_TAG,
+                    "event=facebook_menu_username_mis_tap marker=$normalizedMarker " +
+                        "candidate=$index surface=profile_switcher",
+                )
+                recoverFacebookFromWrongSurface()
+            } else {
+                Log.i(
+                    LOG_TAG,
+                    "event=facebook_menu_username_mis_tap marker=$normalizedMarker " +
+                        "candidate=$index surface=${facebookWrongSurfaceTag()}",
+                )
+            }
             if (!isFacebookMenuDrawerOpen()) break
             invalidateFacebookMenuCandidatesCache()
+        }
+        if (looksLikeFacebookProfileWall(normalizedMarker)) {
+            return true
         }
         resetFacebookMenuDrawerForUsernameRetry()
         return false
     }
 
     private fun resetFacebookMenuDrawerForUsernameRetry() {
+        if (looksLikeFacebookProfileWall() || hasFacebookOwnProfileProof()) {
+            Log.i(
+                LOG_TAG,
+                "event=facebook_menu_username_retry_skipped reason=profile_wall_visible",
+            )
+            return
+        }
         invalidateFacebookMenuCandidatesCache()
         dismissFacebookMenuDrawer()
         recoverFacebookFromWrongSurface(maxBack = 2)
@@ -7863,17 +7969,16 @@ class UiAutomatorDriver(
 
     private fun isFacebookProfileSwitcherBlockingProfile(): Boolean =
         isForeground(FACEBOOK_PACKAGE) &&
-            (
-                looksLikeSignedOutSession(FACEBOOK_PACKAGE, deep = false) ||
-                    hasLabelContaining(
-                        listOf(
-                            "Buka pengalih profil",
-                            "Open profile switcher",
-                            "Switch accounts",
-                            "Ganti akun",
-                        ),
-                    )
-                )
+            hasLabelContaining(
+                listOf(
+                    "Buka pengalih profil",
+                    "Open profile switcher",
+                    "Switch accounts",
+                    "Ganti akun",
+                    "Pilih profil",
+                    "Choose profile",
+                ),
+            )
 
     private fun isFacebookStoryViewerSurface(): Boolean {
         if (!isForeground(FACEBOOK_PACKAGE)) return false
@@ -7885,6 +7990,7 @@ class UiAutomatorDriver(
 
     private fun isFacebookOnKnownNavigationSurface(): Boolean =
         hasFacebookOwnProfileProof() ||
+            looksLikeFacebookProfileWall() ||
             isFacebookMenuDrawerOpen() ||
             hasFacebookHomeFeedProof()
 
@@ -9417,10 +9523,95 @@ class UiAutomatorDriver(
     }
 
     private fun hasFacebookOwnProfileProof(): Boolean {
+        if (hasFacebookOwnProfileProofUiDevice()) {
+            return facebookProofForegroundOk()
+        }
         if (!hasFacebookOwnProfileStructuralProof()) return false
+        return facebookProofForegroundOk()
+    }
+
+    private fun facebookProofForegroundOk(): Boolean {
         if (isForeground(FACEBOOK_PACKAGE)) return true
-        // SATRIA overlay can hide FB from isForeground while the profile wall tree is valid.
-        return facebookSessionProfileVerified()
+        return facebookSessionProfileVerified() || looksLikeFacebookProfileWall()
+    }
+
+    /** 48a4548-style proof via UiDevice metric objects + Edit profile chrome. */
+    private fun hasFacebookOwnProfileProofUiDevice(): Boolean {
+        if (isFacebookProfileOnboarding()) return false
+        if (isFacebookProfileSwitcherBlockingProfile()) return false
+        val labels = harvestAccessibilityLabels(FACEBOOK_PACKAGE)
+        val metricSignal = facebookProfileMetricObjects().isNotEmpty() ||
+            labels.any { FacebookProfileMetricParser.isMetricLine(it) }
+        return FacebookProfileProofPolicy.hasClassicProfileProof(
+            labels = labels,
+            editProfileLabels = EDIT_PROFILE_LABELS,
+            hasMetricSignal = metricSignal,
+            hasProfileChrome = labelsContainProfileWallChrome(labels),
+            hasMediaTabs = FacebookPostsSurfacePolicy.looksLikeProfileMediaTabs(labels),
+        )
+    }
+
+    private fun looksLikeFacebookProfileWall(marker: String? = fbOwnAccountMarker): Boolean {
+        if (isFacebookProfileOnboarding()) return false
+        if (isFacebookProfileSwitcherBlockingProfile()) return false
+        if (isFacebookMenuDrawerOpen()) return false
+        if (hasFacebookOwnProfileProofUiDevice()) return true
+        val labels = harvestAccessibilityLabels(FACEBOOK_PACKAGE)
+        if (hasFacebookOwnProfileStructuralProof(labels)) return true
+        val resolvedMarker = marker?.trim().orEmpty().ifEmpty {
+            inferFacebookMenuAccountName()?.trim().orEmpty()
+        }
+        if (resolvedMarker.isEmpty()) return false
+        return FacebookProfileProofPolicy.hasEarlyProfileWallProof(
+            labels = labels,
+            marker = resolvedMarker,
+            hasProfileChrome = labelsContainProfileWallChrome(labels),
+            hasMediaTabs = FacebookPostsSurfacePolicy.looksLikeProfileMediaTabs(labels),
+            hasMetricLine = labels.any { FacebookProfileMetricParser.isMetricLine(it) },
+        )
+    }
+
+    private fun waitForFacebookProfileProof(): Boolean {
+        repeat(FACEBOOK_PROFILE_PROOF_WAIT_ATTEMPTS) { attempt ->
+            if (hasFacebookOwnProfileProof()) {
+                Log.i(LOG_TAG, "event=facebook_profile_proof_ready attempt=$attempt")
+                return true
+            }
+            if (looksLikeFacebookProfileWall() && !isFacebookProfileSwitcherBlockingProfile()) {
+                inferFacebookMenuAccountName()?.let { name ->
+                    if (fbOwnAccountMarker.isNullOrBlank()) {
+                        fbOwnAccountMarker = name
+                    }
+                }
+                if (hasFacebookOwnProfileProof()) {
+                    Log.i(LOG_TAG, "event=facebook_profile_proof_ready attempt=$attempt via=wall")
+                    return true
+                }
+            }
+            if (isFacebookProfileSwitcherBlockingProfile()) {
+                return false
+            }
+            if (attempt == 3 || attempt == 8 || attempt == 14) {
+                scrollFacebookProfileTowardHeader()
+            }
+            if (navigationExpired()) return hasFacebookOwnProfileProof()
+            SystemClock.sleep(FACEBOOK_PROFILE_PROOF_POLL_MS)
+        }
+        return hasFacebookOwnProfileProof() || looksLikeFacebookProfileWall()
+    }
+
+    private fun scrollFacebookProfileTowardHeader(): Boolean {
+        val width = device.displayWidth
+        val height = device.displayHeight
+        if (width <= 0 || height <= 0) return false
+        invalidateShellDumpCache()
+        return safeSwipe(
+            width / 2,
+            height / 4,
+            width / 2,
+            (height * 2) / 3,
+            SWIPE_STEPS / 2,
+        )
     }
 
     private fun facebookProfileBounds(nodes: List<VisibleNodeRecord>): List<VisibleNodeRecord> {
@@ -9458,24 +9649,36 @@ class UiAutomatorDriver(
     }
 
     private fun hasMeaningfulFacebookProfileCapture(nodes: List<VisibleNodeRecord>): Boolean {
-        // Own-profile proof (Edit profile + metrics/chrome) is enough — do not drop
-        // the Facebook report block when a11y only returns chrome tabs.
-        if (hasFacebookOwnProfileProof()) return true
-        val marker = fbOwnAccountMarker
-        val labels = nodes.asSequence()
-            .flatMap { node -> sequenceOf(node.text, node.contentDescription) }
-            .filterNotNull()
-            .map { value -> value.trim() }
-            .filter(String::isNotEmpty)
-            .toList()
-        if (labels.isEmpty()) return false
-        if (marker != null && labels.any { it.equals(marker, ignoreCase = true) }) return true
-        if (labels.any(FacebookProfileMetricParser::isMetricLine)) {
+        val marker = fbOwnAccountMarker ?: inferFacebookMenuAccountName()
+        if (marker.isNullOrBlank()) {
+            return hasFacebookOwnProfileProof()
+        }
+        val labelTexts = nodes.flatMap { node -> listOfNotNull(node.text, node.contentDescription) }
+        val hasName = FacebookProfileProofPolicy.captureHasDisplayName(
+            texts = labelTexts,
+            marker = marker,
+            hasProfileDisplayNameViewId = nodes.any { node ->
+                node.viewId?.endsWith("profile_display_name") == true
+            },
+        )
+        val hasFriends = FacebookProfileProofPolicy.captureHasFriendsMetric(labelTexts)
+        if (hasName && hasFriends) {
+            verifiedOwnAccountPackages.add(FACEBOOK_PACKAGE)
+            fbOwnAccountMarker = marker
+            Log.i(
+                LOG_TAG,
+                "event=facebook_profile_capture_ready marker=$marker friends=captured",
+            )
             return true
         }
-        return labels.any { value ->
-            EDIT_PROFILE_LABELS.any { it.equals(value, ignoreCase = true) }
+        if (hasFacebookOwnProfileProof() && hasName) {
+            Log.i(
+                LOG_TAG,
+                "event=facebook_profile_capture_ready marker=$marker friends=deferred",
+            )
+            return true
         }
+        return false
     }
 
     private fun hasXOwnProfileProof(): Boolean {
@@ -9682,7 +9885,10 @@ class UiAutomatorDriver(
         private const val FACEBOOK_PROFILE_HEADER_RESTORE_SWIPES = 8
         private const val FACEBOOK_GATE_WAIT_ATTEMPTS = 10
         private const val FACEBOOK_GATE_POLL_MS = 250L
+        private const val FACEBOOK_PROFILE_PROOF_WAIT_ATTEMPTS = 20
+        private const val FACEBOOK_PROFILE_PROOF_POLL_MS = 250L
         private const val FB_GATE_SETTLE_MS = 300L
+        private const val FB_PROFILE_MENU_SETTLE_MS = 450L
         private const val NAVIGATION_WAIT_MS = 1_500L
         private const val LABEL_WAIT_MS = 600L
         private const val NAVIGATION_IDLE_MS = 350L

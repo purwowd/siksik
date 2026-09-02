@@ -1068,3 +1068,147 @@ async def test_notes_index_analysis_preview_and_gallery_contract(client, tmp_pat
     assert gallery.items[0].preview_text == "Agenda indikasi makar"
     assert gallery.items[0].source_path == "Catatan/Agenda"
     assert gallery.items[0].flagged is True
+
+
+def test_miui_notes_ignores_tugas_tab_compound_label() -> None:
+    xml = """
+    <hierarchy>
+      <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]">
+        <node resource-id="com.miui.notes:id/navigation_tab_item" class="android.widget.LinearLayout" clickable="true" selected="true" bounds="[60,100][360,220]">
+          <node text="Catatan" class="android.widget.TextView" bounds="[80,120][300,200]" />
+        </node>
+        <node resource-id="com.miui.notes:id/navigation_tab_item" content-desc="Tugas, Tab 2 dari 2" class="android.widget.LinearLayout" clickable="true" bounds="[380,100][680,220]">
+          <node text="Tugas" class="android.widget.TextView" bounds="[400,120][550,200]" />
+          <node text="0" class="android.widget.TextView" bounds="[560,120][620,200]" />
+        </node>
+        <node resource-id="com.miui.notes:id/action_search" text="Cari catatan" class="android.widget.ImageButton" clickable="true" bounds="[900,100][1040,220]" />
+        <node resource-id="com.miui.notes:id/recycler_view" class="androidx.recyclerview.widget.RecyclerView" scrollable="true" bounds="[0,240][1080,2180]">
+          <node resource-id="com.miui.notes:id/note_group" class="android.view.ViewGroup" clickable="true" bounds="[40,300][1040,680]">
+            <node resource-id="com.miui.notes:id/note_title" text="Catatan Investigasi" class="android.widget.TextView" bounds="[80,340][920,420]" />
+            <node resource-id="com.miui.notes:id/note_content" text="bukti digital penting" class="android.widget.TextView" bounds="[80,440][920,540]" />
+            <node resource-id="com.miui.notes:id/modified_time" text="2 September 2026 14:00" class="android.widget.TextView" bounds="[80,570][700,630]" />
+          </node>
+        </node>
+      </node>
+    </hierarchy>
+    """
+    snapshot = parse_ui(xml)
+    cards = note_cards(snapshot, (1080, 2400))
+    assert len(cards) == 1
+    assert cards[0].resource_id == "com.miui.notes:id/note_group"
+
+
+@pytest.mark.asyncio
+async def test_miui_notes_switches_from_tugas_when_tasks_active() -> None:
+    tasks_screen_xml = """
+    <hierarchy>
+      <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]">
+        <node resource-id="com.miui.notes:id/navigation_tab_item" text="Catatan" class="android.widget.LinearLayout" clickable="true" selected="false" bounds="[60,100][360,220]">
+          <node text="Catatan" class="android.widget.TextView" bounds="[80,120][300,200]" />
+        </node>
+        <node resource-id="com.miui.notes:id/navigation_tab_item" content-desc="Tugas, Tab 2 dari 2" class="android.widget.LinearLayout" clickable="true" selected="true" bounds="[380,100][680,220]">
+          <node text="Tugas" class="android.widget.TextView" bounds="[400,120][550,200]" />
+        </node>
+        <node resource-id="com.miui.notes:id/tasks_empty" text="Belum ada tugas" class="android.widget.TextView" bounds="[200,800][880,950]" />
+      </node>
+    </hierarchy>
+    """
+    notes_screen_xml = """
+    <hierarchy>
+      <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]">
+        <node resource-id="com.miui.notes:id/navigation_tab_item" text="Catatan" class="android.widget.LinearLayout" clickable="true" selected="true" bounds="[60,100][360,220]">
+          <node text="Catatan" class="android.widget.TextView" bounds="[80,120][300,200]" />
+        </node>
+        <node resource-id="com.miui.notes:id/navigation_tab_item" content-desc="Tugas, Tab 2 dari 2" class="android.widget.LinearLayout" clickable="true" selected="false" bounds="[380,100][680,220]">
+          <node text="Tugas" class="android.widget.TextView" bounds="[400,120][550,200]" />
+        </node>
+        <node resource-id="com.miui.notes:id/recycler_view" class="androidx.recyclerview.widget.RecyclerView" scrollable="true" bounds="[0,240][1080,2180]">
+          <node resource-id="com.miui.notes:id/note_group" class="android.view.ViewGroup" clickable="true" bounds="[40,300][1040,680]">
+            <node resource-id="com.miui.notes:id/note_title" text="Catatan Rapat" class="android.widget.TextView" bounds="[80,340][920,420]" />
+            <node resource-id="com.miui.notes:id/note_content" text="detail isi" class="android.widget.TextView" bounds="[80,440][920,540]" />
+          </node>
+        </node>
+      </node>
+    </hierarchy>
+    """
+    editor_xml = """
+    <hierarchy>
+      <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]">
+        <node resource-id="com.miui.notes:id/action_back" content-desc="Kembali" class="android.widget.ImageButton" clickable="true" bounds="[20,80][180,220]" />
+        <node resource-id="com.miui.notes:id/note_title" text="Catatan Rapat" class="android.widget.EditText" bounds="[60,260][1020,420]" />
+        <node resource-id="com.miui.notes:id/rich_editor" text="detail isi penting" class="com.miui.notes.editor.NoteRichEditor" bounds="[60,440][1020,2100]" />
+      </node>
+    </hierarchy>
+    """
+
+    class TabSwitchFakeGateway:
+        def __init__(self):
+            self.state = "tasks"
+            self.tapped_coords = []
+
+        async def screen_size(self):
+            return (1080, 2400)
+
+        async def launch(self, app):
+            return True
+
+        async def dump_ui(self, max_bytes):
+            if self.state == "tasks":
+                return tasks_screen_xml
+            elif self.state == "notes":
+                return notes_screen_xml
+            elif self.state == "editor":
+                return editor_xml
+            return ""
+
+        async def tap(self, x, y):
+            self.tapped_coords.append((x, y))
+            # If Catatan tab was tapped at (210, 160)
+            if self.state == "tasks" and 60 <= x <= 360 and 100 <= y <= 220:
+                self.state = "notes"
+            elif self.state == "notes":
+                self.state = "editor"
+            return True
+
+        async def back(self):
+            if self.state == "editor":
+                self.state = "notes"
+            return True
+
+        async def settle(self, seconds):
+            return None
+
+        async def swipe(self, start, end, duration_ms):
+            return True
+
+        def last_failure_reason(self):
+            return None
+
+    gateway = TabSwitchFakeGateway()
+    app = NoteApp(
+        "com.miui.notes",
+        "Mi Notes",
+        "com.miui.notes/.ui.NotesListActivity",
+        NotesFlow.UI_WALK,
+    )
+    policy = NotesPolicy(
+        mode=AcquisitionMode.QUICK,
+        not_before=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        max_notes=5,
+        max_list_scrolls=3,
+        max_editor_scrolls=1,
+        max_note_chars=4096,
+        max_export_file_bytes=1000,
+        max_export_bytes=1000,
+        max_ui_bytes=50000,
+        timeout_s=10.0,
+    )
+
+    extractor = GenericNotesExtractor(gateway)
+    result = await extractor.extract(app, policy)
+    assert len(result.records) == 1
+    assert result.records[0].title == "Catatan Rapat"
+    assert result.state == NotesState.COMPLETE
+    # Verify that Catatan tab was indeed tapped first
+    assert (210, 160) in gateway.tapped_coords
+
