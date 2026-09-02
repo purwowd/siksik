@@ -54,23 +54,94 @@ MONTHS = {
 EXCLUDED_CARD_LABELS = frozenset(
     {
         "add",
+        "add note",
+        "add a note",
+        "all notes",
         "buat",
+        "buat catatan",
+        "catatan",
+        "catatan baru",
         "create",
+        "create note",
         "edit",
         "hapus",
         "delete",
+        "folder",
+        "folders",
+        "kelola folder",
+        "manage folders",
         "menu",
         "more",
         "lainnya",
+        "new note",
+        "notes",
         "search",
         "cari",
+        "cari catatan",
+        "search notes",
+        "semua catatan",
         "settings",
         "pengaturan",
+        "sort",
+        "urutkan",
+        "tambah catatan",
+        "tambahkan catatan",
+        "tap to create a note",
+        "ketuk untuk buat catatan",
+        "tasks",
+        "tugas",
         "back",
         "kembali",
         "cancel",
         "batal",
     }
+)
+CARD_RESOURCE_TOKENS = frozenset(
+    {
+        "preview",
+        "card",
+        "cardview",
+        "root_cardview",
+        "item",
+        "row",
+    }
+)
+CARD_CONTROL_RESOURCE_TOKENS = frozenset(
+    {
+        "action",
+        "add",
+        "button",
+        "create",
+        "fab",
+        "filter",
+        "menu",
+        "navigation",
+        "new",
+        "search",
+        "setting",
+        "settings",
+        "sort",
+        "toolbar",
+    }
+)
+EDITOR_RESOURCE_TOKENS = (
+    "content_editor",
+    "edit_note",
+    "memo_content",
+    "memo_editor",
+    "note_edit",
+    "note_editor",
+    "rich_editor",
+)
+LIST_RESOURCE_TOKENS = (
+    "list_root",
+    "list_view",
+    "memo_list",
+    "note_list",
+    "note_recycler",
+    "notes_list",
+    "notes_recycler",
+    "recycler_view",
 )
 
 
@@ -212,7 +283,7 @@ def find_action(snapshot: UiSnapshot, aliases: tuple[str, ...]) -> UiNode | None
             continue
         if any(label == alias or resource.endswith(f"/{alias.replace(' ', '_')}") for alias in wanted):
             exact.append(node)
-        elif any(alias in label for alias in wanted):
+        elif any(alias in label or alias in resource for alias in wanted):
             partial.append(node)
     candidates = exact or partial
     if not candidates:
@@ -228,19 +299,35 @@ def selected_count(snapshot: UiSnapshot) -> int | None:
     return max(values) if values else None
 
 
-def note_cards(snapshot: UiSnapshot) -> tuple[UiNode, ...]:
+def note_cards(
+    snapshot: UiSnapshot,
+    screen_size: tuple[int, int] | None = None,
+) -> tuple[UiNode, ...]:
     cards: list[UiNode] = []
     for node in snapshot.nodes:
         if not node.clickable or node.bounds.area <= 0:
+            continue
+        if not _within_card_region(node, screen_size):
+            continue
+        resource_parts = _resource_parts(node.resource_id)
+        if resource_parts & CARD_CONTROL_RESOURCE_TOKENS:
             continue
         label_values = [node.label]
         label_values.extend(child.label for child in snapshot.descendants(node.index))
         meaningful = [normalize_text(value, 4096) for value in label_values if value.strip()]
         meaningful = [value for value in meaningful if value.casefold() not in EXCLUDED_CARD_LABELS]
         joined = normalize_text("\n".join(dict.fromkeys(meaningful)), 8192)
-        resource = node.resource_id.casefold()
-        likely_card = any(token in resource for token in ("note", "card", "item", "memo", "list"))
-        if joined and (likely_card or len(meaningful) >= 2):
+        node_width = node.bounds.right - node.bounds.left
+        node_height = node.bounds.bottom - node.bounds.top
+        likely_card = bool(resource_parts & CARD_RESOURCE_TOKENS)
+        if resource_parts & {"memo", "note"} and "list" not in resource_parts:
+            likely_card = True
+        card_sized_content = (
+            node_width >= 200
+            and node_height >= 60
+            and len(meaningful) >= 2
+        )
+        if joined and (likely_card or card_sized_content):
             cards.append(node)
     filtered: list[UiNode] = []
     for card in cards:
@@ -255,6 +342,38 @@ def note_cards(snapshot: UiSnapshot) -> tuple[UiNode, ...]:
     return tuple(sorted(filtered, key=lambda node: (node.bounds.top, node.bounds.left)))
 
 
+def _resource_name(resource_id: str) -> str:
+    return resource_id.rsplit("/", 1)[-1].casefold()
+
+
+def _resource_parts(resource_id: str) -> frozenset[str]:
+    return frozenset(re.findall(r"[a-z0-9]+", _resource_name(resource_id)))
+
+
+def _within_card_region(
+    node: UiNode,
+    screen_size: tuple[int, int] | None,
+) -> bool:
+    if screen_size is None:
+        return True
+    width, height = screen_size
+    if width <= 0 or height <= 0:
+        return True
+    node_width = node.bounds.right - node.bounds.left
+    node_height = node.bounds.bottom - node.bounds.top
+    header_bottom = max(120, int(height * 0.08))
+    footer_top = height - max(120, int(height * 0.06))
+    if node.bounds.bottom <= header_bottom or node.bounds.top >= footer_top:
+        return False
+    if (
+        node.bounds.left > width - 250
+        and node_width < 200
+        and node_height < 200
+    ):
+        return False
+    return node.bounds.area < int(width * height * 0.85)
+
+
 def card_signature(snapshot: UiSnapshot, card: UiNode) -> str:
     values = [card.label]
     values.extend(node.label for node in snapshot.descendants(card.index))
@@ -262,9 +381,53 @@ def card_signature(snapshot: UiSnapshot, card: UiNode) -> str:
 
 
 def looks_like_editor(snapshot: UiSnapshot) -> bool:
-    editable = sum("edittext" in node.class_name.casefold() for node in snapshot.nodes)
-    resources = " ".join(node.resource_id.casefold() for node in snapshot.nodes)
-    return editable > 0 or any(token in resources for token in ("editor", "note_content", "body", "memo_content"))
+    if any(
+        "edittext" in node.class_name.casefold() and node.bounds.area > 0
+        for node in snapshot.nodes
+    ):
+        return True
+    resources = tuple(_resource_name(node.resource_id) for node in snapshot.nodes)
+    if any(
+        token in resource
+        for resource in resources
+        for token in EDITOR_RESOURCE_TOKENS
+    ):
+        return True
+    has_body = any(
+        token in resource
+        for resource in resources
+        for token in ("body", "note_content", "note_text")
+    )
+    has_navigation_up = any(
+        node.bounds.left < 220
+        and node.bounds.top < 300
+        and any(
+            token in f"{node.label} {_resource_name(node.resource_id)}".casefold()
+            for token in ("back", "kembali", "navigate up", "arrow", "home")
+        )
+        for node in snapshot.nodes
+    )
+    return has_body and has_navigation_up
+
+
+def looks_like_note_list(
+    snapshot: UiSnapshot,
+    screen_size: tuple[int, int] | None = None,
+) -> bool:
+    if not snapshot.nodes or looks_like_editor(snapshot):
+        return False
+    if note_cards(snapshot, screen_size):
+        return True
+    for node in snapshot.nodes:
+        resource = _resource_name(node.resource_id)
+        class_name = node.class_name.casefold()
+        if any(token in resource for token in LIST_RESOURCE_TOKENS):
+            return True
+        if node.bounds.area > 0 and class_name.endswith(
+            ("recyclerview", "listview", "gridview")
+        ):
+            return True
+    return False
 
 
 def editor_content(snapshot: UiSnapshot, reference: datetime, max_chars: int) -> EditorContent:

@@ -27,16 +27,6 @@ from app.models.schemas import AcquisitionMode, SessionStatus
 
 logger = logging.getLogger("siksik.acquisition.android_notes")
 GatewayFactory = Callable[[str], NotesGateway]
-NOTES_LAUNCH_BLOCKING_WARNINGS = frozenset(
-    {
-        "notes_launch_failed",
-        "notes_foreground_unavailable",
-        "notes_foreground_mismatch",
-        "notes_foreground_changed",
-        "notes_ui_surface_mismatch",
-        "notes_export_surface_unrecognized",
-    }
-)
 
 
 class AndroidNotesAcquisitionService:
@@ -144,20 +134,6 @@ class AndroidNotesAcquisitionService:
                         app,
                         policy,
                     )
-                    warnings.update(extraction.warnings)
-                    if (
-                        not extraction.records
-                        and set(extraction.warnings).isdisjoint(
-                            NOTES_LAUNCH_BLOCKING_WARNINGS
-                        )
-                    ):
-                        fallback = await GenericNotesExtractor(gateway).extract(
-                            app,
-                            policy,
-                        )
-                        warnings.add("notes_samsung_export_fallback")
-                        warnings.update(fallback.warnings)
-                        extraction = fallback
                 else:
                     extraction = await GenericNotesExtractor(gateway).extract(app, policy)
         except TimeoutError:

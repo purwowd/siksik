@@ -254,6 +254,36 @@ class Phase7AndroidAgentRunner:
             crawl_id=inventory.crawl_id,
             android_inventory_ms=inventory_ms,
         )
+        if inventory.totals.discovered == 0:
+            staging = settings.staging_dir / context.session_id
+            staging.mkdir(parents=True, exist_ok=True)
+            acquisition_ms = round((time.perf_counter() - started) * 1000)
+            logger.info(
+                "android_inventory_empty_skip_pipeline",
+                extra={
+                    "request_id": context.request_id,
+                    "session_id": context.session_id,
+                    "crawl_id": inventory.crawl_id,
+                    "duration_ms": acquisition_ms,
+                },
+            )
+            await context.on_progress(
+                SessionStatus.ACQUIRING,
+                49.0,
+                "Inventaris Android kosong; lanjut ke akuisisi tambahan",
+                crawl_id=inventory.crawl_id,
+                crawl_state=inventory.state,
+                crawl_discovered=0,
+                android_inventory_ms=inventory_ms,
+                android_acquisition_ms=acquisition_ms,
+            )
+            return AcquisitionResult(
+                staging=staging,
+                item_count=0,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                method="android_agent_inventory_empty",
+                provider=ProviderKind.ANDROID_AGENT,
+            )
         preprocessing_started = time.perf_counter()
         initial_preprocessing = (
             await client.start_preprocessing(

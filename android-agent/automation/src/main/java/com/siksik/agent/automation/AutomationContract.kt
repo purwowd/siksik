@@ -307,11 +307,44 @@ class AutomationEngine(
                             )
                             emptySet()
                         }
+                        var scopeChainBlocked = false
+                        var scopeChainBlockReason: String? = null
                         strategy.scopes.forEachIndexed { index, scope ->
                             if (state == "cancelled") return@forEachIndexed
                             if (!isActive()) {
                                 state = "cancelled"
                                 reason = "crawl_cancelled"
+                                return@forEachIndexed
+                            }
+                            if (scopeChainBlocked) {
+                                failedScopes += 1
+                                val blockReason = scopeChainBlockReason ?: "scope_prerequisite_failed"
+                                emitProgress(
+                                    onProgress,
+                                    AutomationScopeProgress(
+                                        strategy.targetPackage,
+                                        scope,
+                                        stage = "prerequisite_blocked",
+                                        state = "failed",
+                                        attempt = 0,
+                                        failureClass = ScopeFailureClass.POSTCONDITION,
+                                        reason = blockReason,
+                                    ),
+                                )
+                                saveScopeCheckpoint(
+                                    driver,
+                                    strategy.targetPackage,
+                                    scope,
+                                    "failed",
+                                    0,
+                                    ScopeFailureClass.POSTCONDITION,
+                                    blockReason,
+                                    0,
+                                    0,
+                                )
+                                if (reason == null) {
+                                    reason = blockReason
+                                }
                                 return@forEachIndexed
                             }
                             if (scope in checkpointedScopes) {
@@ -573,6 +606,8 @@ class AutomationEngine(
                                 completedScopes += 1
                             } else {
                                 failedScopes += 1
+                                scopeChainBlocked = true
+                                scopeChainBlockReason = scopeFailureReason ?: "scope_navigation_failed"
                                 val finalReason = scopeFailureReason ?: "scope_navigation_failed"
                                 saveScopeCheckpoint(
                                     driver,
@@ -592,12 +627,13 @@ class AutomationEngine(
                         }
                         if (state != "cancelled") {
                             when {
+                                completedScopes == strategy.scopes.size && failedScopes == 0 -> Unit
                                 completedScopes == 0 -> {
                                     state = "failed"
                                     if (reason == null) reason = "scope_navigation_failed"
                                 }
-                                failedScopes > 0 || completedScopes != strategy.scopes.size -> {
-                                    state = "partial"
+                                else -> {
+                                    state = "failed"
                                     if (reason == null) reason = "scope_navigation_incomplete"
                                 }
                             }

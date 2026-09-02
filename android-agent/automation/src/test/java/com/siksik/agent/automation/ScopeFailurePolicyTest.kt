@@ -41,6 +41,14 @@ class ScopeFailurePolicyTest {
     }
 
     @Test
+    fun facebookNavigationFailuresAreRetryable() {
+        assertTrue(ScopeFailurePolicy.isRetryable("facebook_navigation_deadline"))
+        assertTrue(ScopeFailurePolicy.isRetryable("facebook_navigation_stalled"))
+        assertTrue(ScopeFailurePolicy.isRetryable("facebook_all_posts_missing"))
+        assertTrue(ScopeFailurePolicy.isRetryable("facebook_profile_not_verified"))
+    }
+
+    @Test
     fun observationFailuresPreferGentleRecoveryFirst() {
         assertEquals(
             ScopeFailurePolicy.RecoveryTier.IN_APP,

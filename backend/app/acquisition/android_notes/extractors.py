@@ -25,6 +25,7 @@ from app.acquisition.android_notes.ui import (
     find_action,
     first_timestamp,
     looks_like_editor,
+    looks_like_note_list,
     normalize_text,
     note_cards,
     parse_note_timestamp,
@@ -33,9 +34,12 @@ from app.acquisition.android_notes.ui import (
 )
 
 TAG_RE = re.compile(r"<[^>]{1,512}>")
-UTF16_TEXT_RE = re.compile(rb"(?:[\x20-\x7e\xa0-\xff]\x00){4,}")
+UTF16_TEXT_RE = re.compile(rb"(?:[\x20-\x7e\xa0-\xff\n\r\t]\x00){2,}")
 XML_TEXT_RE = re.compile(r">([^<>]{2,})<")
 SDOCX_ENTRY_RE = re.compile(r"\.(?:xml|json|txt|dat)$", re.IGNORECASE)
+UUID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
+UUID_SUFFIX_RE = re.compile(r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+FILENAME_DATE_RE = re.compile(r"_(\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})")
 METADATA_NOISE = frozenset(
     {
         "document",
@@ -54,6 +58,8 @@ METADATA_NOISE = frozenset(
         "null",
     }
 )
+EDITOR_OPEN_ATTEMPTS = 4
+LIST_RESTORE_ATTEMPTS = 4
 
 
 class GenericNotesExtractor:
@@ -86,7 +92,7 @@ class GenericNotesExtractor:
             if snapshot_failure is not None:
                 warnings.add(snapshot_failure)
                 break
-            cards = note_cards(snapshot)
+            cards = note_cards(snapshot, (width, height))
             pending = []
             for card in cards:
                 signature = card_signature(snapshot, card)
@@ -110,31 +116,25 @@ class GenericNotesExtractor:
                 continue
             stagnant = 0
             card, signature = pending[0]
-            seen_cards.add(signature)
             visible_date = parse_note_timestamp(signature, datetime.now(timezone.utc))
             if visible_date is not None and visible_date < policy.not_before:
+                seen_cards.add(signature)
                 skipped += 1
                 continue
-            if not await self._gateway.tap(*card.bounds.center):
-                warnings.add(
-                    _gateway_warning(self._gateway, "notes_ui_input_denied")
-                )
-                break
-            await self._gateway.settle(0.6)
-            editor = await self._snapshot(policy)
-            snapshot_failure = _snapshot_failure(self._gateway, editor)
-            if snapshot_failure is not None:
-                warnings.add(snapshot_failure)
-                break
-            if not looks_like_editor(editor):
+            editor, open_warning, terminal = await self._open_editor(
+                card.bounds.center,
+                policy,
+                width,
+                height,
+            )
+            if editor is None:
+                seen_cards.add(signature)
                 skipped += 1
-                warnings.add("notes_editor_unrecognized")
-                if not await self._return_to_list(policy):
-                    warnings.add(
-                        _gateway_warning(self._gateway, "notes_list_restore_failed")
-                    )
+                warnings.add(open_warning or "notes_editor_unrecognized")
+                if terminal:
                     break
                 continue
+            seen_cards.add(signature)
             record = await self._read_editor(
                 app,
                 editor,
@@ -154,7 +154,7 @@ class GenericNotesExtractor:
                 records.append(record)
             else:
                 skipped += 1
-            if not await self._return_to_list(policy):
+            if not await self._return_to_list(policy, width, height):
                 warnings.add(
                     _gateway_warning(self._gateway, "notes_list_restore_failed")
                 )
@@ -180,13 +180,68 @@ class GenericNotesExtractor:
     async def _snapshot(self, policy: NotesPolicy) -> UiSnapshot:
         return parse_ui(await self._gateway.dump_ui(policy.max_ui_bytes))
 
-    async def _return_to_list(self, policy: NotesPolicy) -> bool:
-        for _ in range(4):
+    async def _open_editor(
+        self,
+        center: tuple[int, int],
+        policy: NotesPolicy,
+        width: int,
+        height: int,
+    ) -> tuple[UiSnapshot | None, str | None, bool]:
+        for attempt in range(EDITOR_OPEN_ATTEMPTS):
+            if not await self._gateway.tap(*center):
+                return (
+                    None,
+                    _gateway_warning(self._gateway, "notes_ui_input_denied"),
+                    True,
+                )
+            await self._gateway.settle(min(0.45 + attempt * 0.15, 0.9))
+            snapshot = await self._snapshot(policy)
+            snapshot_failure = _snapshot_failure(self._gateway, snapshot)
+            if snapshot_failure is not None:
+                return None, snapshot_failure, True
+            if looks_like_editor(snapshot):
+                return snapshot, None, False
+            if looks_like_note_list(snapshot, (width, height)):
+                continue
+            if not await self._return_to_list(
+                policy,
+                width,
+                height,
+                current=snapshot,
+                max_attempts=2,
+            ):
+                return (
+                    None,
+                    _gateway_warning(
+                        self._gateway,
+                        "notes_list_restore_failed",
+                    ),
+                    True,
+                )
+        return None, "notes_editor_unrecognized", False
+
+    async def _return_to_list(
+        self,
+        policy: NotesPolicy,
+        width: int,
+        height: int,
+        *,
+        current: UiSnapshot | None = None,
+        max_attempts: int = LIST_RESTORE_ATTEMPTS,
+    ) -> bool:
+        snapshot = current if current is not None else await self._snapshot(policy)
+        if _snapshot_failure(self._gateway, snapshot) is not None:
+            return False
+        if looks_like_note_list(snapshot, (width, height)):
+            return True
+        for _ in range(max_attempts):
             if not await self._gateway.back():
                 return False
             await self._gateway.settle(0.4)
             snapshot = await self._snapshot(policy)
-            if note_cards(snapshot):
+            if _snapshot_failure(self._gateway, snapshot) is not None:
+                return False
+            if looks_like_note_list(snapshot, (width, height)):
                 return True
         return False
 
@@ -269,7 +324,7 @@ class SamsungNotesExtractor:
             return _samsung_unavailable(snapshot_failure)
         drawer = find_action(
             snapshot,
-            ("navigation drawer", "open navigation drawer", "menu"),
+            ("navigation drawer", "open navigation drawer", "laci navigasi", "drawer", "menu"),
         )
         if drawer is not None:
             if not await self._gateway.tap(*drawer.bounds.center):
@@ -281,7 +336,7 @@ class SamsungNotesExtractor:
             snapshot_failure = _snapshot_failure(self._gateway, snapshot)
             if snapshot_failure is not None:
                 return _samsung_unavailable(snapshot_failure)
-            all_notes = find_action(snapshot, ("all notes", "semua catatan"))
+            all_notes = find_action(snapshot, ("all notes", "semua catatan", "semua"))
             if all_notes is not None:
                 if not await self._gateway.tap(*all_notes.bounds.center):
                     return _samsung_unavailable(
@@ -292,26 +347,65 @@ class SamsungNotesExtractor:
                 snapshot_failure = _snapshot_failure(self._gateway, snapshot)
                 if snapshot_failure is not None:
                     return _samsung_unavailable(snapshot_failure)
+            else:
+                await self._gateway.back()
+                await self._gateway.settle(0.5)
+                snapshot = await self._snapshot(policy)
+                snapshot_failure = _snapshot_failure(self._gateway, snapshot)
+                if snapshot_failure is not None:
+                    return _samsung_unavailable(snapshot_failure)
         cards = note_cards(snapshot)
+        if not cards:
+            direct_cards = [
+                node
+                for node in snapshot.nodes
+                if node.clickable
+                and node.bounds.area > 0
+                and (
+                    "root_cardview" in node.resource_id.casefold()
+                    or (
+                        node.bounds.right - node.bounds.left > 200
+                        and node.bounds.bottom - node.bounds.top > 100
+                    )
+                )
+            ]
+            if direct_cards:
+                cards = tuple(direct_cards)
         if not cards:
             return _samsung_unavailable("notes_list_unrecognized")
         if not await self._gateway.long_press(*cards[0].bounds.center):
             return _samsung_unavailable(
                 _gateway_warning(self._gateway, "notes_ui_input_denied")
             )
-        await self._gateway.settle(0.5)
+        await self._gateway.settle(0.6)
         selection = await self._snapshot(policy)
         snapshot_failure = _snapshot_failure(self._gateway, selection)
         if snapshot_failure is not None:
             return _samsung_unavailable(snapshot_failure)
-        select_all = find_action(selection, ("select all", "pilih semua"))
+        select_all = find_action(
+            selection,
+            (
+                "select all",
+                "pilih semua",
+                "semua",
+                "all",
+                "checkbox_withtext",
+                "checkbox_all",
+                "checkbox",
+            ),
+        )
+        if select_all is None:
+            for node in selection.nodes:
+                if node.clickable and "checkbox" in node.resource_id.casefold():
+                    select_all = node
+                    break
         if select_all is None:
             return _samsung_unavailable("notes_select_all_unavailable")
         if not await self._gateway.tap(*select_all.bounds.center):
             return _samsung_unavailable(
                 _gateway_warning(self._gateway, "notes_ui_input_denied")
             )
-        await self._gateway.settle(0.4)
+        await self._gateway.settle(0.5)
         selected_snapshot = await self._snapshot(policy)
         snapshot_failure = _snapshot_failure(self._gateway, selected_snapshot)
         if snapshot_failure is not None:
@@ -319,36 +413,56 @@ class SamsungNotesExtractor:
         count = selected_count(selected_snapshot)
         if count is not None and count > policy.max_notes:
             warnings.add("notes_selection_exceeds_mode_limit")
-        more = find_action(selected_snapshot, ("more options", "more", "lainnya"))
+        more = find_action(
+            selected_snapshot,
+            ("more options", "more", "lainnya", "opsi lainnya", "overflow"),
+        )
         if more is None:
             return _samsung_unavailable("notes_export_menu_unavailable")
         if not await self._gateway.tap(*more.bounds.center):
             return _samsung_unavailable(
                 _gateway_warning(self._gateway, "notes_ui_input_denied")
             )
-        await self._gateway.settle(0.4)
+        await self._gateway.settle(0.5)
         menu = await self._snapshot(policy)
         snapshot_failure = _snapshot_failure(self._gateway, menu)
         if snapshot_failure is not None:
             return _samsung_unavailable(snapshot_failure)
-        save_as = find_action(menu, ("save as file", "simpan sebagai file", "save as"))
+        save_as = find_action(
+            menu,
+            (
+                "save as file",
+                "simpan sebagai file",
+                "save as",
+                "spn sbg file",
+                "simpan sbg file",
+            ),
+        )
         if save_as is None:
             return _samsung_unavailable("notes_export_action_unavailable")
         if not await self._gateway.tap(*save_as.bounds.center):
             return _samsung_unavailable(
                 _gateway_warning(self._gateway, "notes_ui_input_denied")
             )
-        await self._gateway.settle(0.5)
+        await self._gateway.settle(0.6)
         format_snapshot = await self._snapshot(policy)
         snapshot_failure = _snapshot_failure(self._gateway, format_snapshot)
         if snapshot_failure is not None:
             return _samsung_unavailable(snapshot_failure)
         export_format = find_action(
             format_snapshot,
-            ("samsung notes file", "samsung notes", "sdocx"),
+            (
+                "file samsung notes",
+                "samsung notes file",
+                "samsung notes",
+                "sdocx",
+            ),
         )
         if export_format is None:
-            export_format = find_action(format_snapshot, ("text file", "text", "txt"))
+            export_format = find_action(
+                format_snapshot,
+                ("file teks", "text file", "text", "txt", "teks"),
+            )
             warnings.add("notes_sdocx_unavailable")
         if export_format is not None:
             if not await self._gateway.tap(*export_format.bounds.center):
@@ -364,15 +478,23 @@ class SamsungNotesExtractor:
         snapshot_failure = _snapshot_failure(self._gateway, picker)
         if snapshot_failure is not None:
             return _samsung_unavailable(snapshot_failure)
-        done = find_action(picker, ("done", "save", "simpan", "selesai"))
+        done = find_action(
+            picker,
+            ("done", "selesai", "save", "simpan", "menu_done"),
+        )
+        if done is None:
+            for node in picker.nodes:
+                if node.clickable and "menu_done" in node.resource_id.casefold():
+                    done = node
+                    break
         if done is not None:
             if not await self._gateway.tap(*done.bounds.center):
                 warnings.add(
                     _gateway_warning(self._gateway, "notes_ui_input_denied")
                 )
-            await self._gateway.settle(1.2)
+            await self._gateway.settle(1.5)
         changed: tuple[RemoteExport, ...] = ()
-        for _ in range(6):
+        for _ in range(8):
             after = await self._gateway.list_exports()
             changed = tuple(
                 item
@@ -384,6 +506,8 @@ class SamsungNotesExtractor:
             if changed:
                 break
             await self._gateway.settle(0.8)
+        if not changed and after:
+            changed = after
         if not changed:
             warnings.add("notes_export_not_found")
             return NotesExtractionResult(
@@ -414,6 +538,7 @@ class SamsungNotesExtractor:
                     warnings.add("notes_export_pull_failed")
                     skipped += 1
                     continue
+                await self._gateway.cleanup_export(remote)
                 actual_size = local.stat().st_size
                 accounted_size = remote.size_bytes or 0
                 if actual_size > accounted_size and not budget.reserve_export(
@@ -495,9 +620,9 @@ def _parse_export(path: Path, app: NoteApp, policy: NotesPolicy) -> tuple[NoteRe
     observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     if path.suffix.casefold() == ".txt":
         text = _decode_text(raw)
-        return _record_from_values((text,), app, policy, observed_at)
+        return _record_from_values((text,), app, policy, observed_at, path=path)
     values = _sdocx_values(path, raw, policy.max_export_file_bytes)
-    return _record_from_values(values, app, policy, observed_at)
+    return _record_from_values(values, app, policy, observed_at, path=path)
 
 
 def _sdocx_values(path: Path, raw: bytes, limit: int) -> tuple[str, ...]:
@@ -514,6 +639,8 @@ def _sdocx_values(path: Path, raw: bytes, limit: int) -> tuple[str, ...]:
                 with archive.open(info) as entry:
                     data = entry.read(min(info.file_size + 1, limit + 1))
                 values.extend(_text_fragments(data))
+            all_bytes = b"".join(archive.read(name) for name in archive.namelist()[:512])
+            values.extend(_text_fragments(all_bytes))
     except (OSError, zipfile.BadZipFile, RuntimeError):
         values.extend(_text_fragments(raw))
     if not values:
@@ -544,7 +671,24 @@ def _text_fragments(raw: bytes) -> list[str]:
 
 def _useful_fragment(value: str) -> bool:
     lowered = value.casefold().strip()
-    return len(lowered) >= 2 and lowered not in METADATA_NOISE and not lowered.startswith(("http://schemas.", "urn:", "xmlns"))
+    if len(lowered) < 2 or lowered in METADATA_NOISE:
+        return False
+    if lowered.startswith(
+        (
+            "$",
+            "http://schemas.",
+            "urn:",
+            "xmlns",
+            "page for samsung",
+            "document for s-pen",
+        )
+    ):
+        return False
+    if UUID_RE.fullmatch(lowered.removeprefix("$")):
+        return False
+    if UUID_SUFFIX_RE.search(lowered) and len(lowered) <= 50:
+        return False
+    return True
 
 
 def _decode_text(raw: bytes) -> str:
@@ -561,19 +705,29 @@ def _record_from_values(
     app: NoteApp,
     policy: NotesPolicy,
     observed_at: str,
+    path: Path | None = None,
 ) -> tuple[NoteRecord, ...]:
     cleaned = [normalize_text(value, policy.max_note_chars) for value in values]
     cleaned = [value for value in cleaned if _useful_fragment(value)]
     if not cleaned:
         return ()
     timestamp_raw, modified = first_timestamp(cleaned, datetime.now(timezone.utc))
+    if modified is None and path is not None:
+        m = FILENAME_DATE_RE.search(path.name)
+        if m:
+            yy, mm, dd, hh, min_s, ss = m.groups()
+            modified = f"20{yy}-{mm}-{dd}T{hh}:{min_s}:{ss}Z"
+            timestamp_raw = f"20{yy}-{mm}-{dd} {hh}:{min_s}:{ss}"
     content = [value for value in cleaned if value != timestamp_raw]
     if not content:
         return ()
-    title = next((value for value in content if 1 < len(value) <= 512), content[0][:512])
-    body = normalize_text("\n".join(value for value in content if value != title), policy.max_note_chars)
+    human = [s for s in content if not s.startswith(("0@paste_", "media/"))]
+    title = human[0][:512] if human else (path.stem.split("_")[0] if path else content[0][:512])
+    body = normalize_text("\n\n".join(value for value in content if value != title), policy.max_note_chars)
     if not body and len(content[0]) > len(title):
         body = content[0][len(title) :].strip()
+    if not body:
+        body = title
     return (
         NoteRecord(
             package_name=app.package_name,

@@ -21,7 +21,7 @@ SCREEN_SIZE_RE = re.compile(
     re.IGNORECASE,
 )
 REMOTE_EXPORT_RE = re.compile(
-    r"^/sdcard/[A-Za-z0-9_ ./()\-]{1,900}\.(?:sdocx|txt)$",
+    r"^/sdcard/[^\r\n\x00]{1,900}\.(?:sdocx|txt)$",
     re.IGNORECASE,
 )
 COMPONENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.]+/[A-Za-z0-9_.$]+$")
@@ -40,6 +40,7 @@ EXPORT_SURFACE_PACKAGES = frozenset(
         "com.android.documentsui",
         "com.google.android.documentsui",
         "com.sec.android.app.myfiles",
+        "com.samsung.android.app.notes",
     }
 )
 KNOWN_APPS = (
@@ -58,7 +59,7 @@ KNOWN_APPS = (
     ("com.microsoft.office.onenote", "Microsoft OneNote", NotesFlow.UI_WALK),
     ("com.simplemobiletools.notes.pro", "Simple Notes", NotesFlow.UI_WALK),
 )
-EXPORT_ROOTS = ("/sdcard/Documents", "/sdcard/Download", "/sdcard/Samsung")
+EXPORT_ROOTS = ("/sdcard/", "/sdcard/Documents", "/sdcard/Download", "/sdcard/Samsung")
 
 
 class AdbNotesGateway:
@@ -120,6 +121,34 @@ class AdbNotesGateway:
         return tuple(detected)
 
     async def _resolve_component(self, package: str) -> str | None:
+        if package == "com.samsung.android.app.notes":
+            memo_target = "com.samsung.android.app.notes/.memolist.MemoListActivity"
+            memo_check = await self._transport.run(
+                self._serial,
+                [
+                    "shell",
+                    "cmd",
+                    "package",
+                    "resolve-activity",
+                    "--brief",
+                    "--user",
+                    "0",
+                    memo_target,
+                ],
+                operation="android_notes_memo_activity_resolve",
+                check=False,
+            )
+            for line in reversed(memo_check.stdout.splitlines()):
+                candidate = line.strip()
+                if candidate == memo_target or (
+                    COMPONENT_RE.fullmatch(candidate)
+                    and candidate.startswith("com.samsung.android.app.notes/")
+                ):
+                    try:
+                        return validate_component_name(candidate, package)
+                    except AcquisitionError:
+                        break
+
         result = await self._transport.run(
             self._serial,
             [
@@ -181,15 +210,19 @@ class AdbNotesGateway:
         if self._active_package is None:
             self._last_failure = "notes_export_surface_unrecognized"
             return False
-        observed = await self._foreground_package()
-        if observed == self._active_package:
-            self._export_surface_package = None
-            self._last_failure = None
-            return True
-        if observed in EXPORT_SURFACE_PACKAGES:
-            self._export_surface_package = observed
-            self._last_failure = None
-            return True
+        observed: str | None = None
+        for attempt in range(6):
+            observed = await self._foreground_package()
+            if observed == self._active_package:
+                self._export_surface_package = None
+                self._last_failure = None
+                return True
+            if observed in EXPORT_SURFACE_PACKAGES:
+                self._export_surface_package = observed
+                self._last_failure = None
+                return True
+            if attempt + 1 < 6:
+                await self._sleep(0.3)
         self._last_failure = (
             "notes_foreground_unavailable"
             if observed is None
@@ -384,6 +417,7 @@ class AdbNotesGateway:
     async def list_exports(self) -> tuple[RemoteExport, ...]:
         paths: set[str] = set()
         for root in EXPORT_ROOTS:
+            depth = "2" if root == "/sdcard/" else "4"
             for suffix in ("*.sdocx", "*.txt"):
                 result = await self._transport.run(
                     self._serial,
@@ -392,7 +426,7 @@ class AdbNotesGateway:
                         "find",
                         root,
                         "-maxdepth",
-                        "4",
+                        depth,
                         "-type",
                         "f",
                         "-iname",
@@ -416,7 +450,7 @@ class AdbNotesGateway:
         for path in sorted(paths):
             result = await self._transport.run(
                 self._serial,
-                ["shell", "stat", "-c", "%s|%Y", path],
+                ["shell", "stat", "-c", "%s,%Y", path],
                 operation="android_notes_export_stat",
                 timeout=10.0,
                 check=False,
@@ -424,7 +458,7 @@ class AdbNotesGateway:
             size: int | None = None
             modified: int | None = None
             if result.returncode == 0:
-                tokens = result.stdout.strip().split("|", 1)
+                tokens = result.stdout.strip().split(",", 1)
                 if len(tokens) == 2:
                     try:
                         size = max(0, int(tokens[0]))
@@ -452,6 +486,18 @@ class AdbNotesGateway:
             check=False,
         )
         return result.returncode == 0 and destination.is_file()
+
+    async def cleanup_export(self, remote: RemoteExport) -> bool:
+        if REMOTE_EXPORT_RE.fullmatch(remote.path) is None:
+            return False
+        result = await self._transport.run(
+            self._serial,
+            ["shell", "rm", "-f", remote.path],
+            operation="android_notes_export_cleanup",
+            timeout=10.0,
+            check=False,
+        )
+        return result.returncode == 0
 
 
 def parse_foreground_package(value: str) -> str | None:

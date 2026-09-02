@@ -29,7 +29,13 @@ from app.acquisition.android_notes.service import (
     AndroidNotesAcquisitionService,
     build_notes_policy,
 )
-from app.acquisition.android_notes.ui import parse_note_timestamp, parse_ui
+from app.acquisition.android_notes.ui import (
+    looks_like_editor,
+    looks_like_note_list,
+    note_cards,
+    parse_note_timestamp,
+    parse_ui,
+)
 from app.acquisition.analysis_plan import build_analysis_plan
 from app.acquisition.contracts import AcquisitionResult, ProviderKind
 from app.acquisition.process import ProcessResult
@@ -67,6 +73,36 @@ def _editor_xml(body: str) -> str:
         <node resource-id="app:id/title" text="Rencana rapat" class="android.widget.EditText" bounds="[60,180][1020,300]" />
         <node resource-id="app:id/content" text="{body}" class="android.widget.EditText" bounds="[60,320][1020,1500]" />
         <node resource-id="app:id/modified_time" text="20 Agustus 2026 10:30" class="android.widget.TextView" bounds="[60,1540][800,1600]" />
+      </node>
+    </hierarchy>
+    """
+
+
+def _miui_list_xml() -> str:
+    return """
+    <hierarchy>
+      <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]">
+        <node resource-id="com.miui.notes:id/action_search" text="Cari catatan" class="android.widget.ImageButton" clickable="true" bounds="[870,80][1030,220]" />
+        <node resource-id="com.miui.notes:id/recycler_view" class="androidx.recyclerview.widget.RecyclerView" scrollable="true" bounds="[0,220][1080,2180]">
+          <node resource-id="com.miui.notes:id/note_group" class="android.view.ViewGroup" clickable="true" bounds="[40,300][1040,680]">
+            <node resource-id="com.miui.notes:id/note_title" text="Rencana pemeriksaan" class="android.widget.TextView" bounds="[80,340][920,420]" />
+            <node resource-id="com.miui.notes:id/note_content" text="agenda pertama" class="android.widget.TextView" bounds="[80,440][920,540]" />
+            <node resource-id="com.miui.notes:id/modified_time" text="20 Agustus 2026 10:30" class="android.widget.TextView" bounds="[80,570][700,630]" />
+          </node>
+        </node>
+        <node resource-id="com.miui.notes:id/note_add" content-desc="Tambah catatan" class="android.widget.ImageButton" clickable="true" bounds="[880,2150][1040,2310]" />
+      </node>
+    </hierarchy>
+    """
+
+
+def _miui_editor_xml() -> str:
+    return """
+    <hierarchy>
+      <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]">
+        <node resource-id="com.miui.notes:id/action_back" content-desc="Kembali" class="android.widget.ImageButton" clickable="true" bounds="[20,80][180,220]" />
+        <node resource-id="com.miui.notes:id/note_title" text="Rencana pemeriksaan" class="android.widget.EditText" bounds="[60,260][1020,420]" />
+        <node resource-id="com.miui.notes:id/rich_editor" text="agenda pertama" class="com.miui.notes.editor.NoteRichEditor" bounds="[60,440][1020,2100]" />
       </node>
     </hierarchy>
     """
@@ -233,6 +269,9 @@ class FakeSamsungGateway:
             )
         return True
 
+    async def cleanup_export(self, remote):
+        return True
+
 
 class FakeAdbNotesTransport:
     def __init__(
@@ -321,6 +360,18 @@ def test_notes_ui_parser_and_time_scope() -> None:
     assert parsed == datetime(2026, 8, 20, 10, 30, tzinfo=timezone.utc)
     assert "notes" in VALID_MODULE_IDS
     assert "LOWER(f.source) = 'notes'" in MODULE_SOURCE_SQL["notes"][0]
+
+
+@pytest.mark.unit
+def test_miui_list_excludes_actions_and_does_not_masquerade_as_editor() -> None:
+    snapshot = parse_ui(_miui_list_xml())
+
+    cards = note_cards(snapshot, (1080, 2400))
+
+    assert [card.resource_id for card in cards] == ["com.miui.notes:id/note_group"]
+    assert looks_like_note_list(snapshot, (1080, 2400)) is True
+    assert looks_like_editor(snapshot) is False
+    assert looks_like_editor(parse_ui(_miui_editor_xml())) is True
 
 
 @pytest.mark.unit
@@ -455,6 +506,74 @@ async def test_generic_notes_walk_filters_old_cards_and_reads_deep_content() -> 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_generic_notes_walk_retries_card_until_editor_transition() -> None:
+    class DelayedEditorGateway(FakeNotesGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tap_attempts = 0
+            self.back_calls = 0
+
+        async def tap(self, x, y):
+            if self.state == "list" and y < 500:
+                self.tap_attempts += 1
+                if self.tap_attempts == 4:
+                    self.state = "editor"
+                    self.editor_page = 0
+                    self.editor_opens += 1
+            return True
+
+        async def back(self):
+            self.back_calls += 1
+            return await super().back()
+
+    gateway = DelayedEditorGateway()
+
+    result = await GenericNotesExtractor(gateway).extract(gateway.app, _policy())
+
+    assert len(result.records) == 1
+    assert gateway.tap_attempts == 4
+    assert gateway.editor_opens == 1
+    assert gateway.back_calls == 1
+    assert "notes_editor_unrecognized" not in result.warnings
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_generic_notes_walk_does_not_back_out_when_tap_stays_on_list() -> None:
+    class NoOpTapGateway(FakeNotesGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tap_attempts = 0
+            self.back_calls = 0
+
+        async def dump_ui(self, max_bytes):
+            assert max_bytes > 0
+            return _miui_list_xml()
+
+        async def screen_size(self):
+            return (1080, 2400)
+
+        async def tap(self, x, y):
+            self.tap_attempts += 1
+            return True
+
+        async def back(self):
+            self.back_calls += 1
+            return await super().back()
+
+    gateway = NoOpTapGateway()
+
+    result = await GenericNotesExtractor(gateway).extract(gateway.app, _policy())
+
+    assert result.records == ()
+    assert result.skipped == 1
+    assert result.warnings == ("notes_editor_unrecognized",)
+    assert gateway.tap_attempts == 4
+    assert gateway.back_calls == 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_generic_notes_walk_stops_after_foreground_loss() -> None:
     class ForegroundLossGateway(FakeNotesGateway):
         def __init__(self) -> None:
@@ -517,6 +636,159 @@ async def test_samsung_notes_flow_exports_selected_notes_as_sdocx() -> None:
         "tap:format",
         "tap:picker",
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_samsung_notes_indonesian_one_ui_labels_and_sdcard_export() -> None:
+    class IndonesianOneUiSamsungGateway(FakeSamsungGateway):
+        def __init__(self) -> None:
+            super().__init__()
+
+        async def dump_ui(self, max_bytes):
+            if self.state == "list":
+                return (
+                    '<hierarchy><node bounds="[0,0][1080,2400]">'
+                    '<node resource-id="com.samsung.android.app.notes:id/drawer_button" content-desc="Laci navigasi" '
+                    'class="android.widget.ImageView" clickable="true" bounds="[36,112][132,208]" />'
+                    '<node resource-id="com.samsung.android.app.notes:id/root_cardview" text="Catatan Penting" '
+                    'class="android.widget.FrameLayout" clickable="true" bounds="[48,320][1032,600]">'
+                    '<node text="Catatan Penting" class="android.widget.TextView" bounds="[72,344][900,420]" />'
+                    '<node text="Isi rahasia" class="android.widget.TextView" bounds="[72,430][900,520]" />'
+                    '</node>'
+                    '</node></hierarchy>'
+                )
+            elif self.state == "drawer":
+                return (
+                    '<hierarchy><node bounds="[0,0][1080,2400]">'
+                    '<node resource-id="com.samsung.android.app.notes:id/all_notes" text="Semua catatan" '
+                    'class="android.widget.TextView" clickable="true" bounds="[48,400][600,520]" />'
+                    '</node></hierarchy>'
+                )
+            elif self.state == "selection":
+                return (
+                    '<hierarchy><node bounds="[0,0][1080,2400]">'
+                    '<node resource-id="com.samsung.android.app.notes:id/checkbox_withtext" text="Semua" '
+                    'class="android.widget.CheckBox" clickable="true" bounds="[48,120][280,220]" />'
+                    '</node></hierarchy>'
+                )
+            elif self.state == "selected":
+                return (
+                    '<hierarchy><node bounds="[0,0][1080,2400]">'
+                    '<node resource-id="com.samsung.android.app.notes:id/check_info" text="1 dipilih" '
+                    'class="android.widget.TextView" bounds="[48,120][300,220]" />'
+                    '<node resource-id="com.samsung.android.app.notes:id/more_options" content-desc="Opsi lainnya" '
+                    'class="android.widget.ImageView" clickable="true" bounds="[948,120][1044,220]" />'
+                    '</node></hierarchy>'
+                )
+            elif self.state == "menu":
+                return (
+                    '<hierarchy><node bounds="[0,0][1080,2400]">'
+                    '<node resource-id="com.samsung.android.app.notes:id/title" text="Spn sbg file" '
+                    'class="android.widget.TextView" clickable="true" bounds="[500,240][980,360]" />'
+                    '</node></hierarchy>'
+                )
+            elif self.state == "format":
+                return (
+                    '<hierarchy><node bounds="[0,0][1080,2400]">'
+                    '<node resource-id="com.samsung.android.app.notes:id/item_title" text="File Samsung Notes" '
+                    'class="android.widget.TextView" clickable="true" bounds="[100,800][980,940]" />'
+                    '</node></hierarchy>'
+                )
+            elif self.state == "picker":
+                return (
+                    '<hierarchy><node bounds="[0,0][1080,2400]">'
+                    '<node resource-id="com.sec.android.app.myfiles:id/menu_done" text="Selesai" '
+                    'class="android.widget.Button" clickable="true" bounds="[800,2100][1020,2240]" />'
+                    '</node></hierarchy>'
+                )
+            return '<hierarchy><node bounds="[0,0][1080,2400]"></node></hierarchy>'
+
+        async def list_exports(self):
+            if self.state == "saved":
+                return (RemoteExport("/sdcard/001_Pwd.sdocx", 1024, 200),)
+            return ()
+
+    gateway = IndonesianOneUiSamsungGateway()
+    result = await SamsungNotesExtractor(gateway).extract(gateway.app, _policy())
+    assert result.state == NotesState.COMPLETE
+    assert result.flow == NotesFlow.SAMSUNG_EXPORT
+    assert len(result.records) == 1
+    assert result.records[0].title == "Rencana pemeriksaan"
+    assert gateway.actions == [
+        "tap:list",
+        "tap:drawer",
+        "long_press:list",
+        "tap:selection",
+        "tap:selected",
+        "tap:menu",
+        "tap:format",
+        "tap:picker",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_samsung_notes_drawer_recovers_via_back_when_all_notes_missing() -> None:
+    class MissingAllNotesGateway(FakeSamsungGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.back_calls = 0
+
+        async def dump_ui(self, max_bytes):
+            if self.state == "drawer":
+                # Drawer is open but All Notes item is missing
+                return '<hierarchy><node bounds="[0,0][1080,1920]"><node text="Lain-lain" clickable="true" bounds="[40,120][600,240]" /></node></hierarchy>'
+            return await super().dump_ui(max_bytes)
+
+        async def back(self):
+            self.back_calls += 1
+            return await super().back()
+
+    gateway = MissingAllNotesGateway()
+    result = await SamsungNotesExtractor(gateway).extract(gateway.app, _policy())
+    assert result.state == NotesState.COMPLETE
+    assert gateway.back_calls == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_samsung_notes_export_failure_does_not_trigger_generic_scroll(
+    tmp_path: Path,
+) -> None:
+    class FailingSamsungExportGateway(FakeSamsungGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.swipes: list[str] = []
+
+        async def list_exports(self):
+            # Never produces export file -> export fails with notes_export_not_found
+            return ()
+
+        async def swipe(self, start, end, duration_ms):
+            self.swipes.append("swipe")
+            return await super().swipe(start, end, duration_ms)
+
+    gateway = FailingSamsungExportGateway()
+    service = AndroidNotesAcquisitionService(lambda _serial: gateway)
+
+    async def _progress(*_args, **_kwargs):
+        pass
+
+    result = await service.acquire(
+        session_id="samsung-no-scroll-fallback",
+        serial="serial-fixture",
+        staging=tmp_path,
+        mode=AcquisitionMode.QUICK,
+        simulated=False,
+        on_progress=_progress,
+        request_id="request-fixture",
+        reference=datetime(2026, 8, 28, tzinfo=timezone.utc),
+    )
+
+    assert result.item_count == 0
+    # Must NOT execute any swipe/scroll commands
+    assert gateway.swipes == []
 
 
 @pytest.mark.unit

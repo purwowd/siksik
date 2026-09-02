@@ -6,6 +6,57 @@
 - Android agent: `0.7.0`, API `1.0`
 - Primary project: `/home/me/siksik` (WSL lab); Mac mirror `/Users/macbook/Documents/Product1/siksik`
 
+## 2026-09-02: Samsung Notes Indonesian One UI localization and generic scroll fallback removal
+
+- Aligned the Samsung Notes extraction flow with the reference implementation
+  (`android-notes-extractor` / `run_universal_notes_extractor.py`).
+- Resolved the uncontrolled UI scrolling loop ("malah ngescroll") observed on
+  Samsung devices:
+  - Removed the fallback from `SamsungNotesExtractor` to `GenericNotesExtractor` in
+    `service.py`. Samsung Notes operates via fast export; falling back to a
+    non-Samsung UI-walker on Samsung views causes infinite swipe/scroll loops.
+  - Added full Indonesian One UI selector coverage: "Laci navigasi" with drawer
+    recovery via Back if All Notes is missing, "Semua" / `checkbox_withtext` /
+    `checkbox_all` for Select All, truncated "Spn sbg file" / "simpan sbg file"
+    for Save as file, "File Samsung Notes" / "File teks" for format selection,
+    and "Selesai" / `menu_done` for picker confirmation.
+  - Added `"cardview"` and `"root_cardview"` to `CARD_RESOURCE_TOKENS` in `ui.py`
+    so Samsung Notes `root_cardview` is immediately recognized as a card.
+  - Included `/sdcard` in `EXPORT_ROOTS` with `-maxdepth 2` so notes exported
+    directly to the root of internal storage (e.g. `/sdcard/*.sdocx`) are
+    discovered and collected.
+  - Added bounded retry polling to `adopt_export_surface()` to accommodate
+    transition delays to DocumentsUI, MyFiles, or in-app picker surfaces.
+  - Added regression tests for Indonesian One UI Samsung extraction, drawer
+    recovery, and fallback prevention (`22 passed`).
+
+## 2026-09-02: Non-Samsung Notes card validation and bounded editor retry
+
+- Corrected the generic Android Notes UI walker used by Mi Notes and other
+  non-Samsung applications. Card discovery now rejects localized create/search,
+  navigation, settings, sort, and floating-action controls by semantic label,
+  resource role, geometry, and screen position. Indonesian Mi Notes controls
+  such as **Tambah catatan**, **Buat catatan**, and **Cari catatan** can no
+  longer be treated as note records.
+- Split list and editor recognition into explicit UI-state contracts. A visible
+  `note_content` preview alone no longer proves that an editor opened; editable
+  fields and strong editor resources do. Recycler/list markers can prove that
+  the Notes list is still active even when it contains no eligible cards.
+- A note-card tap now receives exactly four bounded editor-transition attempts
+  with short 0.45–0.90 second settle intervals. A no-op tap retries the same
+  card, while UI ownership loss, dump failure, or input denial remains terminal
+  immediately and does not generate further device input.
+- Return-to-list recovery now inspects the current UI before sending Back. If a
+  tap left the app on the list, recovery performs no Back action; unknown/editor
+  surfaces retain bounded Back recovery. This directly prevents the observed Mi
+  Notes failure where a false card tap was followed by Back and returned control
+  to SATRIA with zero captured notes.
+- The Samsung Notes export flow, canonical note schema, time-window filtering,
+  analysis, finding review, Gallery rendering, and report contracts are
+  unchanged. Added focused regression coverage for Mi Notes Indonesian UI,
+  list/editor disambiguation, fourth-attempt success, and exhausted no-op taps;
+  the focused Notes suite passes (`19 passed`).
+
 ## 2026-09-02: WhatsApp dual-layout automation and bounded recovery
 
 - Ported the updated `whatsapp_tools/wa_ui_automator.py` behavior into the

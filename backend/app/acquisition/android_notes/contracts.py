@@ -135,6 +135,8 @@ class NotesGateway(Protocol):
 
     async def pull_export(self, remote: RemoteExport, destination: Path, timeout_s: float) -> bool: ...
 
+    async def cleanup_export(self, remote: RemoteExport) -> bool: ...
+
 
 @dataclass(slots=True)
 class NotesRunBudget:

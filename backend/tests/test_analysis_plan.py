@@ -103,6 +103,14 @@ def test_progress_roundtrip_and_unknown_falls_back() -> None:
 
 
 @pytest.mark.unit
+def test_notes_only_plan_has_no_inventory_adapters() -> None:
+    plan = build_analysis_plan(scope="device", device_sources=["notes"])
+    assert plan.includes_notes is True
+    assert plan.inventory_adapters() == frozenset()
+    assert plan.includes_social is False
+
+
+@pytest.mark.unit
 def test_legacy_start_request_defaults_to_combined() -> None:
     req = StartSessionRequest(
         participant=ParticipantInput(

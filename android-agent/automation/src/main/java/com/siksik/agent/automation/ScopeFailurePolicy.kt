@@ -39,10 +39,22 @@ internal object ScopeFailurePolicy {
         else -> ScopeFailureClass.ACTION
     }
 
+    private val facebookNavigationRetryReasons = setOf(
+        "facebook_navigation_deadline",
+        "facebook_navigation_stalled",
+        "facebook_all_posts_missing",
+        "facebook_posts_profile_missing",
+        "facebook_posts_marker_missing",
+        "facebook_profile_not_verified",
+    )
+
     fun isRetryable(reason: String): Boolean =
-        reason !in nonRetryableReasons &&
-            !reason.endsWith("_navigation_deadline") &&
-            !reason.endsWith("_deadline")
+        reason in facebookNavigationRetryReasons ||
+            (
+                reason !in nonRetryableReasons &&
+                    !reason.endsWith("_navigation_deadline") &&
+                    !reason.endsWith("_deadline")
+                )
 
     fun recoveryTier(reason: String, failedAttempt: Int): RecoveryTier {
         val failureClass = classify(reason)
