@@ -27,7 +27,7 @@ ios_usb_release_to_windows || true
 
 set +e
 powershell.exe -NoProfile -Command \
-  "\$p = Start-Process -FilePath '\$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -Verb RunAs -Wait -PassThru -WorkingDirectory 'C:\\Users\\Admin\\wda' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','C:\\Users\\Admin\\wda\\install_wda_windows.ps1'; if (\$null -eq \$p) { exit 1 }; exit \$p.ExitCode"
+  "\$p = Start-Process -FilePath powershell.exe -Verb RunAs -Wait -PassThru -WorkingDirectory 'C:\\Users\\Admin\\wda' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','C:\\Users\\Admin\\wda\\install_wda_windows.ps1'; if (\$null -eq \$p) { exit 1 }; exit \$p.ExitCode"
 ec=$?
 set -e
 

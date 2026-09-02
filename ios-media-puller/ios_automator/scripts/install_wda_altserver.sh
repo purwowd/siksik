@@ -9,8 +9,33 @@ DEFAULT_IPA="$WDA_DIR/WebDriverAgentRunner.ipa"
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 REPO_IPA="$REPO_ROOT/WebDriverAgentRunner.ipa"
 
-# Default anisette publik (server default AltServer sering 502)
-export ALTSERVER_ANISETTE_SERVER="${ALTSERVER_ANISETTE_SERVER:-https://ani.sidestore.io}"
+# ani.sidestore.io sering timeout / SSL handshake di AltServer-Linux.
+# HTTP dulu (tanpa TLS); HTTPS publik hanya fallback.
+ios_anisette_reachable() {
+  local url="$1"
+  [[ -n "$url" ]] || return 1
+  curl -fsS -o /dev/null --connect-timeout 3 --max-time 6 "$url" 2>/dev/null
+}
+
+ios_anisette_pick() {
+  local url
+  for url in \
+    "http://127.0.0.1:6969" \
+    "${ALTSERVER_ANISETTE_SERVER:-}" \
+    "http://5.249.163.88:6969" \
+    "https://anisette.wedotstud.io" \
+    "https://ani.idevicehacked.com" \
+    "https://ani3server.fly.dev" \
+    "https://ani.sidestore.io"
+  do
+    [[ -n "$url" ]] || continue
+    if ios_anisette_reachable "$url"; then
+      printf '%s\n' "$url"
+      return 0
+    fi
+  done
+  printf '%s\n' "${ALTSERVER_ANISETTE_SERVER:-http://5.249.163.88:6969}"
+}
 
 IPA="${1:-}"
 if [[ -z "$IPA" ]]; then
@@ -32,7 +57,7 @@ if [[ -z "$IPA" || ! -f "$IPA" ]]; then
   echo "Usage: $0 [/path/to/WebDriverAgentRunner.ipa]"
   echo "Env: APPLE_ID, APPLE_ID_PASSWORD  (wajib)"
   echo "     ALTSERVER_BIN / WDA_DIR (default: \$HOME/wda)"
-  echo "     ALTSERVER_ANISETTE_SERVER (default: https://ani.sidestore.io)"
+  echo "     ALTSERVER_ANISETTE_SERVER (auto: HTTP anisette yang merespons)"
   exit 2
 fi
 
@@ -50,6 +75,9 @@ fi
 
 : "${APPLE_ID:?Set APPLE_ID}"
 : "${APPLE_ID_PASSWORD:?Set APPLE_ID_PASSWORD (app-specific password jika 2FA)}"
+
+export ALTSERVER_ANISETTE_SERVER
+ALTSERVER_ANISETTE_SERVER="$(ios_anisette_pick)"
 
 if [[ -n "${ALTSERVER_BIN:-}" ]]; then
   AS="$ALTSERVER_BIN"

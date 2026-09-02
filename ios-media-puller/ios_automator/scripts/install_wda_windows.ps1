@@ -177,6 +177,78 @@ function Restore-AppleUsbToWsl([string]$Usbipd) {
   }
 }
 
+function Test-AmdsSeesIphone {
+  $ios = "C:\Users\Admin\wda\ios.exe"
+  if (-not (Test-Path -LiteralPath $ios)) { return $false }
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $json = & $ios list 2>&1 | Out-String
+    if ($json -match '00008' -and $json -notmatch '"deviceList"\s*:\s*\[\s*\]') { return $true }
+    $plain = & $ios list --nojson 2>&1 | Out-String
+    return [bool]($plain -match '00008')
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+}
+
+function Test-AppleDriverBound {
+  $n = @(
+    Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+      Where-Object { $_.InstanceId -match 'VID_05AC' -and $_.Service -match 'usbccgp|WINUSB|usbaapl' }
+  ).Count
+  return ($n -gt 0)
+}
+
+function Repair-AppleUsbDriver {
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    Write-Host "  cycle USB iPhone + restart AMDS"
+    $devs = @(
+      Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+        Where-Object { $_.InstanceId -match 'VID_05AC&PID_12A8' }
+    )
+    foreach ($d in $devs) {
+      Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 3
+    foreach ($d in $devs) {
+      Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
+      & pnputil.exe /restart-device $d.InstanceId 2>$null | Out-Null
+    }
+    Restart-Service -Name "Apple Mobile Device Service" -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 4
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+}
+
+function Wait-AmdsSeesIphone {
+  Write-Host "  tunggu driver Apple (HP ngecas). Jangan cabut kalau sudah ngecas."
+  for ($i = 1; $i -le 30; $i++) {
+    $driverOk = Test-AppleDriverBound
+    $listed = Test-AmdsSeesIphone
+    if ($listed) {
+      Write-Host "  AMDS melihat iPhone"
+      return
+    }
+    if ($driverOk) {
+      Write-Host "  driver Apple aktif — lanjut usbmux (ios.exe list boleh kosong)"
+      Start-Sleep -Seconds 2
+      return
+    }
+    if ($i -eq 1) {
+      Write-Host "  Kalau tidak ngecas: cabut 10 detik, unlock, colok USB-A lain." -ForegroundColor Yellow
+    }
+    if ($i -eq 8) {
+      Repair-AppleUsbDriver
+    }
+    Start-Sleep -Seconds 2
+  }
+  throw "Driver Apple belum aktif (HP tidak ngecas). Cabut 10 detik, colok port USB-A lain, lalu jalankan lagi."
+}
+
 function Wait-Window {
   Write-Host ""
   Write-Host "Log: $LogFile" -ForegroundColor Yellow
@@ -231,6 +303,9 @@ Install iTunes 64-bit dari https://www.apple.com/itunes/download/win64
   Start-Service -Name $svc.Name
   Start-Sleep -Seconds 2
   Write-Host ("  {0}  {1}" -f $svc.Name, (Get-Service -Name $svc.Name).Status)
+
+  Write-Step "Tunggu iPhone ngecas / terlihat di AMDS"
+  Wait-AmdsSeesIphone
 
   Write-Step "Buka usbmux Windows :27015 ke WSL"
   $wslNic = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |

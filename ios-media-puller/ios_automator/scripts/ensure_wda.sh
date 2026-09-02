@@ -213,7 +213,7 @@ install_wda() {
   stop_wda_processes
   local ipa
   ipa="$(prepare_wda_ipa)"
-  export ALTSERVER_ANISETTE_SERVER="${ALTSERVER_ANISETTE_SERVER:-https://ani.sidestore.io}"
+  # Server dipilih di install_wda_altserver.sh (sidestore.io sering timeout).
   if declare -F log_wda_install_start >/dev/null 2>&1; then
     log_wda_install_start
   fi

@@ -25,7 +25,7 @@ fi
 echo "[windows-mux] tunggu iPhone lewat usbmux Windows…"
 
 UDID=""
-for _ in $(seq 1 20); do
+for _ in $(seq 1 45); do
   UDID="$(idevice_id -l 2>/dev/null | head -1 || true)"
   if [[ -n "$UDID" ]]; then
     break
