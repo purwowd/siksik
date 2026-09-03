@@ -123,7 +123,7 @@ def engine_fingerprint() -> str:
     mode = get_analysis_mode()
     return "|".join(
         [
-            "v18",  # explicit visual fast path + focused Qwen adjudication
+            "v20",  # EasyOCR stays on analysis; Android transfer does not host-OCR
             f"mode={mode.value if mode else 'none'}",
             f"ocr={int(bool(settings.ocr_enabled))}",
             f"mt={int(bool(settings.media_text_enabled))}",

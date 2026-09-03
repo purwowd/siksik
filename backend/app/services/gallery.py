@@ -15,6 +15,7 @@ from app.models.schemas import (
     GalleryItemOut,
     PaginatedGallery,
 )
+from app.services.social_preview import build_social_preview, social_preview_summary
 
 ACCESS_ALL = "all"
 ACCESS_FREQUENT = "frequent"
@@ -279,6 +280,7 @@ class GalleryRecord:
     source_app: str | None
     social_scope: str | None
     presentation: str
+    social_preview: dict[str, Any] | None
     chat: dict[str, Any] | None
     whatsapp_media: dict[str, Any] | None
     artifact_role: str | None
@@ -701,6 +703,22 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
     preview_text = _compact_preview(_row_get(row, "preview_text")) or _compact_preview(
         meta.get("preview_text") or meta.get("normalized_text")
     )
+    social_preview = _row_get(row, "social_preview")
+    if not isinstance(social_preview, dict):
+        canonical_payload = _row_get(row, "canonical_payload")
+        social_preview = build_social_preview(
+            source_app=source_app,
+            social_scope=social_scope,
+            normalized_text=preview_text,
+            canonical=(
+                canonical_payload
+                if isinstance(canonical_payload, dict)
+                else {"metadata": meta}
+            ),
+        )
+    clean_social_preview = social_preview_summary(social_preview)
+    if clean_social_preview:
+        preview_text = clean_social_preview
     if preview_text is None and source.casefold() in {
         "email",
         "gmail",
@@ -944,6 +962,7 @@ def _record_from_row(row: Any) -> GalleryRecord | None:
         source_app=source_app,
         social_scope=social_scope,
         presentation=presentation,
+        social_preview=social_preview,
         chat=chat,
         whatsapp_media=whatsapp_media,
         artifact_role=role or None,
@@ -968,6 +987,7 @@ def _to_item(session_id: str, record: GalleryRecord) -> GalleryItemOut:
         source_app=record.source_app,
         social_scope=record.social_scope,
         presentation=record.presentation,
+        social_preview=record.social_preview,
         chat=record.chat,
         whatsapp_media=record.whatsapp_media,
         artifact_role=record.artifact_role,
@@ -1210,6 +1230,8 @@ async def _load_records(session_id: str, mode: AcquisitionMode) -> list[GalleryR
         source_locator: str | None = None
         preview_text: str | None = None
         canonical_path: str | None = None
+        canonical: dict[str, Any] = {}
+        social_preview: dict[str, Any] | None = None
         if crawl is not None:
             try:
                 canonical = json.loads(crawl["canonical_json"] or "{}")
@@ -1224,6 +1246,13 @@ async def _load_records(session_id: str, mode: AcquisitionMode) -> list[GalleryR
             for name, value in canonical_gallery_meta.items():
                 if value is not None and meta.get(name) in {None, ""}:
                     meta[name] = value
+            social_preview = build_social_preview(
+                source_app=_optional_text(crawl["source_app"]),
+                social_scope=_optional_text(crawl["social_scope"]),
+                normalized_text=preview_text,
+                canonical=canonical,
+            )
+            preview_text = social_preview_summary(social_preview) or preview_text
         resolved_role = _optional_text(meta.get("crawl_artifact_role"))
         if resolved_role is None and artifact is not None:
             resolved_role = _optional_text(_row_get(artifact, "role"))
@@ -1241,6 +1270,8 @@ async def _load_records(session_id: str, mode: AcquisitionMode) -> list[GalleryR
         enriched.update(
             {
                 "preview_text": preview_text,
+                "social_preview": social_preview,
+                "canonical_payload": canonical,
                 "crawl_source_app": crawl["source_app"] if crawl is not None else None,
                 "crawl_social_scope": crawl["social_scope"] if crawl is not None else None,
                 "source_locator": source_locator,

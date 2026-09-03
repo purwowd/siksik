@@ -65,6 +65,7 @@ from app.services.auth import (
 from app.services.reports import build_session_report, report_to_html, save_session_report
 from app.services.recommendation import REC_MENUNGGU_REVIEW
 from app.services.participant import require_complete_participant
+from app.services.social_preview import build_social_preview, social_preview_summary
 from app.services.sessions import sessions
 from app.services.vision import vision_status
 from app.selection.contracts import (
@@ -231,7 +232,40 @@ async def _paginate_findings(
                       ELSE NULL
                   END
                 LIMIT 1
-            ) AS normalized_preview_text
+            ) AS normalized_preview_text,
+            (
+                SELECT cr.source_app
+                FROM crawl_records cr
+                WHERE cr.session_id = f.session_id
+                  AND cr.record_id = CASE
+                      WHEN json_valid(fi.meta_json)
+                      THEN json_extract(fi.meta_json, '$.crawl_record_id')
+                      ELSE NULL
+                  END
+                LIMIT 1
+            ) AS normalized_source_app,
+            (
+                SELECT cr.social_scope
+                FROM crawl_records cr
+                WHERE cr.session_id = f.session_id
+                  AND cr.record_id = CASE
+                      WHEN json_valid(fi.meta_json)
+                      THEN json_extract(fi.meta_json, '$.crawl_record_id')
+                      ELSE NULL
+                  END
+                LIMIT 1
+            ) AS normalized_social_scope,
+            (
+                SELECT cr.canonical_json
+                FROM crawl_records cr
+                WHERE cr.session_id = f.session_id
+                  AND cr.record_id = CASE
+                      WHEN json_valid(fi.meta_json)
+                      THEN json_extract(fi.meta_json, '$.crawl_record_id')
+                      ELSE NULL
+                  END
+                LIMIT 1
+            ) AS normalized_canonical_json
         FROM findings f
         LEFT JOIN files fi ON fi.id = f.file_id
         {where_sql} {FINDING_DEDUP_PREDICATE} {order_sql} LIMIT ? OFFSET ?
@@ -243,12 +277,34 @@ async def _paginate_findings(
         payload = dict(row)
         preview_path = payload.pop("resolved_preview_path", None)
         normalized_text = payload.pop("normalized_preview_text", None)
-        preview_source = normalized_text or payload.get("evidence") or ""
+        source_app = payload.pop("normalized_source_app", None)
+        social_scope = payload.pop("normalized_social_scope", None)
+        raw_canonical = payload.pop("normalized_canonical_json", None)
+        try:
+            canonical = json.loads(raw_canonical) if raw_canonical else {}
+        except (TypeError, json.JSONDecodeError):
+            canonical = {}
+        social_preview = build_social_preview(
+            source_app=source_app,
+            social_scope=social_scope,
+            normalized_text=normalized_text,
+            canonical=canonical,
+        )
+        preview_source = (
+            social_preview_summary(social_preview)
+            or normalized_text
+            or payload.get("evidence")
+            or ""
+        )
         preview_text = " ".join(
             str(preview_source).replace("\x00", " ").split(),
         )[:MAX_FINDING_PREVIEW_CHARS]
         payload["preview_path"] = preview_path
         payload["preview_text"] = preview_text or None
+        payload["source_app"] = source_app
+        payload["social_scope"] = social_scope
+        payload["presentation"] = "text" if social_preview else "file"
+        payload["social_preview"] = social_preview
         items.append(FindingOut.model_validate(payload))
     return PaginatedFindings(
         items=items,

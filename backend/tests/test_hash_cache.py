@@ -31,7 +31,7 @@ def test_engine_fingerprint_tracks_qwen_config(monkeypatch: pytest.MonkeyPatch):
     second = hash_cache.engine_fingerprint()
 
     assert first != second
-    assert "v18" in first
+    assert "v20" in first
     assert "qwen_decoder=generated-tokens-v1" in first
     assert "qwen_input=max-edge-v1" in first
     assert "qwen_parser=assistant-answer-v1" in first

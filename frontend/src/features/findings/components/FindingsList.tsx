@@ -107,6 +107,10 @@ export function FindingsList({
                       sessionId={sessionId}
                       path={f.preview_path || f.path}
                       text={f.preview_text || f.evidence}
+                      presentation={f.presentation}
+                      socialPreview={f.social_preview}
+                      flagged
+                      findingBadges={[f.label]}
                     />
                   </td>
                   <td>
@@ -164,6 +168,10 @@ export function FindingsList({
                   sessionId={sessionId}
                   path={f.preview_path || f.path}
                   text={f.preview_text || f.evidence}
+                  presentation={f.presentation}
+                  socialPreview={f.social_preview}
+                  flagged
+                  findingBadges={[f.label]}
                 />
               </div>
               <div className="finding-card-body">

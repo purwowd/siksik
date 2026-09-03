@@ -202,7 +202,9 @@ class Settings(BaseSettings):
     android_agent_social_full_scrolls: int = 400
     android_agent_social_quick_screenshots: int = 24
     android_agent_social_full_screenshots: int = 46
-    android_social_host_ocr_enabled: bool = True
+    # EasyOCR is an analysis-stage engine. Acquisition only copies screenshots;
+    # set 1 only for a debug bypass that OCRs during Android transfer.
+    android_social_host_ocr_enabled: bool = False
     android_social_ocr_max_edge_px: int = 1280
     android_social_ocr_mag_ratio: float = 1.25
     android_social_debug_snapshots: bool = True

@@ -45,8 +45,16 @@ def _skip_heavy_ocr_for_gallery(
     source: str,
     origin_hint: str | None = None,
 ) -> bool:
-    """Skip OCR on ordinary gallery photos; retain it for text-bearing media."""
+    """Skip host EasyOCR only when the OCR engine itself is off.
+
+    QUICK used to drop camera-roll OCR for speed. That also skipped
+    screenshot-like files stored in Pictures/Camera, so gallery text never
+    reached findings. When SADT_OCR_ENABLED is on, run EasyOCR on every
+    gallery/media image even if the session is QUICK.
+    """
     if source not in {"gallery", "media_image", "media_video"}:
+        return False
+    if settings.ocr_enabled:
         return False
     from app.services.hash_cache import get_analysis_mode
     from app.services import media_text
@@ -502,7 +510,7 @@ def analyze_content_result(
             )
 
     # Independent visual flag: run before the OCR/vision branches so QUICK gallery
-    # and social screenshots (which intentionally bypass heavy OCR) are covered too.
+    # photos and social screenshots still get NudeNet/SD even when OCR is off.
     if is_image and ext != ".imgmeta":
         from app.services import nudity, sd_detector
 
@@ -520,9 +528,10 @@ def analyze_content_result(
     if ext == ".imgmeta":
         findings.extend(analyze_image_meta_l3(text))
     elif is_image:
-        # Social UI screenshots already have structured inventory records.
-        # Running EasyOCR/media_text here hangs the pipeline (looks stuck at INDEXING).
-        if source in {"visible_ui", "accessibility_visible_ui"}:
+        # EasyOCR belongs to analysis, not Android transfer. Social screenshots
+        # take the same host OCR path as gallery once SADT_OCR_ENABLED is on.
+        social_ui = source in {"visible_ui", "accessibility_visible_ui"}
+        if social_ui and not settings.ocr_enabled:
             findings.extend(
                 vis.analyze_lightweight_image_file(
                     path,
@@ -534,8 +543,7 @@ def analyze_content_result(
                 )
             )
         elif _skip_heavy_ocr_for_gallery(path, source, origin_hint):
-            # iOS AFC dumps raw camera HEIC; Android already samples a few media.
-            # QUICK: PIL/path signals only — EasyOCR on every HEIC is why iOS lags.
+            # OCR engine off: keep the cheap visual pass for gallery photos.
             findings.extend(
                 vis.analyze_lightweight_image_file(
                     path,
@@ -977,7 +985,6 @@ async def _analyze_session_body(
                     and content_cache_key
                     and is_image_media
                     and bool(settings.ocr_enabled or settings.media_text_enabled)
-                    and row["source"] not in {"visible_ui", "accessibility_visible_ui"}
                     and not _skip_heavy_ocr_for_gallery(
                         path,
                         str(row["source"] or ""),

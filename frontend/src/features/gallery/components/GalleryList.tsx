@@ -148,6 +148,9 @@ export function GalleryList({ sessionId, data, onPage }: Props) {
                       text={item.preview_text || item.label}
                       mime={item.preview_mime || item.mime}
                       presentation={item.presentation}
+                      socialPreview={item.social_preview}
+                      flagged={item.flagged}
+                      findingBadges={item.finding_badges}
                     />
                   </td>
                   <td>
@@ -187,6 +190,9 @@ export function GalleryList({ sessionId, data, onPage }: Props) {
                   text={item.preview_text || item.label}
                   mime={item.preview_mime || item.mime}
                   presentation={item.presentation}
+                  socialPreview={item.social_preview}
+                  flagged={item.flagged}
+                  findingBadges={item.finding_badges}
                 />
               </div>
               <div className="finding-card-body">

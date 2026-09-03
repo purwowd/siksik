@@ -1,3 +1,5 @@
+import type { SocialPreview } from "./social";
+
 export interface GalleryAlbum {
   id: string;
   label: string;
@@ -64,6 +66,7 @@ export interface GalleryItem {
   source_app?: string | null;
   social_scope?: string | null;
   presentation?: "file" | "visual" | "text" | "chat";
+  social_preview?: SocialPreview | null;
   chat?: WhatsAppChatMeta | null;
   whatsapp_media?: WhatsAppMediaContext | null;
   artifact_role?: string | null;

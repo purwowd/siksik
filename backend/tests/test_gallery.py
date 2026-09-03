@@ -1086,6 +1086,8 @@ async def test_gallery_maps_social_sources_and_enforces_presentation_rules(galle
     x_items = await list_items(session_id, AcquisitionMode.QUICK, "x", 1, 20)
     assert x_items.total == 1
     assert all(item.presentation == "text" for item in x_items.items)
+    assert all(item.social_preview is not None for item in x_items.items)
+    assert x_items.items[0].social_preview.kind == "post"
     assert all(
         item.preview_path == "visible_ui/x-record.siksik-record.json"
         for item in x_items.items
@@ -1102,6 +1104,81 @@ async def test_gallery_maps_social_sources_and_enforces_presentation_rules(galle
     assert facebook.items[0].source_path == (
         "social:com.facebook.katana:own_comments:fb-record"
     )
+
+
+@pytest.mark.asyncio
+async def test_x_preview_is_clean_and_shared_by_gallery_and_findings(
+    client,
+) -> None:
+    session_id = "session-x-presentation"
+    record_id = "x-raw-record"
+    path = f"visible_ui/{record_id}.siksik-record.json"
+    raw = (
+        "Saya Lapar\n"
+        "Jelaskan postingan ini dengan Grok\n"
+        "Opsi postingan\n"
+        "Makar\n"
+        "@LaparSaya92719\n"
+        "· 5 hari\n"
+        "Balas\n"
+        "Posting ulang\n"
+        "Tayangan\n"
+        "Markah\n"
+        "Sebarkan\n"
+        "Suka\n"
+        "9"
+    )
+    await _insert_session(session_id)
+    await _insert_crawl_record(
+        session_id=session_id,
+        record_id=record_id,
+        source_app="com.twitter.android",
+        social_scope="own_tweets",
+        text=raw,
+        canonical_path=path,
+    )
+    await _insert_file(
+        file_id="file-x-raw",
+        session_id=session_id,
+        path=path,
+        sha256="9" * 64,
+        source="visible_ui",
+        mime="application/vnd.siksik.crawl-record+json",
+        album="Media Sosial",
+        role="canonical_record",
+        crawl_record_id=record_id,
+        source_app="com.twitter.android",
+        social_scope="own_tweets",
+    )
+    await _insert_finding(
+        finding_id="finding-x-raw",
+        session_id=session_id,
+        file_id="file-x-raw",
+        path=path,
+        label="Incitement / ajakan provokatif",
+        category="incitement",
+    )
+
+    gallery = await client.get(
+        f"/api/v1/sessions/{session_id}/gallery",
+        params={"album": "x"},
+    )
+    assert gallery.status_code == 200
+    gallery_item = gallery.json()["items"][0]
+    assert gallery_item["preview_text"] == "Makar"
+    assert gallery_item["social_preview"]["body"] == "Makar"
+    assert gallery_item["social_preview"]["username"] == "@LaparSaya92719"
+    assert "Suka" not in gallery_item["preview_text"]
+    assert "9" not in gallery_item["preview_text"]
+
+    findings = await client.get(f"/api/v1/sessions/{session_id}/findings")
+    assert findings.status_code == 200
+    finding = findings.json()["items"][0]
+    assert finding["presentation"] == "text"
+    assert finding["source_app"] == "com.twitter.android"
+    assert finding["social_scope"] == "own_tweets"
+    assert finding["preview_text"] == "Makar"
+    assert finding["social_preview"] == gallery_item["social_preview"]
 
 
 @pytest.mark.asyncio

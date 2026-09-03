@@ -132,12 +132,20 @@ def build_social_snapshot_enrichments(
     artifacts: Sequence[ScreenshotArtifact],
     local_paths: dict[str, Path],
 ) -> list[SocialSnapshotEnrichment]:
+    """Copy social screenshots during Android transfer.
+
+    Host EasyOCR is opt-in (`android_social_host_ocr_enabled`) and off by
+    default so acquisition does not block on Reader inference. Analysis
+    OCRs the same screenshot binaries after indexing.
+    """
     screenshots: dict[str, list[ScreenshotArtifact]] = defaultdict(list)
     for artifact in artifacts:
         if artifact.role == "screenshot":
             screenshots[artifact.record_id].append(artifact)
 
-    backend = _host_ocr_backend() if settings.android_social_host_ocr_enabled else None
+    backend = (
+        _host_ocr_backend() if settings.android_social_host_ocr_enabled else None
+    )
     output: list[SocialSnapshotEnrichment] = []
     for record_id, values in screenshots.items():
         record_pair = records.get(record_id)

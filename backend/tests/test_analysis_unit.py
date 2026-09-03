@@ -91,13 +91,41 @@ def test_l3_invalid_json():
 
 
 @pytest.mark.unit
-def test_quick_android_camera_roll_skips_easyocr(tmp_path, monkeypatch):
+def test_ocr_enabled_runs_easyocr_on_camera_roll(tmp_path, monkeypatch):
+    from app.models.schemas import AcquisitionMode
+    from app.services.analysis import _skip_heavy_ocr_for_gallery
+    from app.services.hash_cache import reset_analysis_mode, set_analysis_mode
+
+    monkeypatch.setattr(settings, "gpu_stack_enabled", False)
+    monkeypatch.setattr(settings, "media_text_enabled", False)
+    monkeypatch.setattr(settings, "ocr_enabled", True)
+    hashed = tmp_path / "deadbeef.jpg"
+    hashed.write_bytes(b"x")
+    token = set_analysis_mode(AcquisitionMode.QUICK)
+    try:
+        assert not _skip_heavy_ocr_for_gallery(
+            hashed,
+            "media_image",
+            "DCIM/Camera IMG_20260817.jpg",
+        )
+        assert not _skip_heavy_ocr_for_gallery(
+            hashed,
+            "media_image",
+            "Pictures/Screenshots Screenshot_20260817.png",
+        )
+    finally:
+        reset_analysis_mode(token)
+
+
+@pytest.mark.unit
+def test_ocr_disabled_still_skips_plain_camera_roll(tmp_path, monkeypatch):
     from app.models.schemas import AcquisitionMode
     from app.services.analysis import _skip_heavy_ocr_for_gallery
     from app.services.hash_cache import reset_analysis_mode, set_analysis_mode
 
     monkeypatch.setattr(settings, "gpu_stack_enabled", False)
     monkeypatch.setattr(settings, "media_text_enabled", True)
+    monkeypatch.setattr(settings, "ocr_enabled", False)
     token = set_analysis_mode(AcquisitionMode.QUICK)
     try:
         hashed = tmp_path / "deadbeef.jpg"
@@ -264,3 +292,60 @@ def test_ocr_progress_counts_paddle_evidence_not_only_ocr_label():
         "[paddleocr] MENUJU INDONESIA EMAS ATAU INDONESIA CEMAS",
     ) is True
     assert _is_ocr_progress_hit("Indikasi visual LGBT", "Berkas: gallery/a.jpg") is False
+
+
+@pytest.mark.unit
+def test_visible_ui_screenshot_uses_analysis_easyocr_when_enabled(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services.analysis import analyze_content_result
+
+    monkeypatch.setattr(settings, "ocr_enabled", True)
+    path = tmp_path / "ig_profile.png"
+    path.write_bytes(b"png")
+    called = {"full": 0, "light": 0}
+    monkeypatch.setattr(
+        "app.services.nudity.analyze_image_result",
+        lambda _path: SimpleNamespace(findings=(), cacheable=True),
+    )
+    monkeypatch.setattr(
+        "app.services.sd_detector.analyze_image_result",
+        lambda _path: SimpleNamespace(
+            findings=(), cacheable=True, used=False, warning=None
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.vision.analyze_image_file",
+        lambda *_a, **_k: called.__setitem__("full", called["full"] + 1) or [],
+    )
+    monkeypatch.setattr(
+        "app.services.vision.analyze_lightweight_image_file",
+        lambda *_a, **_k: called.__setitem__("light", called["light"] + 1) or [],
+    )
+
+    analyze_content_result(path, "image/png", "visible_ui", "", [])
+
+    assert called["full"] == 1
+    assert called["light"] == 0
+
+
+@pytest.mark.unit
+def test_android_transfer_skips_host_easyocr_by_default(monkeypatch):
+    from app.acquisition.social_ocr import build_social_snapshot_enrichments
+    from app.core import config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "android_social_host_ocr_enabled", False)
+    called = []
+    monkeypatch.setattr(
+        "app.acquisition.social_ocr._host_ocr_backend",
+        lambda: called.append("backend") or None,
+    )
+    result = build_social_snapshot_enrichments(
+        session_id="session-1",
+        crawl_id="crawl-1",
+        records={},
+        artifacts=[],
+        local_paths={},
+    )
+    assert result == []
+    assert called == []

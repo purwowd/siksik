@@ -377,6 +377,18 @@ class SessionSummary(ResponseModel):
     participant: ParticipantIdentity | None = None
 
 
+class SocialPreviewOut(ResponseModel):
+    platform: str = Field(pattern=r"^x$")
+    kind: str = Field(pattern=r"^(profile|post|reply)$")
+    display_name: str | None = Field(default=None, max_length=128)
+    username: str | None = Field(default=None, max_length=64)
+    body: str | None = Field(default=None, max_length=12_000)
+    birth_date: str | None = Field(default=None, max_length=128)
+    published_label: str | None = Field(default=None, max_length=128)
+    following: str | None = Field(default=None, max_length=64)
+    followers: str | None = Field(default=None, max_length=64)
+
+
 class FindingOut(ResponseModel):
     id: str
     session_id: str
@@ -394,6 +406,10 @@ class FindingOut(ResponseModel):
     media_captured_at: str | None = None
     preview_path: str | None = Field(default=None, max_length=1024)
     preview_text: str | None = Field(default=None, max_length=320)
+    source_app: str | None = Field(default=None, max_length=255)
+    social_scope: str | None = Field(default=None, max_length=128)
+    presentation: str = Field(default="file", pattern=r"^(file|visual|text|chat)$")
+    social_preview: SocialPreviewOut | None = None
     reviewed_by: str | None = None
     reviewed_at: str | None = None
 
@@ -551,6 +567,7 @@ class GalleryItemOut(ResponseModel):
     source_app: str | None = Field(default=None, max_length=255)
     social_scope: str | None = Field(default=None, max_length=128)
     presentation: str = Field(default="file", pattern=r"^(file|visual|text|chat)$")
+    social_preview: SocialPreviewOut | None = None
     chat: WhatsAppChatMetaOut | None = None
     whatsapp_media: WhatsAppMediaContextOut | None = None
     artifact_role: str | None = Field(default=None, max_length=64)

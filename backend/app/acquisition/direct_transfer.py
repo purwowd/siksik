@@ -268,13 +268,20 @@ class DirectCrawlTransferService:
             artifacts=manifest.artifacts,
             local_paths=local_paths,
         )
+        social_ocr_during_transfer = settings.android_social_host_ocr_enabled
         await context.on_progress(
             SessionStatus.ACQUIRING,
             59.0,
-            "OCR snapshot sosial diproses di backend",
+            (
+                "OCR snapshot sosial diproses di backend"
+                if social_ocr_during_transfer
+                else "Snapshot sosial disalin; EasyOCR di tahap analisis"
+            ),
             crawl_id=selection.crawl_id,
             crawl_state="transferring",
-            transfer_state="host_social_ocr",
+            transfer_state=(
+                "host_social_ocr" if social_ocr_during_transfer else "social_snapshots"
+            ),
             social_ocr_records=len(social_enrichments),
         )
         materialized_relative = {

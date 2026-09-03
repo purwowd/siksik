@@ -5,6 +5,7 @@ import type {
   Scenario,
   SessionStatus,
 } from "./common";
+import type { SocialPreview } from "./social";
 
 export interface SessionProgress {
   phase: SessionStatus;
@@ -156,6 +157,10 @@ export interface Finding {
   media_captured_at?: string | null;
   preview_path?: string | null;
   preview_text?: string | null;
+  source_app?: string | null;
+  social_scope?: string | null;
+  presentation?: "file" | "visual" | "text" | "chat";
+  social_preview?: SocialPreview | null;
   reviewed_by?: string | null;
   reviewed_at?: string | null;
 }

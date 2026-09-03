@@ -81,13 +81,13 @@ class RecordPreprocessor(
                     record.displayName,
                     record.directoryHint,
                 )
-                val cacheKey = contentCacheKey(record, contentSha256, runOcr)
+                val cacheKey = contentCacheKey(record, contentSha256, runOcr, runModels = true)
                 val cached = cacheKey?.let(visualResultCache::get)
                 val visual = cached?.asCacheHit() ?: processVisual(
                     input,
                     cancellation,
                     runOcr = runOcr,
-                    runModels = false,
+                    runModels = true,
                     skippedOcrReason = "ocr_deferred_selective",
                 ).also {
                     if (cacheKey != null && it.isCacheable()) {
@@ -120,7 +120,7 @@ class RecordPreprocessor(
                         input,
                         cancellation,
                         runOcr = false,
-                        runModels = false,
+                        runModels = true,
                         skippedOcrReason = "ocr_host_deferred",
                     )
                     executions.addAll(visual.executions)
@@ -267,9 +267,10 @@ class RecordPreprocessor(
         record: StoredPreprocessRecord,
         sha256: String?,
         runOcr: Boolean = false,
+        runModels: Boolean = true,
     ): String? {
         val hash = sha256?.takeIf(CONTENT_SHA256::matches) ?: return null
-        return "${record.sourceKind}\u001f${record.mimeType.lowercase()}\u001f$hash\u001f$runOcr"
+        return "${record.sourceKind}\u001f${record.mimeType.lowercase()}\u001f$hash\u001f$runOcr\u001f$runModels"
     }
 
     private fun VisualPreprocessing.isCacheable(): Boolean = executions.none {
@@ -284,17 +285,21 @@ class RecordPreprocessor(
         val ocrHit = ocr.copy(execution = ocr.execution.asCacheHit())
         val faceHit = faces.copy(execution = faces.execution.asCacheHit())
         val objectHit = objects.copy(execution = objects.execution.asCacheHit())
+        val remapped = listOf(
+            perceptualHit.execution,
+            ocrHit.execution,
+            faceHit.execution,
+            objectHit.execution,
+        ).associateBy { "${it.engine.name}|${it.engine.version}" }
         return VisualPreprocessing(
             perceptualHit,
             ocrHit,
             faceHit,
             objectHit,
-            listOf(
-                perceptualHit.execution,
-                ocrHit.execution,
-                faceHit.execution,
-                objectHit.execution,
-            ),
+            executions.map { original ->
+                remapped["${original.engine.name}|${original.engine.version}"]
+                    ?: original.asCacheHit()
+            },
         )
     }
 

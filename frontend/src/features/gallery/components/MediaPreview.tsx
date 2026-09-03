@@ -7,6 +7,8 @@ import {
   ticketedMediaUrl,
 } from "@/shared/api/client";
 import { enqueueMediaTask } from "@/shared/lib/mediaFetchQueue";
+import type { SocialPreview } from "@/shared/api/client";
+import { XSocialPreview } from "./XSocialPreview";
 
 const IMG_EXT = /\.(jpe?g|png|gif|webp|bmp|heic|heif)$/i;
 const VID_EXT = /\.(mp4|mov|webm|mkv|3gp|avi|m4v)$/i;
@@ -18,6 +20,14 @@ const PDF_EXT = /\.pdf$/i;
 
 function compact(value: string, limit: number): string {
   return value.replace(/\u0000/g, " ").replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+function socialSummary(preview: SocialPreview | null | undefined): string | null {
+  if (!preview || preview.platform !== "x") return null;
+  if (preview.kind === "profile") {
+    return [preview.username, preview.birth_date].filter(Boolean).join(" · ") || "Profil X";
+  }
+  return preview.body || [preview.display_name, preview.username].filter(Boolean).join(" ") || null;
 }
 
 function collectReadable(value: unknown, key: string, output: string[], depth: number): void {
@@ -103,11 +113,13 @@ function MediaLightbox({
   onClose,
   children,
   scrollable = false,
+  variant = "default",
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   scrollable?: boolean;
+  variant?: "default" | "social";
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -138,7 +150,9 @@ function MediaLightbox({
   return createPortal(
     <div className="media-modal-backdrop" role="presentation" onClick={onClose}>
       <section
-        className={`media-modal${scrollable ? " media-modal-scrollable" : ""}`}
+        className={`media-modal${scrollable ? " media-modal-scrollable" : ""}${
+          variant === "social" ? " media-modal-social" : ""
+        }`}
         role="dialog"
         aria-modal="true"
         aria-label={`Pratinjau ${title}`}
@@ -169,12 +183,18 @@ export function MediaPreview({
   text,
   mime,
   presentation = "file",
+  socialPreview,
+  flagged = false,
+  findingBadges = [],
 }: {
   sessionId: string;
   path?: string | null;
   text?: string | null;
   mime?: string | null;
   presentation?: "file" | "visual" | "text" | "chat";
+  socialPreview?: SocialPreview | null;
+  flagged?: boolean;
+  findingBadges?: string[];
 }) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [contentUrl, setContentUrl] = useState<string | null>(null);
@@ -194,7 +214,7 @@ export function MediaPreview({
   const isJson = mimeValue.includes("json") || JSON_EXT.test(mediaPath);
   const isText = forceText || isJson || mimeValue.startsWith("text/") || TEXT_EXT.test(mediaPath);
   const isPdf = !forceText && (mimeValue === "application/pdf" || PDF_EXT.test(mediaPath));
-  const previewText = compact(text || "", 320);
+  const previewText = compact(socialSummary(socialPreview) || text || "", 320);
   const fileName = mediaPath.split("/").pop() || "Berkas";
 
   useEffect(() => {
@@ -239,6 +259,10 @@ export function MediaPreview({
   }, [modalOpen]);
 
   async function openPreview(): Promise<void> {
+    if (socialPreview?.platform === "x") {
+      setModalOpen(true);
+      return;
+    }
     if (!mediaPath) return;
     if (isImg) {
       setModalOpen(true);
@@ -267,6 +291,42 @@ export function MediaPreview({
     } finally {
       setLoading(false);
     }
+  }
+
+  if (socialPreview?.platform === "x") {
+    const title = socialPreview.kind === "profile"
+      ? "X · Profil akun"
+      : socialPreview.kind === "reply"
+        ? "X · Balasan akun"
+        : "X · Postingan akun";
+    return (
+      <>
+        <button
+          type="button"
+          className="media-preview media-preview-action text-only-preview x-social-trigger"
+          onClick={() => void openPreview()}
+          title={`Buka ${title}`}
+          aria-label={`Buka pratinjau ${title}`}
+        >
+          <span className="media-preview-kind">{title}</span>
+          <span className="media-preview-summary">{previewText || "Data X"}</span>
+        </button>
+        {modalOpen ? (
+          <MediaLightbox
+            title={title}
+            onClose={() => setModalOpen(false)}
+            scrollable
+            variant="social"
+          >
+            <XSocialPreview
+              preview={socialPreview}
+              flagged={flagged}
+              findingBadges={findingBadges}
+            />
+          </MediaLightbox>
+        ) : null}
+      </>
+    );
   }
 
   if (forceVisual && !isImg) {

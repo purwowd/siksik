@@ -5176,8 +5176,22 @@ class UiAutomatorDriver(
     private fun isFacebookImmersiveSurface(): Boolean {
         if (!isForeground(FACEBOOK_PACKAGE)) return false
         val activity = focusedActivityComponent().orEmpty()
-        return activity.contains("ImmersivePortrait", ignoreCase = true) ||
+        val isImmersive = activity.contains("ImmersivePortrait", ignoreCase = true) ||
             activity.contains("immersiveactivity", ignoreCase = true)
+        if (!isImmersive) return false
+        // On Xiaomi and modern Katana architectures, Facebook renders the profile wall
+        // inside ImmersivePortraitActivity. If the surface exhibits profile or posts chrome,
+        // it is the target profile timeline — NOT an intrusive fullscreen reel or video.
+        if (
+            hasFacebookOwnProfileProof() ||
+            hasFacebookAllPostsSurfaceLabel() ||
+            hasExactLabel(EDIT_PROFILE_LABELS) ||
+            hasExactLabel(FACEBOOK_MORE_PROFILE_SETTINGS_LABELS) ||
+            hasFacebookOwnPostsContent()
+        ) {
+            return false
+        }
+        return true
     }
 
     private fun dismissFacebookImmersiveSurface(): Boolean {
@@ -6011,8 +6025,7 @@ class UiAutomatorDriver(
 
     private fun facebookProfileHeaderActionsVisible(): Boolean =
         (hasFacebookOwnProfileProof() || isFacebookOnProfileWallForPosts()) &&
-            hasExactLabel(FACEBOOK_MORE_PROFILE_SETTINGS_LABELS) &&
-            hasExactLabel(FACEBOOK_PROFILE_SEARCH_LABELS)
+            hasExactLabel(FACEBOOK_MORE_PROFILE_SETTINGS_LABELS)
 
     private fun clickFacebookHeaderMoreByGeometry(): Boolean {
         val minimumLeft = (device.displayWidth * 3) / 5
@@ -10521,7 +10534,7 @@ class UiAutomatorDriver(
             "Comments and responses",
             "Komentar dan tanggapan",
         )
-        private val FACEBOOK_PROFILE_SEARCH_LABELS = listOf("Search", "Cari")
+        private val FACEBOOK_PROFILE_SEARCH_LABELS = listOf("Search", "Cari", "Telusuri")
         private val FACEBOOK_PROFILE_OPTIONS_SHEET_LABELS = listOf(
             "View as",
             "Lihat sebagai",

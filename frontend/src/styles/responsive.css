@@ -1,6 +1,36 @@
 /* Mobile / tablet polish — shell chrome + shared page patterns */
 
 @media (max-width: 720px) {
+  .media-modal.media-modal-social {
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+  }
+
+  .x-social-card {
+    min-height: 220px;
+    padding: 16px;
+  }
+
+  .x-social-header {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
+  .x-social-avatar {
+    width: 42px;
+    height: 42px;
+  }
+
+  .x-social-status {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+
+  .x-social-post-body,
+  .x-social-profile-body,
+  .x-social-findings {
+    margin-left: 54px;
+  }
+
   .ent-topbar {
     flex-wrap: wrap;
     align-items: flex-start;
@@ -261,6 +291,12 @@
 }
 
 @media (max-width: 480px) {
+  .x-social-post-body,
+  .x-social-profile-body,
+  .x-social-findings {
+    margin-left: 0;
+  }
+
   .ent-login-stack-inner {
     width: 100%;
   }
