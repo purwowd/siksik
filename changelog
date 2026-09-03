@@ -1,10 +1,51 @@
 # SIKSIK Flow Implementation Changelog
 
-- Work period: 2026-07-16 to 2026-09-02
+- Work period: 2026-07-16 to 2026-09-03
 - Status: Unreleased local changes
 - Git baseline: `78e39c6` (+ local batch below)
 - Android agent: `0.7.0`, API `1.0`
 - Primary project: `/home/me/siksik` (WSL lab); Mac mirror `/Users/macbook/Documents/Product1/siksik`
+
+## 2026-09-03: SATRIA desktop autohide title bar
+
+- Borderless window (`decorations: false`); custom React title bar shows only
+  when the cursor hits the top edge, then auto-hides (min/max/close + drag).
+
+## 2026-09-03: SATRIA desktop opens maximized
+
+- `tauri.conf.json` sets `maximized: true`; `lib.rs` setup also calls
+  `window.maximize()` so double-click / `start_desktop_windows` fills the
+  screen while keeping the title bar (not exclusive F11 fullscreen).
+
+## 2026-09-03: systemd user service for SATRIA API (no terminal start_poc)
+
+- Added `scripts/start_api.sh` (FastAPI + optional SD sidecar, no Vite) for
+  Tauri desktop / headless boot.
+- Added `scripts/systemd/satria-api.service` + `install_satria_api_service.sh`
+  (`systemctl --user enable`, `loginctl enable-linger`).
+- `allow_satria_windows.ps1` registers AtLogOn task `SATRIA-StartWslApi` to
+  wake WSL and `systemctl --user start satria-api` after Windows login.
+- After one Windows allowlist + WSL install: reboot → open SATRIA without
+  manually running `start_poc.sh`. Keep using `start_poc.sh` only when the
+  WSL Vite UI on :5173 is needed.
+
+## 2026-09-03: SATRIA Windows cold-boot portproxy + Defender allowlist
+
+- Cold boot + double-click SATRIA failed when stale `netsh` portproxy on
+  `:8000` blackholed WSL `localhostForwarding` and UAC to clear it was
+  dismissed (`Tolak UAC atau gagal hapus portproxy`).
+- `scripts/clear_wsl_portproxy.ps1` now registers **AtStartup SYSTEM** task
+  `SATRIA-ClearWslPortproxy` (clears before the user opens SATRIA; no
+  per-launch UAC after one successful elevated setup).
+- Added `scripts/allow_satria_windows.cmd` / `.ps1`: one-shot Admin setup that
+  clears portproxy, registers the boot task, adds Windows Defender path and
+  process exclusions (`C:\siksik`, `%LOCALAPPDATA%\satria-cargo-target`,
+  `satria-desktop.exe`), and inbound firewall rules for ports 5173/5175/8000.
+- `start_desktop_windows.ps1` prefers running the existing scheduled task
+  (no UAC); only elevates `allow_satria_windows.ps1` when the task is missing.
+  Error text points at the allowlist script and clarifies this is not a
+  Defender block of the APK/exe itself.
+- `start_poc.sh` Windows hint updated to the allowlist script.
 
 ## 2026-09-02: Samsung Notes Indonesian One UI localization and generic scroll fallback removal
 

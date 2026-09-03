@@ -1,0 +1,80 @@
+/* Borderless Tauri: autohide title bar (show when cursor hits top edge). */
+.satria-titlebar-edge {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 6px;
+  z-index: 10000;
+  pointer-events: none;
+}
+
+.satria-titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10001;
+  display: flex;
+  align-items: stretch;
+  height: 36px;
+  background: #f0f0f0;
+  border-bottom: 1px solid #c8c8c8;
+  color: #1a1a1a;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 12px;
+  transform: translateY(-100%);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 120ms ease-out, opacity 120ms ease-out;
+}
+
+.satria-titlebar.is-visible {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.satria-titlebar-drag {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 0 12px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.satria-titlebar-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.satria-titlebar-controls {
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.satria-titlebar-btn {
+  width: 46px;
+  height: 36px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: default;
+}
+
+.satria-titlebar-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.satria-titlebar-btn--close:hover {
+  background: #e81123;
+  color: #fff;
+}

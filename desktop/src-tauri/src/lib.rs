@@ -462,6 +462,10 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
 
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.maximize();
+            }
+
             if is_dev {
                 eprintln!(
                     "SATRIA desktop · dev UI = tauri.devUrl (Vite). Backend → :{port} (background)"

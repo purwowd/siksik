@@ -324,8 +324,8 @@ else
   echo ""
   echo "  Windows browser: http://127.0.0.1:$UI_PORT"
   echo "  (NAT localhostForwarding — jangan pakai portproxy/expose_lan lama)"
-  echo "  Jika 127.0.0.1 gagal (Admin):"
-  echo "    powershell -ExecutionPolicy Bypass -File C:\\siksik\\scripts\\expose_lan.ps1"
+  echo "  Jika Windows :$API_PORT timeout / SATRIA gagal setelah reboot (Admin sekali):"
+  echo "    double-click C:\\siksik\\scripts\\allow_satria_windows.cmd"
   echo "  Ctrl+C to stop"
 fi
 wait "$UI_PID" "$API_WATCHDOG_PID"

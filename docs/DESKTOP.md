@@ -96,6 +96,16 @@ Artefak:
 
 Web browser tetap bisa dipakai paralel (nginx / Vite) — desktop tidak mengganti deploy web lab.
 
+## Backend systemd (WSL + Windows desktop)
+
+Tanpa membuka terminal `start_poc.sh`. Detail perintah: **[`README.md`](../README.md)** (bagian *Backend systemd*).
+
+```bash
+systemctl --user stop satria-api              # matikan sementara
+systemctl --user disable --now satria-api     # matikan + nonaktifkan auto-start
+systemctl --user enable --now satria-api      # nyalakan lagi
+```
+
 ## Login
 
 Pakai akun lab yang sama dengan web (`admin`, `operator`, dll.).  

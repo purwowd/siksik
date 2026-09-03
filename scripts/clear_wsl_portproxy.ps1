@@ -3,8 +3,8 @@
 # Remove SATRIA netsh portproxy on 8000/5173/5175.
 # Stale NAT-IP forwards survive reboot and blackhole WSL localhostForwarding.
 # Always exit 0: "entry not found" is not a failure.
-# After a successful elevated run, register an at-logon task so later boots
-# do not need UAC or a manual netsh.
+# After a successful elevated run, register an AtStartup SYSTEM task so cold
+# boots clear portproxy before the user opens SATRIA (no per-launch UAC).
 $ErrorActionPreference = "Continue"
 
 $ports = New-Object System.Collections.Generic.List[int]
@@ -26,19 +26,34 @@ $self = $MyInvocation.MyCommand.Path
 $taskName = "SATRIA-ClearWslPortproxy"
 if ($self -and (Test-Path -LiteralPath $self)) {
   try {
-    $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     $actionArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$self`""
+    $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     $needsWrite = $true
     if ($existing) {
-      $exArgs = $existing.Actions[0].Arguments
-      if ($exArgs -eq $actionArgs) { $needsWrite = $false }
+      $exArgs = ""
+      try { $exArgs = [string]$existing.Actions[0].Arguments } catch { }
+      $exUser = ""
+      try { $exUser = [string]$existing.Principal.UserId } catch { }
+      if ($exArgs -eq $actionArgs -and $exUser -match '(?i)^(SYSTEM|NT AUTHORITY\\SYSTEM)$') {
+        $needsWrite = $false
+      }
     }
     if ($needsWrite) {
       $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArgs
-      $trigger = New-ScheduledTaskTrigger -AtLogOn
-      $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Highest -LogonType Interactive
-      $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-      Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+      $trigger = New-ScheduledTaskTrigger -AtStartup
+      $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+      $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+      Register-ScheduledTask `
+        -TaskName $taskName `
+        -Action $action `
+        -Trigger $trigger `
+        -Principal $principal `
+        -Settings $settings `
+        -Force | Out-Null
     }
   } catch { }
 }

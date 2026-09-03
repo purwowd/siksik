@@ -43,6 +43,31 @@ cd ../desktop && npm install && ./dev.sh
 # → window SATRIA  ·  backend :8000  ·  UI :5175
 ```
 
+### Backend systemd (WSL) — tanpa `start_poc.sh` di terminal
+
+API-only (tanpa Vite). Cocok untuk Satria desktop di Windows.
+
+```bash
+# Pasang + enable (sekali)
+bash scripts/install_satria_api_service.sh
+
+# Status / log
+systemctl --user status satria-api
+journalctl --user -u satria-api -f
+# atau: tail -f ~/siksik/logs/satria-api.service.log
+
+# Matikan sementara (boot berikutnya tetap nyala lagi)
+systemctl --user stop satria-api
+
+# Matikan + jangan auto-start lagi
+systemctl --user disable --now satria-api
+
+# Nyalakan lagi
+systemctl --user enable --now satria-api
+```
+
+Windows: sekali jalankan `C:\siksik\scripts\allow_satria_windows.cmd` (UAC Yes) supaya WSL + service ikut bangkit saat login. Desktop: `scripts\start_desktop_windows.cmd`.
+
 ### Akun lab & password
 
 | Role | User | Password default* |

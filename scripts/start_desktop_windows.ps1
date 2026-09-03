@@ -138,23 +138,65 @@ function Test-PortproxyOnApiPort {
   return [bool]($show -match "(?m)^\s*0\.0\.0\.0\s+$ApiPort\b" -or $show -match "(?m)^\s*127\.0\.0\.1\s+$ApiPort\b")
 }
 
-function Clear-PortproxyBlackhole([string]$CleanerPath) {
-  if (-not (Test-PortproxyOnApiPort)) { return $true }
-  # Single string: Start-Process -Verb RunAs mishandles ArgumentList arrays with spaces.
-  $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$CleanerPath`""
+function Test-SatriaPortproxyTask {
   try {
+    $t = Get-ScheduledTask -TaskName "SATRIA-ClearWslPortproxy" -ErrorAction Stop
+    return ($null -ne $t)
+  } catch {
+    return $false
+  }
+}
+
+function Invoke-SatriaPortproxyTask {
+  if (-not (Test-SatriaPortproxyTask)) { return $false }
+  Write-Host "  jalankan task SATRIA-ClearWslPortproxy (tanpa UAC)..."
+  try {
+    Start-ScheduledTask -TaskName "SATRIA-ClearWslPortproxy" -ErrorAction Stop
+  } catch {
+    try {
+      & schtasks.exe /Run /TN "SATRIA-ClearWslPortproxy" 2>$null | Out-Null
+    } catch {
+      return $false
+    }
+  }
+  $deadline = (Get-Date).AddSeconds(12)
+  while ((Get-Date) -lt $deadline) {
+    if (-not (Test-PortproxyOnApiPort)) { return $true }
+    Start-Sleep -Milliseconds 400
+  }
+  return -not (Test-PortproxyOnApiPort)
+}
+
+function Clear-PortproxyBlackhole([string]$AllowPath, [string]$CleanerPath) {
+  if (-not (Test-PortproxyOnApiPort)) { return $true }
+
+  # Boot task already registered: run it (SYSTEM) — no UAC popup.
+  if (Invoke-SatriaPortproxyTask) { return $true }
+
+  $elevateTarget = $AllowPath
+  if (-not (Test-Path -LiteralPath $elevateTarget)) { $elevateTarget = $CleanerPath }
+  if (-not (Test-Path -LiteralPath $elevateTarget)) { return $false }
+
+  # Single string: Start-Process -Verb RunAs mishandles ArgumentList arrays with spaces.
+  $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$elevateTarget`""
+  if ($elevateTarget -like "*allow_satria_windows.ps1") {
+    $arg = "$arg -NoPause"
+  }  try {
     if (Test-IsAdmin) {
-      Write-Host "  hapus portproxy $ApiPort/5173 (admin)"
+      Write-Host "  hapus portproxy + allowlist Windows (admin)"
       $p = Start-Process -FilePath "powershell.exe" -Wait -PassThru -ArgumentList $arg
     } else {
-      Write-Host "  UAC: hapus portproxy $ApiPort/5173 (menghalangi localhost WSL). Izinkan sekali."
+      Write-Host "  UAC sekali: izinkan Yes — hapus portproxy + Defender/firewall SATRIA."
+      Write-Host "  (Setelah ini task AtStartup aktif; boot berikutnya tanpa UAC.)"
       $p = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList $arg
     }
     if ($null -eq $p) { return -not (Test-PortproxyOnApiPort) }
   } catch {
     return -not (Test-PortproxyOnApiPort)
   }
-  return -not (Test-PortproxyOnApiPort)
+  if (-not (Test-PortproxyOnApiPort)) { return $true }
+  # Allow script may have registered the task; try again without UAC.
+  return (Invoke-SatriaPortproxyTask)
 }
 
 function Start-WslSatriaApi {
@@ -437,24 +479,30 @@ $wslReady = Test-WslApiReady
 if (-not (Test-ApiReady) -and $wslReady -and (Test-PortproxyOnApiPort)) {
   Write-Host "  API hidup di WSL, tapi Windows :$ApiPort kena portproxy (timeout)."
   $cleaner = Join-Path $RepoRoot "scripts\clear_wsl_portproxy.ps1"
-  if (-not (Test-Path -LiteralPath $cleaner)) {
+  $allowScript = Join-Path $RepoRoot "scripts\allow_satria_windows.ps1"
+  $allowCmd = Join-Path $RepoRoot "scripts\allow_satria_windows.cmd"
+  if (-not (Test-Path -LiteralPath $cleaner) -and -not (Test-Path -LiteralPath $allowScript)) {
     Write-Fail "Missing $cleaner (rsync scripts/ from WSL failed)."
     exit 1
   }
-  if (-not (Clear-PortproxyBlackhole -CleanerPath $cleaner)) {
+  if (-not (Clear-PortproxyBlackhole -AllowPath $allowScript -CleanerPath $cleaner)) {
     Write-Fail @"
 Tolak UAC atau gagal hapus portproxy.
 
-Jalankan PowerShell Administrator sekali:
-  powershell -NoProfile -ExecutionPolicy Bypass -File $cleaner
+Ini BUKAN Windows Defender memblokir SATRIA — portproxy Windows
+menghalangi localhost ke WSL setelah reboot.
 
-Atau:
-  netsh interface portproxy delete v4tov4 listenport=8000 listenaddress=0.0.0.0
-  netsh interface portproxy delete v4tov4 listenport=5173 listenaddress=0.0.0.0
+Perbaikan sekali (Windows Explorer, pilih Yes di UAC):
+  Double-click: $allowCmd
+
+Atau PowerShell Administrator:
+  powershell -NoProfile -ExecutionPolicy Bypass -File $allowScript
+
+Script itu juga allowlist Defender + firewall untuk SATRIA.
 "@
     exit 1
   }
-  Write-Host "  portproxy $ApiPort/5173 dihapus (task logon SATRIA-ClearWslPortproxy terpasang)"
+  Write-Host "  portproxy $ApiPort/5173 dihapus (task AtStartup SATRIA-ClearWslPortproxy)"
   [void](Repair-WslLocalhostForwarding)
 }
 
@@ -478,8 +526,8 @@ if (-not $apiOk) {
     $hint = @"
 
 API di WSL sudah OK; Windows tidak tembus 127.0.0.1:$ApiPort.
-Jangan portproxy ke IP NAT WSL. Izinkan UAC, atau:
-  powershell -NoProfile -ExecutionPolicy Bypass -File $RepoRoot\scripts\clear_wsl_portproxy.ps1
+Jangan portproxy ke IP NAT WSL. Izinkan sekali:
+  $RepoRoot\scripts\allow_satria_windows.cmd
 "@
   }
   Write-Fail @"

@@ -1,0 +1,26 @@
+[Unit]
+Description=SATRIA FastAPI backend (WSL, no Vite)
+Documentation=file:%h/siksik/scripts/start_api.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/siksik/backend
+Environment=SATRIA_API_FORCE_BIND=1
+Environment=PYTHONUNBUFFERED=1
+# Match interactive lab PATH for adb / java / wsl cuda libs
+Environment=PATH=%h/bin:/usr/lib/wsl/lib:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=LD_LIBRARY_PATH=/usr/lib/wsl/lib
+ExecStart=/bin/bash %h/siksik/scripts/start_api.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=240
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:%h/siksik/logs/satria-api.service.log
+StandardError=append:%h/siksik/logs/satria-api.service.log
+
+[Install]
+WantedBy=default.target
