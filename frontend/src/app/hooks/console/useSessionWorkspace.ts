@@ -240,6 +240,8 @@ export function useSessionWorkspace(p: Params) {
     if (!p.auth || p.sessionList.length === 0) return;
     const { sesi } = parseTabSearch(p.location.search);
     if (!sesi) return;
+    // Sesi baru sudah di setSession sebelum refresh list — jangan toast palsu.
+    if (p.session?.id === sesi) return;
     const resolved = resolveSessionId(sesi, p.sessionList);
     if (runningSession && resolved !== runningSession.id) return;
     if (!resolved) {

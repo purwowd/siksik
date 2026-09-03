@@ -14,12 +14,38 @@ from app.acquisition.process import run_process
 from app.core.config import settings
 
 
+async def _lsusb_has_iphone() -> bool:
+    for spec in ("05ac:12a8", "05ac:12ab"):
+        try:
+            result = await run_process(
+                ["lsusb", "-d", spec],
+                timeout=2.0,
+                check=False,
+                output_limit_bytes=4096,
+                operation="ios_usb_lsusb_probe",
+            )
+        except AcquisitionError:
+            continue
+        if result.returncode == 0 and (result.stdout or "").strip():
+            return True
+    return False
+
+
+async def _iphone_already_usable() -> bool:
+    """Skip USB reclaim only when the phone is actually on the WSL USB bus.
+
+    idevice_id alone is not enough: a stale/ghost mux entry can list the UDID
+    while lsusb is empty and lockdownd returns Mux -8.
+    """
+    return await _lsusb_has_iphone()
+
+
 async def ensure_iphone_on_wsl(*, reattach: bool = False, force: bool = False) -> None:
     """Attach the iPhone into WSL.
 
-    Idle polls attach an already-Shared iPhone (`ensure_shared_wsl_usb`) without
-    bind --force. Windows AMDS handoff is iPhone-only. Explicit reclaim
-    (`reattach` or `force`) is for Jalankan akuisisi iOS / WDA restore.
+    Soft path (already in lsusb / Shared attach): no UAC.
+    Elevated bind --force when reclaim is requested and the phone is still
+    missing from lsusb (Not shared, or Shared-but-Device-busy under AMDS).
     """
     if not running_under_wsl():
         return
@@ -27,19 +53,34 @@ async def ensure_iphone_on_wsl(*, reattach: bool = False, force: bool = False) -
         clear_iphone_usb_windows_hold()
     elif windows_holds_iphone_usb():
         return
+    if await _iphone_already_usable():
+        return
     script = settings.ios_media_puller_path / "ios_automator" / "scripts" / "ensure_iphone_wsl.sh"
     if not script.is_file():
         return
-    argv = ["bash", str(script)]
-    if reattach:
-        argv.append("--startup")
     try:
         await run_process(
-            argv,
-            timeout=90.0 if reattach else 30.0,
+            ["bash", str(script)],
+            timeout=30.0,
             check=False,
             output_limit_bytes=64 * 1024,
             operation="ios_usb_ensure_wsl",
+        )
+    except AcquisitionError as exc:
+        if exc.category in {ErrorCategory.ADB_TIMEOUT, ErrorCategory.DEPENDENCY_NOT_FOUND}:
+            return
+        raise
+    if await _iphone_already_usable():
+        return
+    if not (force or reattach):
+        return
+    try:
+        await run_process(
+            ["bash", str(script), "--startup"],
+            timeout=90.0,
+            check=False,
+            output_limit_bytes=64 * 1024,
+            operation="ios_usb_claim_wsl",
         )
     except AcquisitionError as exc:
         if exc.category in {ErrorCategory.ADB_TIMEOUT, ErrorCategory.DEPENDENCY_NOT_FOUND}:
@@ -76,12 +117,16 @@ async def iphone_lockdown_ok(udid: str | None = None) -> bool:
 async def ensure_iphone_lockdown(*, udid: str | None = None) -> None:
     """Unwedge lockdownd after Trust/tunnel leftovers (usbipd recycle, no cable pull).
 
-    No-op when ideviceinfo already works. Fail loud if Mux -8 remains so AFC
-    does not hang at 18% for 300s.
+    Reclaim WSL USB first when lsusb is empty (ghost idevice listing). Fail loud
+    if Mux -8 remains so AFC does not hang at 18% for 300s.
     """
     if not running_under_wsl():
         return
-    if await iphone_lockdown_ok(udid):
+    if await iphone_lockdown_ok(udid) and await _lsusb_has_iphone():
+        return
+    if not await _lsusb_has_iphone():
+        await ensure_iphone_on_wsl(force=True, reattach=True)
+    if await iphone_lockdown_ok(udid) and await _lsusb_has_iphone():
         return
     script = (
         settings.ios_media_puller_path

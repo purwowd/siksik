@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Default: attach iPhone yang sudah Shared ke WSL (tanpa UAC).
-# --startup = UAC bind --force: Pindai ulang / Jalankan akuisisi saat Not shared
-# atau Deny AutoBind (sisa pasang WDA). Jangan dipanggil dari start_poc.
+# Default: attach iPhone yang sudah Shared / Shared (forced) ke WSL (tanpa UAC)
+# bila lsusb sudah melihat device.
+# --startup = claim WSL; UAC bind --force jika Not shared ATAU Shared tapi
+# Device busy (AMDS Windows masih pegang). Jangan dipanggil dari start_poc.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"

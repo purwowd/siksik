@@ -35,6 +35,7 @@ type Params = {
   teleRef: React.RefObject<HTMLElement | null>;
   goToTab: (tab: Tab, opts?: { sesi?: string | null }) => void;
   refreshSessionList: (opts?: { soft?: boolean }) => Promise<SessionSummary[] | undefined>;
+  setSessionList: React.Dispatch<React.SetStateAction<SessionSummary[]>>;
   setError: (e: string | null) => void;
   clearQueryPages: () => void;
   clearFindingsData: () => void;
@@ -112,7 +113,8 @@ export function useAcquisitionControls(p: Params) {
     setBusy(true);
     try {
       if (p.selected.device_type === "ios") {
-        await p.refreshDevices({ reattachUsb: true });
+        // Soft attach Shared/Shared(forced) saja — UAC bind hanya lewat "Pindai ulang USB".
+        await p.refreshDevices();
       }
       const s = await api.startSession({
         device_id: p.selected.device_id,
@@ -127,6 +129,8 @@ export function useAcquisitionControls(p: Params) {
         force_simulated: false,
       });
       p.setSession(s);
+      // Masukkan ke list sebelum ?sesi= berubah — hindari race "Sesi dari URL tidak ditemukan".
+      p.setSessionList((prev) => [s, ...prev.filter((item) => item.id !== s.id)]);
       try {
         localStorage.setItem(SESSION_STORAGE_KEY, s.id);
       } catch {
@@ -136,7 +140,7 @@ export function useAcquisitionControls(p: Params) {
       p.clearQueryPages();
       p.clearReportData();
       p.goToTab("operator", { sesi: s.id });
-      void p.refreshSessionList();
+      void p.refreshSessionList({ soft: true });
       requestAnimationFrame(() => {
         p.teleRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
       });
@@ -145,7 +149,7 @@ export function useAcquisitionControls(p: Params) {
     } finally {
       setBusy(false);
     }
-  }, [p, identityReady, planReady]);
+  }, [p, identityReady, planReady, effectiveDeviceSources]);
 
   const startZip = useCallback(async () => {
     if (!p.zipFile || !identityReady || !planReady) return;
@@ -169,6 +173,7 @@ export function useAcquisitionControls(p: Params) {
         onUploadProgress: (pct) => setUploadPct(pct),
       });
       p.setSession(s);
+      p.setSessionList((prev) => [s, ...prev.filter((item) => item.id !== s.id)]);
       try {
         localStorage.setItem(SESSION_STORAGE_KEY, s.id);
       } catch {
@@ -178,7 +183,7 @@ export function useAcquisitionControls(p: Params) {
       p.clearQueryPages();
       p.clearReportData();
       p.goToTab("operator", { sesi: s.id });
-      void p.refreshSessionList();
+      void p.refreshSessionList({ soft: true });
       requestAnimationFrame(() => {
         p.teleRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
       });
@@ -188,7 +193,7 @@ export function useAcquisitionControls(p: Params) {
       setBusy(false);
       setUploadPct(null);
     }
-  }, [p, identityReady, planReady]);
+  }, [p, identityReady, planReady, effectiveDeviceSources]);
 
   const cancel = useCallback(async () => {
     if (!p.session) return;

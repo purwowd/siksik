@@ -94,6 +94,12 @@ ios_usb_iphone_in_lsusb() {
   lsusb -d 05ac:12a8 >/dev/null 2>&1 || lsusb -d 05ac:12ab >/dev/null 2>&1
 }
 
+# Ready for akuisisi only when the phone is on the WSL USB bus (lsusb).
+# idevice_id alone can list a ghost UDID while lockdownd returns Mux -8.
+ios_usb_iphone_ready() {
+  ios_usb_iphone_in_lsusb
+}
+
 # WSL usbipd owns the cable. Distro usbmuxd 1.1.1 drops 65536-byte packets
 # during IPA AFC write and wedges lockdownd.
 ios_usb_wsl_direct() {
@@ -227,12 +233,12 @@ ios_usb_release_to_windows() {
   fi
   line="$(ios_usb_apple_line)"
   busid="$(printf '%s\n' "$line" | awk '{print $1}')"
-  state="$(printf '%s\n' "$line" | awk '{print $NF}')"
+  state="$(ios_usb_apple_state "$line")"
   if [[ -z "$busid" || "$line" != *05ac:* ]]; then
     echo "[usb] iPhone tidak terlihat di usbipd" >&2
     return 1
   fi
-  if [[ "$state" == "Attached" ]]; then
+  if [[ "$state" == "attached" ]]; then
     echo "[usb] usbipd detach $busid (Windows AMDS / pasang WDA)" >&2
     usbipd.exe detach --busid "$busid" >/dev/null 2>&1 || true
     sleep 2
@@ -323,6 +329,22 @@ ios_usb_apple_line() {
   usbipd.exe list 2>/dev/null | tr -d '\r' | awk '/05ac:12a8|05ac:12ab/ {print; exit}'
 }
 
+# usbipd "Shared (forced)" ends with "(forced)" — never use awk $NF alone.
+ios_usb_apple_state() {
+  local line="$1"
+  if [[ "$line" == *"Not shared"* ]]; then
+    printf '%s\n' "not_shared"
+  elif [[ "$line" == *"Not attached"* ]]; then
+    printf '%s\n' "not_attached"
+  elif [[ "$line" == *"Shared"* ]]; then
+    printf '%s\n' "shared"
+  elif [[ "$line" == *"Attached"* ]]; then
+    printf '%s\n' "attached"
+  else
+    printf '%s\n' ""
+  fi
+}
+
 ios_usb_wait_lsusb() {
   local i
   for i in $(seq 1 12); do
@@ -334,7 +356,7 @@ ios_usb_wait_lsusb() {
   return 1
 }
 
-# Shared = bound for usbipd but not in WSL. Attach does not need UAC.
+# Shared / Shared (forced) = bound for usbipd but not in WSL. Attach does not need UAC.
 ios_usb_attach_shared() {
   local line busid state
   if ! command -v usbipd.exe >/dev/null 2>&1; then
@@ -342,18 +364,17 @@ ios_usb_attach_shared() {
   fi
   line="$(ios_usb_apple_line)"
   busid="$(printf '%s\n' "$line" | awk '{print $1}')"
-  state="$(printf '%s\n' "$line" | awk '{print $NF}')"
+  state="$(ios_usb_apple_state "$line")"
   if [[ -z "$busid" ]]; then
     return 1
   fi
-  if [[ "$state" == "Attached" ]]; then
+  if [[ "$state" == "attached" ]]; then
     ios_usb_wait_lsusb
     return $?
   fi
-  case "$state" in
-    Shared|"(forced)") ;;
-    *) return 1 ;;
-  esac
+  if [[ "$state" != "shared" ]]; then
+    return 1
+  fi
   echo "[usb] usbipd attach --wsl $busid" >&2
   usbipd.exe attach --wsl --busid "$busid" >/dev/null 2>&1 || return 1
   ios_usb_wait_lsusb
@@ -370,7 +391,7 @@ ios_usb_ensure_wsl() {
     echo "[usb] iPhone di Windows (WDA); skip attach WSL" >&2
     return 0
   fi
-  if ios_usb_iphone_in_lsusb; then
+  if ios_usb_iphone_ready; then
     ios_usb_owner_set wsl
     return 0
   fi
@@ -384,16 +405,19 @@ ios_usb_ensure_wsl() {
 }
 
 ios_usb_claim_wsl() {
-  local claim line
+  local claim line state
   if ! ios_usb_is_wsl; then
     return 0
   fi
   ios_usb_owner_set wsl
-  if ios_usb_iphone_in_lsusb; then
+  if ios_usb_iphone_ready; then
     return 0
   fi
   if ios_usb_attach_shared; then
     ios_usb_owner_set wsl
+    return 0
+  fi
+  if ios_usb_iphone_ready; then
     return 0
   fi
   line="$(ios_usb_apple_line)"
@@ -401,12 +425,16 @@ ios_usb_claim_wsl() {
     echo "[usb] tidak ada iPhone di usbipd; skip bind (jangan sentuh bus Android)" >&2
     return 1
   fi
-  claim="$_IOS_USB_SCRIPTS/iphone_usb_wsl_only.sh"
-  if [[ -f "$claim" ]]; then
-    bash "$claim" || true
+  state="$(ios_usb_apple_state "$line")"
+  # UAC / bind --force: Not shared, atau Shared tapi attach gagal (Device busy / AMDS).
+  if [[ "$state" == "not_shared" || "$state" == "shared" ]]; then
+    claim="$_IOS_USB_SCRIPTS/iphone_usb_wsl_only.sh"
+    if [[ -f "$claim" ]]; then
+      bash "$claim" || true
+    fi
   fi
   ios_usb_attach_shared || true
-  if ios_usb_iphone_in_lsusb; then
+  if ios_usb_iphone_ready; then
     ios_usb_owner_set wsl
     return 0
   fi

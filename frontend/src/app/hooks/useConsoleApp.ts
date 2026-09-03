@@ -250,6 +250,7 @@ export function useConsoleApp() {
     teleRef,
     goToTab,
     refreshSessionList: workspace.refreshSessionList,
+    setSessionList,
     refreshDevices: runtime.refreshDevices,
     setError,
     clearQueryPages: () => {

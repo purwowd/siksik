@@ -151,13 +151,79 @@ async def test_reattach_clears_windows_hold_and_claims_wsl(
 
     async def fake_run(argv, **kwargs):
         called.append([str(item) for item in argv])
+        op = kwargs.get("operation") or ""
+        # Soft probes + soft ensure leave the phone missing → claim --startup.
+        if op == "ios_usb_lsusb_probe":
+            return ProcessResult(tuple(str(item) for item in argv), 1, "", "")
         return ProcessResult(tuple(str(item) for item in argv), 0, "", "")
 
     monkeypatch.setattr(ios_usb_wsl, "run_process", fake_run)
     await ios_usb_wsl.ensure_iphone_on_wsl(reattach=True)
     assert windows_holds_iphone_usb() is False
-    assert called and called[0][-1] == "--startup"
-    assert str(script) in called[0]
+    script_calls = [c for c in called if str(script) in c]
+    assert script_calls
+    assert script_calls[0] == ["bash", str(script)]
+    assert script_calls[1] == ["bash", str(script), "--startup"]
+
+
+@pytest.mark.unit
+async def test_ensure_skips_uac_when_lsusb_has_iphone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.acquisition import ios_usb_wsl
+
+    puller = tmp_path / "puller"
+    script = puller / "ios_automator" / "scripts" / "ensure_iphone_wsl.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    monkeypatch.setattr(ios_usb_wsl, "running_under_wsl", lambda: True)
+    monkeypatch.setattr(config.settings, "ios_media_puller_path", puller)
+    called: list[list[str]] = []
+
+    async def fake_run(argv, **kwargs):
+        called.append([str(item) for item in argv])
+        op = kwargs.get("operation") or ""
+        if op == "ios_usb_lsusb_probe":
+            return ProcessResult(
+                tuple(str(item) for item in argv),
+                0,
+                "Bus 001 Device 005: ID 05ac:12a8 Apple\n",
+                "",
+            )
+        return ProcessResult(tuple(str(item) for item in argv), 0, "", "")
+
+    monkeypatch.setattr(ios_usb_wsl, "run_process", fake_run)
+    await ios_usb_wsl.ensure_iphone_on_wsl(force=True, reattach=True)
+    assert not any(str(script) in c for c in called)
+
+
+@pytest.mark.unit
+async def test_ensure_does_not_trust_ghost_idevice_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """idevice_id can list a UDID while lsusb is empty → still reclaim USB."""
+    from app.acquisition import ios_usb_wsl
+
+    puller = tmp_path / "puller"
+    script = puller / "ios_automator" / "scripts" / "ensure_iphone_wsl.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    monkeypatch.setattr(ios_usb_wsl, "running_under_wsl", lambda: True)
+    monkeypatch.setattr(config.settings, "ios_media_puller_path", puller)
+    called: list[list[str]] = []
+
+    async def fake_run(argv, **kwargs):
+        called.append([str(item) for item in argv])
+        op = kwargs.get("operation") or ""
+        if op == "ios_usb_lsusb_probe":
+            return ProcessResult(tuple(str(item) for item in argv), 1, "", "")
+        return ProcessResult(tuple(str(item) for item in argv), 0, "", "")
+
+    monkeypatch.setattr(ios_usb_wsl, "run_process", fake_run)
+    await ios_usb_wsl.ensure_iphone_on_wsl(force=True, reattach=True)
+    script_calls = [c for c in called if str(script) in c]
+    assert script_calls[0] == ["bash", str(script)]
+    assert script_calls[1] == ["bash", str(script), "--startup"]
 
 
 @pytest.mark.unit
@@ -182,7 +248,9 @@ async def test_lockdown_ok_skips_recover(
 
     monkeypatch.setattr(ios_usb_wsl, "run_process", fake_run)
     await ios_usb_wsl.ensure_iphone_lockdown(udid="00008101-0008384601D8001E")
-    assert called == ["ideviceinfo"]
+    assert "ideviceinfo" in called
+    assert "bash" not in called
+    assert called[0] == "ideviceinfo"
 
 
 @pytest.mark.unit
@@ -323,6 +391,47 @@ def test_iphone_wsl_bind_does_not_guess_android_bus() -> None:
     )
     claim_text = claim.read_text(encoding="utf-8")
     assert "tidak ada iPhone di usbipd" in claim_text
+    assert "ios_usb_apple_state" in claim_text
+    assert '*"Shared"*' in claim_text
+    assert "not_shared" in claim_text
+
+
+@pytest.mark.unit
+def test_ios_usb_apple_state_handles_shared_forced() -> None:
+    """Shared (forced) must soft-attach; $NF='(forced)' used to miss and force UAC."""
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "ios-media-puller"
+        / "ios_automator"
+        / "scripts"
+        / "ios_usb.sh"
+    )
+    import subprocess
+
+    probe = r"""
+source "$1"
+assert_state() {
+  local got
+  got="$(ios_usb_apple_state "$1")"
+  if [[ "$got" != "$2" ]]; then
+    echo "want $2 got $got for: $1" >&2
+    exit 1
+  fi
+}
+assert_state '1-5    05ac:12a8  iPhone                                                        Shared (forced)' shared
+assert_state '1-5    05ac:12a8  iPhone                                                        Shared' shared
+assert_state '1-5    05ac:12a8  iPhone                                                        Attached' attached
+assert_state '1-5    05ac:12a8  iPhone                                                        Not shared' not_shared
+echo ok
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe, "_", str(script)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ok" in result.stdout
 
 
 @pytest.mark.unit
