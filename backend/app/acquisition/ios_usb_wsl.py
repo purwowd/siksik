@@ -17,9 +17,9 @@ from app.core.config import settings
 async def ensure_iphone_on_wsl(*, reattach: bool = False, force: bool = False) -> None:
     """Attach the iPhone into WSL.
 
-    Idle device polls (`reattach=False`) skip while Windows owns the cable
-    (WDA install). Explicit reclaim (`reattach` or `force`) clears that hold
-    so Jalankan akuisisi / pindai USB can take the device back.
+    Idle polls attach an already-Shared iPhone (`ensure_shared_wsl_usb`) without
+    bind --force. Windows AMDS handoff is iPhone-only. Explicit reclaim
+    (`reattach` or `force`) is for Jalankan akuisisi iOS / WDA restore.
     """
     if not running_under_wsl():
         return

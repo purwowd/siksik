@@ -225,13 +225,10 @@ if [[ "${SADT_SD_DETECTOR_ENABLED}" == "1" ]]; then
   start_sd_sidecar
 fi
 
-# iPhone USB default di WSL. Windows AMDS hanya saat pasang WDA.
+# Android USB stays in WSL. iPhone that is already Shared is attached to WSL
+# (no bind --force). Windows AMDS only during WDA install / Jalankan akuisisi iOS.
 if grep -qi microsoft /proc/version 2>/dev/null; then
-  IPHONE_WSL="$ROOT/ios-media-puller/ios_automator/scripts/ensure_iphone_wsl.sh"
-  if [[ -f "$IPHONE_WSL" ]]; then
-    echo "iPhone USB → WSL (default SATRIA)…"
-    bash "$IPHONE_WSL" --startup || true
-  fi
+  python -c "import asyncio; from app.acquisition.android_usb_wsl import ensure_shared_wsl_usb; asyncio.run(ensure_shared_wsl_usb())" 2>/dev/null || true
 fi
 
 # Watchdog: if uvicorn dies (OOM/Killed:9), bring it back without killing Vite.

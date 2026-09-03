@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Default: iPhone USB di WSL. --startup = UAC bind kalau masih di Windows.
+# Default: attach iPhone yang sudah Shared ke WSL (tanpa UAC).
+# --startup = UAC bind --force: Pindai ulang / Jalankan akuisisi saat Not shared
+# atau Deny AutoBind (sisa pasang WDA). Jangan dipanggil dari start_poc.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"

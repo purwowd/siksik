@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { api, saveAuth, type AuthSession, type DeviceInfo, type VisionHealth } from "@/shared/api/client";
 
 export function useRuntimeHealth(_auth: AuthSession | null, setAuth: (a: AuthSession | null) => void, setError: (e: string | null) => void) {
@@ -12,20 +12,30 @@ export function useRuntimeHealth(_auth: AuthSession | null, setAuth: (a: AuthSes
   const [imageCapFull, setImageCapFull] = useState(3000);
   const [zipMaxMb, setZipMaxMb] = useState(512);
   const [zipEnabled, setZipEnabled] = useState(true);
+  const [devicesBusy, setDevicesBusy] = useState(false);
+  const devicesBusyRef = useRef(false);
 
   const refreshDevices = useCallback(async (opts?: { reattachUsb?: boolean }) => {
-    const [h, d] = await Promise.all([api.health(), api.devices(opts)]);
-    setGpu(h.gpu_available);
-    setToolchain(h.extras?.toolchain || {});
-    setVision(h.extras?.vision || {});
-    if (h.extras?.runtime_env) setRuntimeEnv(String(h.extras.runtime_env));
-    if (typeof h.extras?.image_cap_quick === "number") setImageCapQuick(h.extras.image_cap_quick);
-    if (typeof h.extras?.image_cap_full === "number") setImageCapFull(h.extras.image_cap_full);
-    if (typeof h.extras?.zip_max_mb === "number") setZipMaxMb(h.extras.zip_max_mb);
-    if (typeof h.extras?.zip_enabled === "boolean") setZipEnabled(h.extras.zip_enabled);
-    const live = d.filter((x) => !x.simulated);
-    setDevices(live);
-    setSelected((prev) => live.find((x) => x.device_id === prev?.device_id) ?? live[0] ?? null);
+    if (devicesBusyRef.current) return;
+    devicesBusyRef.current = true;
+    setDevicesBusy(true);
+    try {
+      const [h, d] = await Promise.all([api.health(), api.devices(opts)]);
+      setGpu(h.gpu_available);
+      setToolchain(h.extras?.toolchain || {});
+      setVision(h.extras?.vision || {});
+      if (h.extras?.runtime_env) setRuntimeEnv(String(h.extras.runtime_env));
+      if (typeof h.extras?.image_cap_quick === "number") setImageCapQuick(h.extras.image_cap_quick);
+      if (typeof h.extras?.image_cap_full === "number") setImageCapFull(h.extras.image_cap_full);
+      if (typeof h.extras?.zip_max_mb === "number") setZipMaxMb(h.extras.zip_max_mb);
+      if (typeof h.extras?.zip_enabled === "boolean") setZipEnabled(h.extras.zip_enabled);
+      const live = d.filter((x) => !x.simulated);
+      setDevices(live);
+      setSelected((prev) => live.find((x) => x.device_id === prev?.device_id) ?? live[0] ?? null);
+    } finally {
+      devicesBusyRef.current = false;
+      setDevicesBusy(false);
+    }
   }, []);
 
   const bootstrapHealth = useCallback(async () => {
@@ -59,6 +69,7 @@ export function useRuntimeHealth(_auth: AuthSession | null, setAuth: (a: AuthSes
     imageCapFull,
     zipMaxMb,
     zipEnabled,
+    devicesBusy,
     refreshDevices,
     bootstrapHealth,
     liveDevices,

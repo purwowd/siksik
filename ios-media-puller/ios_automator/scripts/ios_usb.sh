@@ -197,13 +197,15 @@ ios_usb_wda_install() {
   fi
 }
 
+# Apple composite VID only. Android buses must never be detached to Windows.
 ios_usb_recycle_usbipd() {
-  local busid
+  local busid line
   if ! command -v usbipd.exe >/dev/null 2>&1; then
     return 1
   fi
-  busid="$(usbipd.exe list 2>/dev/null | tr -d '\r' | awk '/05ac:12a8|05ac:12ab/ {print $1; exit}')"
-  if [[ -z "$busid" ]]; then
+  line="$(ios_usb_apple_line)"
+  busid="$(printf '%s\n' "$line" | awk '{print $1}')"
+  if [[ -z "$busid" || "$line" != *05ac:* ]]; then
     return 1
   fi
   echo "[usb] usbipd detach $busid" >&2
@@ -215,16 +217,18 @@ ios_usb_recycle_usbipd() {
   return 0
 }
 
-# Detach usbipd so Windows AMDS owns the cable (WDA install). No UAC.
+# Detach iPhone usbipd so Windows AMDS owns the cable (WDA install). No UAC.
+# Never call this for Android — Android USB stays in WSL.
 ios_usb_release_to_windows() {
-  local busid state
+  local busid state line
   ios_usb_owner_set windows
   if ! command -v usbipd.exe >/dev/null 2>&1; then
     return 1
   fi
-  busid="$(usbipd.exe list 2>/dev/null | tr -d '\r' | awk '/05ac:12a8|05ac:12ab/ {print $1; exit}')"
-  state="$(usbipd.exe list 2>/dev/null | tr -d '\r' | awk '/05ac:12a8|05ac:12ab/ {print $NF; exit}')"
-  if [[ -z "$busid" ]]; then
+  line="$(ios_usb_apple_line)"
+  busid="$(printf '%s\n' "$line" | awk '{print $1}')"
+  state="$(printf '%s\n' "$line" | awk '{print $NF}')"
+  if [[ -z "$busid" || "$line" != *05ac:* ]]; then
     echo "[usb] iPhone tidak terlihat di usbipd" >&2
     return 1
   fi
@@ -346,9 +350,10 @@ ios_usb_attach_shared() {
     ios_usb_wait_lsusb
     return $?
   fi
-  if [[ "$state" != "Shared" ]]; then
-    return 1
-  fi
+  case "$state" in
+    Shared|"(forced)") ;;
+    *) return 1 ;;
+  esac
   echo "[usb] usbipd attach --wsl $busid" >&2
   usbipd.exe attach --wsl --busid "$busid" >/dev/null 2>&1 || return 1
   ios_usb_wait_lsusb
@@ -379,7 +384,7 @@ ios_usb_ensure_wsl() {
 }
 
 ios_usb_claim_wsl() {
-  local claim
+  local claim line
   if ! ios_usb_is_wsl; then
     return 0
   fi
@@ -390,6 +395,11 @@ ios_usb_claim_wsl() {
   if ios_usb_attach_shared; then
     ios_usb_owner_set wsl
     return 0
+  fi
+  line="$(ios_usb_apple_line)"
+  if [[ -z "$line" ]]; then
+    echo "[usb] tidak ada iPhone di usbipd; skip bind (jangan sentuh bus Android)" >&2
+    return 1
   fi
   claim="$_IOS_USB_SCRIPTS/iphone_usb_wsl_only.sh"
   if [[ -f "$claim" ]]; then

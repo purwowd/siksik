@@ -29,7 +29,7 @@ export function AppShell(props: ConsoleAppViewModel) {
     participant, setParticipant,
     acqSource, setAcqSource, zipEnabled, zipFile, setZipFile, zipMaxMb, uploadPct, selected, setSelected,
     mode, setMode, analysisScope, setAnalysisScope, deviceSources, setDeviceSources,
-    socialTargets, setSocialTargets, authorizeNote, setAuthorizeNote, refreshDevices, refreshSessionList, refreshGallery, onPickSession,
+    socialTargets, setSocialTargets, authorizeNote, setAuthorizeNote, refreshDevices, devicesBusy, refreshSessionList, refreshGallery, onPickSession,
     openSession, openSessionWithModule, changeReviewFilter, changeModuleFilter, changeGalleryAlbum,
     start, startZip, cancel, review, bulkReview, doLogout, setSession, setReportPage, topBarActive,
   } = props;
@@ -170,6 +170,7 @@ export function AppShell(props: ConsoleAppViewModel) {
                 selected={selected}
                 setSelected={setSelected}
                 refreshDevices={refreshDevices}
+                devicesBusy={devicesBusy}
                 mode={mode}
                 setMode={setMode}
                 analysisScope={analysisScope}

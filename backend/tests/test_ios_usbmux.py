@@ -251,6 +251,199 @@ async def test_lockdown_still_dead_after_recover_fails_loud(
 
 
 @pytest.mark.unit
+def test_wda_windows_script_installs_apple_usb_driver() -> None:
+    ps1 = (
+        Path(__file__).resolve().parents[2]
+        / "ios-media-puller"
+        / "ios_automator"
+        / "scripts"
+        / "install_wda_windows.ps1"
+    )
+    text = ps1.read_text(encoding="utf-8")
+    assert "appleusb.inf" in text
+    assert "/update-driver" in text
+    assert "Install-AppleUsbDriver" in text
+    assert "Test-AppleDriverBound" in text
+
+
+@pytest.mark.unit
+def test_start_poc_keeps_android_wsl_and_skips_iphone_usb() -> None:
+    script = Path(__file__).resolve().parents[2] / "scripts" / "start_poc.sh"
+    text = script.read_text(encoding="utf-8")
+    assert "ensure_iphone_wsl.sh" not in text
+    assert "--startup" not in text
+    assert "ensure_shared_wsl_usb" in text
+    ios_usb = (
+        Path(__file__).resolve().parents[2]
+        / "ios-media-puller"
+        / "ios_automator"
+        / "scripts"
+        / "ios_usb.sh"
+    )
+    claim = ios_usb.read_text(encoding="utf-8")
+    assert "Android USB stays in WSL" in claim
+    assert "05ac:12a8|05ac:12ab" in claim
+
+
+@pytest.mark.unit
+def test_operator_usb_rescan_reattaches_missing_phones() -> None:
+    page = (
+        Path(__file__).resolve().parents[2]
+        / "frontend"
+        / "src"
+        / "features"
+        / "operator"
+        / "OperatorPage.tsx"
+    )
+    text = page.read_text(encoding="utf-8")
+    assert "Pindai ulang USB" in text
+    assert "refreshDevices({ reattachUsb: true })" in text
+    assert "devicesBusy" in text
+    assert "Memindai USB" in text
+
+
+@pytest.mark.unit
+def test_iphone_wsl_bind_does_not_guess_android_bus() -> None:
+    ps1 = (
+        Path(__file__).resolve().parents[2]
+        / "ios-media-puller"
+        / "ios_automator"
+        / "scripts"
+        / "iphone_usb_wsl_only.ps1"
+    )
+    text = ps1.read_text(encoding="utf-8")
+    assert 'busid = "1-4"' not in text
+    assert "--unplugged" not in text
+    claim = (
+        Path(__file__).resolve().parents[2]
+        / "ios-media-puller"
+        / "ios_automator"
+        / "scripts"
+        / "ios_usb.sh"
+    )
+    claim_text = claim.read_text(encoding="utf-8")
+    assert "tidak ada iPhone di usbipd" in claim_text
+
+
+@pytest.mark.unit
+async def test_detect_devices_idle_skips_iphone_usb_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import acquisition as acq
+
+    called: list[dict[str, bool]] = []
+    shared_calls: list[dict[str, object]] = []
+
+    async def fake_ensure(*, reattach: bool = False, force: bool = False) -> None:
+        called.append({"reattach": reattach, "force": force})
+
+    async def fake_shared(
+        *,
+        attach_android: bool = True,
+        attach_iphone: bool = True,
+        include_iphone: bool | None = None,
+        reclaim_not_shared: bool = False,
+    ) -> None:
+        if include_iphone is not None:
+            attach_iphone = include_iphone
+        shared_calls.append(
+            {
+                "attach_android": attach_android,
+                "attach_iphone": attach_iphone,
+                "reclaim_not_shared": reclaim_not_shared,
+            }
+        )
+
+    class FakeTransport:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def list_devices(self):
+            return []
+
+    async def fake_run(_argv, timeout=None):
+        return 1, "", ""
+
+    async def no_iphone() -> bool:
+        return False
+
+    async def no_adb() -> bool:
+        return False
+
+    monkeypatch.setattr(acq, "ensure_iphone_on_wsl", fake_ensure)
+    monkeypatch.setattr(acq, "ensure_shared_wsl_usb", fake_shared)
+    monkeypatch.setattr(acq, "AsyncAdbTransport", FakeTransport)
+    monkeypatch.setattr(acq, "running_under_wsl", lambda: True)
+    monkeypatch.setattr(acq, "_wsl_lsusb_has_iphone", no_iphone)
+    monkeypatch.setattr(acq, "_adb_has_live_device", no_adb)
+    monkeypatch.setattr(acq, "_iphone_visible_in_wsl", no_iphone)
+    monkeypatch.setattr(acq, "windows_holds_iphone_usb", lambda: False)
+    monkeypatch.setattr(acq, "clear_iphone_usb_windows_hold", lambda: None)
+    monkeypatch.setattr(acq, "_run", fake_run)
+
+    idle = await acq.detect_devices(include_simulators=False, reattach_usb=False)
+    assert idle == []
+    assert called == []
+    assert shared_calls == [
+        {"attach_android": True, "attach_iphone": True, "reclaim_not_shared": False}
+    ]
+
+    claimed = await acq.detect_devices(include_simulators=False, reattach_usb=True)
+    assert claimed == []
+    assert called == [{"reattach": True, "force": False}]
+    assert shared_calls == [
+        {"attach_android": True, "attach_iphone": True, "reclaim_not_shared": False},
+        {"attach_android": True, "attach_iphone": True, "reclaim_not_shared": True},
+    ]
+
+
+@pytest.mark.unit
+async def test_detect_devices_skips_attach_when_already_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import acquisition as acq
+
+    shared_calls: list[dict[str, bool]] = []
+
+    async def fake_shared(**kwargs) -> None:
+        shared_calls.append(
+            {
+                "attach_android": bool(kwargs.get("attach_android", True)),
+                "attach_iphone": bool(kwargs.get("attach_iphone", True)),
+            }
+        )
+
+    class FakeTransport:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def list_devices(self):
+            return []
+
+    async def fake_run(_argv, timeout=None):
+        return 1, "", ""
+
+    async def yes() -> bool:
+        return True
+
+    async def noop_ensure(**_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(acq, "ensure_iphone_on_wsl", noop_ensure)
+    monkeypatch.setattr(acq, "ensure_shared_wsl_usb", fake_shared)
+    monkeypatch.setattr(acq, "AsyncAdbTransport", FakeTransport)
+    monkeypatch.setattr(acq, "running_under_wsl", lambda: True)
+    monkeypatch.setattr(acq, "_adb_has_live_device", yes)
+    monkeypatch.setattr(acq, "_iphone_visible_in_wsl", yes)
+    monkeypatch.setattr(acq, "windows_holds_iphone_usb", lambda: False)
+    monkeypatch.setattr(acq, "_wsl_lsusb_has_iphone", yes)
+    monkeypatch.setattr(acq, "_run", fake_run)
+
+    await acq.detect_devices(include_simulators=False, reattach_usb=False)
+    assert shared_calls == []
+
+
+@pytest.mark.unit
 def test_live_ios_pipeline_claims_wsl_usb_before_detect() -> None:
     import inspect
 

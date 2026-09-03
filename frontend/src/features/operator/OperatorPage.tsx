@@ -45,6 +45,7 @@ type Props = {
   selected: DeviceInfo | null;
   setSelected: (d: DeviceInfo | null) => void;
   refreshDevices: (opts?: { reattachUsb?: boolean }) => Promise<void>;
+  devicesBusy: boolean;
   mode: AcquisitionMode;
   setMode: (m: AcquisitionMode) => void;
   analysisScope: AnalysisScope;
@@ -217,14 +218,17 @@ export function OperatorPage(p: Props) {
                   <button
                     className="btn btn-ghost"
                     type="button"
+                    disabled={p.devicesBusy || p.busy || active}
+                    aria-busy={p.devicesBusy}
                     onClick={() => {
+                      if (p.devicesBusy || p.busy || active) return;
                       void p
                         .refreshDevices({ reattachUsb: true })
                         .then(() => p.iosSetup.refresh())
                         .catch(console.error);
                     }}
                   >
-                    Pindai ulang USB
+                    {p.devicesBusy ? "Memindai USB…" : "Pindai ulang USB"}
                   </button>
                 </div>
                 <div className="device-list" role="listbox" aria-labelledby="device-list-label">

@@ -95,6 +95,7 @@ function Release-AppleUsbToWindows([string]$Usbipd) {
       Start-Sleep -Seconds 2
       if (-not (Test-AppleAttachedToWsl $Usbipd)) {
         Write-Host "  iPhone di host Windows (bukan WSL)"
+        [void](Install-AppleUsbDriver)
         return
       }
     }
@@ -195,38 +196,82 @@ function Test-AmdsSeesIphone {
 function Test-AppleDriverBound {
   $n = @(
     Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
-      Where-Object { $_.InstanceId -match 'VID_05AC' -and $_.Service -match 'usbccgp|WINUSB|usbaapl' }
+      Where-Object {
+        $_.InstanceId -match 'VID_05AC&PID_12A8' -and
+        $_.InstanceId -notmatch '&MI_' -and
+        $_.Status -eq 'OK' -and
+        $_.Service -match 'usbccgp|WINUSB|usbaapl'
+      }
   ).Count
   return ($n -gt 0)
+}
+
+function Get-AppleUsbInfPath {
+  $raw = & pnputil.exe /enum-drivers 2>$null | Out-String
+  if ($raw -match '(?m)Published Name:\s+(oem\d+\.inf)\s+Original Name:\s+appleusb\.inf') {
+    $oem = Join-Path $env:SystemRoot ("INF\" + $Matches[1])
+    if (Test-Path -LiteralPath $oem) { return $oem }
+  }
+  foreach ($inf in (Get-ChildItem (Join-Path $env:SystemRoot "INF\oem*.inf") -ErrorAction SilentlyContinue)) {
+    $head = Get-Content -LiteralPath $inf.FullName -TotalCount 40 -ErrorAction SilentlyContinue | Out-String
+    if ($head -match 'appleusb|Apple USB') { return $inf.FullName }
+  }
+  return ""
+}
+
+function Install-AppleUsbDriver {
+  $inf = Get-AppleUsbInfPath
+  if (-not $inf) {
+    Write-Host "  appleusb.inf tidak ada. Install iTunes 64-bit (bukan Store), lalu ulangi."
+    return $false
+  }
+  Write-Host "  pasang driver Apple ($([IO.Path]::GetFileName($inf)))"
+  & pnputil.exe /update-driver $inf /install | Out-Null
+  $ids = @(
+    Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+      Where-Object { $_.InstanceId -match 'VID_05AC&PID_12A8\\' -and $_.InstanceId -notmatch '&MI_' }
+  )
+  foreach ($d in $ids) {
+    if ($d.Service -match 'usbccgp|WINUSB|usbaapl') { continue }
+    Write-Host "  restart-device iPhone (driver kosong / Unknown)"
+    & pnputil.exe /restart-device $d.InstanceId 2>$null | Out-Null
+  }
+  & pnputil.exe /scan-devices 2>$null | Out-Null
+  Start-Sleep -Seconds 3
+  return (Test-AppleDriverBound)
 }
 
 function Repair-AppleUsbDriver {
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    Write-Host "  cycle USB iPhone + restart AMDS"
+    Write-Host "  cycle USB iPhone + pasang appleusb.inf + restart AMDS"
+    [void](Install-AppleUsbDriver)
     $devs = @(
       Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
-        Where-Object { $_.InstanceId -match 'VID_05AC&PID_12A8' }
+        Where-Object { $_.InstanceId -match 'VID_05AC&PID_12A8\\' -and $_.InstanceId -notmatch '&MI_' }
     )
     foreach ($d in $devs) {
       Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
     }
-    Start-Sleep -Seconds 3
+    Start-Sleep -Seconds 2
     foreach ($d in $devs) {
       Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
-      & pnputil.exe /restart-device $d.InstanceId 2>$null | Out-Null
     }
+    [void](Install-AppleUsbDriver)
     Restart-Service -Name "Apple Mobile Device Service" -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 3
   } finally {
     $ErrorActionPreference = $prev
   }
 }
 
 function Wait-AmdsSeesIphone {
-  Write-Host "  tunggu driver Apple (HP ngecas). Jangan cabut kalau sudah ngecas."
-  for ($i = 1; $i -le 30; $i++) {
+  Write-Host "  pasang driver Apple supaya HP ngecas dan AMDS melihat device."
+  if (Install-AppleUsbDriver) {
+    Write-Host "  driver Apple aktif"
+  }
+  for ($i = 1; $i -le 24; $i++) {
     $driverOk = Test-AppleDriverBound
     $listed = Test-AmdsSeesIphone
     if ($listed) {
@@ -239,14 +284,14 @@ function Wait-AmdsSeesIphone {
       return
     }
     if ($i -eq 1) {
-      Write-Host "  Kalau tidak ngecas: cabut 10 detik, unlock, colok USB-A lain." -ForegroundColor Yellow
+      Write-Host "  Kalau masih tidak ngecas: unlock iPhone, tap Trust. Jangan cabut kalau sudah ngecas." -ForegroundColor Yellow
     }
-    if ($i -eq 8) {
+    if ($i -eq 4 -or $i -eq 12) {
       Repair-AppleUsbDriver
     }
     Start-Sleep -Seconds 2
   }
-  throw "Driver Apple belum aktif (HP tidak ngecas). Cabut 10 detik, colok port USB-A lain, lalu jalankan lagi."
+  throw "Driver Apple belum aktif (HP tidak ngecas). Unlock, tap Trust, cabut 10 detik, colok USB-A lain, lalu jalankan lagi."
 }
 
 function Wait-Window {

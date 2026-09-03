@@ -23,8 +23,13 @@ from app.acquisition.contracts import (
 )
 from app.acquisition.errors import AcquisitionError, ErrorCategory
 from app.acquisition.file_identity import stable_file_id
+from app.acquisition.android_usb_wsl import ensure_shared_wsl_usb
 from app.acquisition.ios_usb_wsl import ensure_iphone_lockdown, ensure_iphone_on_wsl
-from app.acquisition.ios_usbmux import running_under_wsl, windows_holds_iphone_usb
+from app.acquisition.ios_usbmux import (
+    clear_iphone_usb_windows_hold,
+    running_under_wsl,
+    windows_holds_iphone_usb,
+)
 from app.acquisition.process import run_process
 from app.acquisition.providers import AcquisitionProviderRegistry
 from app.core.config import settings
@@ -344,6 +349,25 @@ async def _wsl_lsusb_has_iphone() -> bool:
     return False
 
 
+async def _adb_has_live_device() -> bool:
+    try:
+        transport = AsyncAdbTransport(
+            settings.adb_path,
+            timeout_seconds=min(settings.adb_command_timeout_s, 4.0),
+        )
+        devices = await transport.list_devices()
+        return any(item.state == "device" for item in devices)
+    except AcquisitionError:
+        return False
+
+
+async def _iphone_visible_in_wsl() -> bool:
+    if await _wsl_lsusb_has_iphone():
+        return True
+    code, out, _ = await _run(["idevice_id", "-l"], timeout=3)
+    return code == 0 and bool((out or "").strip())
+
+
 async def toolchain_status() -> dict:
     try:
         adb_result = await AsyncAdbTransport(
@@ -371,6 +395,32 @@ async def detect_devices(
     *, include_simulators: bool = True, reattach_usb: bool = False
 ) -> list[DeviceInfo]:
     devices: list[DeviceInfo] = []
+
+    # Probe first. Missing phones → bind/attach to WSL (default ownership).
+    android_ready = await _adb_has_live_device()
+    iphone_ready = await _iphone_visible_in_wsl()
+    need_android = not android_ready
+    need_iphone = not iphone_ready
+    if reattach_usb and need_iphone:
+        # Explicit Pindai ulang: reclaim from Windows AMDS hold / Deny AutoBind.
+        clear_iphone_usb_windows_hold()
+    allow_iphone = need_iphone and (
+        reattach_usb or not windows_holds_iphone_usb()
+    )
+    if need_android or allow_iphone:
+        await ensure_shared_wsl_usb(
+            attach_android=need_android,
+            attach_iphone=allow_iphone,
+            reclaim_not_shared=reattach_usb,
+        )
+        if need_android:
+            android_ready = await _adb_has_live_device()
+        if allow_iphone:
+            iphone_ready = await _iphone_visible_in_wsl()
+    if reattach_usb and not iphone_ready:
+        # Soft bind failed (Deny AutoBind / Not shared) → elevated claim.
+        await ensure_iphone_on_wsl(reattach=True)
+        iphone_ready = await _iphone_visible_in_wsl()
 
     try:
         from app.acquisition.install_policy import oem_install_guidance
@@ -462,9 +512,9 @@ async def detect_devices(
     except AcquisitionError:
         pass
 
-    await ensure_iphone_on_wsl(reattach=reattach_usb)
-    wsl_iphone = (not running_under_wsl()) or await _wsl_lsusb_has_iphone()
-    if windows_holds_iphone_usb():
+    wsl_iphone = (not running_under_wsl()) or await _wsl_lsusb_has_iphone() or iphone_ready
+    # Hide iPhone only while Windows still owns the cable for WDA install.
+    if windows_holds_iphone_usb() and not reattach_usb:
         wsl_iphone = False
 
     code, out, _ = await _run(["idevice_id", "-l"], timeout=5)

@@ -281,12 +281,13 @@ export function useConsoleApp() {
     setError,
   });
 
-  const topBarActive =
+  const     topBarActive =
     queries.findingsLoading ||
     queries.galleryLoading ||
     queries.reportLoading ||
     queries.dashLoading ||
     acquisition.busy ||
+    runtime.devicesBusy ||
     reviewActions.bulkBusy ||
     !!reviewActions.reviewBusyId ||
     (sessionsLoading && sessionList.length === 0) ||
@@ -376,6 +377,7 @@ export function useConsoleApp() {
     authorizeNote,
     setAuthorizeNote,
     refreshDevices: runtime.refreshDevices,
+    devicesBusy: runtime.devicesBusy,
     refreshSessionList: workspace.refreshSessionList,
     refreshGallery: queries.refreshGallery,
     onPickSession: workspace.onPickSession,

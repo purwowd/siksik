@@ -75,37 +75,29 @@ function Bind-IphoneToWsl([string]$Usbipd) {
       ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
     $busid = Get-AppleBusId $Usbipd
-    $unplugged = $false
     if (-not $busid) {
-      $busid = "1-4"
-      $unplugged = $true
-      Write-Host "  iPhone belum colok; watcher --unplugged busid $busid"
-    } else {
-      Write-Host "  busid $busid"
-      if (Test-AppleAttachedToWsl $Usbipd) {
-        Write-Host "  detach dulu (AMDS sudah mati)"
-        & $Usbipd detach --busid $busid | Out-Null
-        Start-Sleep -Seconds 2
-      }
-      & $Usbipd unbind --busid $busid | Out-Null
-      Start-Sleep -Seconds 1
-      Write-Host "  bind --force (Windows tidak boleh pakai device)"
-      & $Usbipd bind --busid $busid --force
-      if ($LASTEXITCODE -ne 0) {
-        throw "usbipd bind --force gagal (exit $LASTEXITCODE)"
-      }
-      Start-Sleep -Seconds 1
+      Write-Host "  iPhone tidak terlihat di usbipd; tidak bind bus lain"
+      return
     }
+    Write-Host "  busid $busid"
+    if (Test-AppleAttachedToWsl $Usbipd) {
+      Write-Host "  detach dulu (AMDS sudah mati)"
+      & $Usbipd detach --busid $busid | Out-Null
+      Start-Sleep -Seconds 2
+    }
+    & $Usbipd unbind --busid $busid | Out-Null
+    Start-Sleep -Seconds 1
+    Write-Host "  bind --force (Windows tidak boleh pakai device)"
+    & $Usbipd bind --busid $busid --force
+    if ($LASTEXITCODE -ne 0) {
+      throw "usbipd bind --force gagal (exit $LASTEXITCODE)"
+    }
+    Start-Sleep -Seconds 1
 
     Write-Host "  attach --wsl --auto-attach"
     $attachArgs = @("attach", "--wsl", "--auto-attach", "--busid", $busid)
-    if ($unplugged) { $attachArgs += "--unplugged" }
     Start-Process -FilePath $Usbipd -ArgumentList $attachArgs -WindowStyle Hidden
 
-    if ($unplugged) {
-      Write-Host "  watcher jalan. Colok iPhone ke port USB yang sama."
-      return
-    }
     for ($i = 1; $i -le 20; $i++) {
       Start-Sleep -Seconds 1
       if (Test-AppleAttachedToWsl $Usbipd) {
